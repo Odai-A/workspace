@@ -1,5 +1,5 @@
 {
-  "timeline_index": 59,
+  "timeline_index": 66,
   "planner": {
     "Team Leader": {
       "1": {
@@ -97,14 +97,21 @@
     "55": 1,
     "57": 1,
     "58": 1,
-    "59": 1
+    "59": 1,
+    "60": 1,
+    "61": 1,
+    "62": 1,
+    "63": 1,
+    "64": 1,
+    "65": 1,
+    "66": 1
   },
   "preview_servers": {
     "cceb1d4a-a4a3-400a-9dc8-59ca6f84d94c": {
       "role": "Alex",
       "port": 5173,
       "subdomain": "inventory-management-system-uy3m8d-0adm3-84d94c",
-      "server": "feb1a1a2-9cb5-4b1f-92dd-af4b5a25d1ab",
+      "server": "05cb3aa1-3174-4068-ae48-c4514dd1fd60",
       "cmd": "cd /data/chats/0adm3/workspace/inventory_system && pnpm run dev",
       "timeline_index": 52,
       "status": "success",

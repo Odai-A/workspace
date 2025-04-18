@@ -23,6 +23,11 @@ export const NavigationProvider = ({ children }) => {
   // Get location for active route tracking
   const location = useLocation();
 
+  // Set current active route
+  const setCurrentRoute = (path) => {
+    setActiveRoute(path);
+  };
+
   // Update active route when location changes
   useEffect(() => {
     setCurrentRoute(location.pathname);
@@ -112,11 +117,6 @@ export const NavigationProvider = ({ children }) => {
     setMobileNavOpen(!mobileNavOpen);
   };
 
-  // Set current active route
-  const setCurrentRoute = (path) => {
-    setActiveRoute(path);
-  };
-
   // Close mobile nav when route changes
   useEffect(() => {
     if (mobileNavOpen) {
@@ -152,7 +152,7 @@ export const NavigationProvider = ({ children }) => {
     toggleMobileNav,
     navigationItems,
     activeRoute,
-    setActiveRoute: setCurrentRoute,
+    setCurrentRoute,
   };
 
   // Provide the navigation context to children
