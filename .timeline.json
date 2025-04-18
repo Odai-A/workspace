@@ -1,21 +1,21 @@
 {
-  "timeline_index": 66,
+  "timeline_index": 91,
   "planner": {
     "Team Leader": {
       "1": {
         "task_id": "1",
         "dependent_task_ids": [],
-        "instruction": "Create a comprehensive PRD for the Amazon Barcode Scanner Inventory Management System, including market research, competitive analysis, user stories, and detailed requirements analysis.",
+        "instruction": "Test and fix all functionality across all tabs and buttons in the Amazon Barcode Scanner Inventory Management System web application.",
         "task_type": "general",
         "code": "",
         "result": "",
         "is_success": false,
         "is_finished": true,
-        "assignee": "Emma",
-        "start_at": 1744944491.6625388,
-        "end_at": 1744944947.945897
+        "assignee": "Alex",
+        "start_at": 1744948096.1026127,
+        "end_at": 1744948564.8362725
       },
-      "current_task_id": "3",
+      "current_task_id": "1",
       "2": {
         "task_id": "2",
         "dependent_task_ids": [
@@ -43,7 +43,8 @@
         "is_success": false,
         "is_finished": false,
         "assignee": "Alex",
-        "start_at": 1744945275.3092918
+        "start_at": 1744945275.3092918,
+        "end_at": 1744948096.1026056
       }
     }
   },
@@ -104,16 +105,41 @@
     "63": 1,
     "64": 1,
     "65": 1,
-    "66": 1
+    "66": 1,
+    "67": 1,
+    "68": 1,
+    "69": 1,
+    "70": 1,
+    "71": 1,
+    "72": 1,
+    "73": 1,
+    "74": 1,
+    "75": 1,
+    "76": 1,
+    "77": 1,
+    "78": 1,
+    "79": 0,
+    "80": 1,
+    "81": 1,
+    "82": 1,
+    "83": 1,
+    "84": 1,
+    "85": 1,
+    "86": 1,
+    "87": 1,
+    "88": 1,
+    "89": 1,
+    "90": 1,
+    "91": 1
   },
   "preview_servers": {
-    "cceb1d4a-a4a3-400a-9dc8-59ca6f84d94c": {
+    "4d0a87e3-2f11-42f1-9c37-0e53bebc7383": {
       "role": "Alex",
-      "port": 5173,
-      "subdomain": "inventory-management-system-uy3m8d-0adm3-84d94c",
-      "server": "05cb3aa1-3174-4068-ae48-c4514dd1fd60",
-      "cmd": "cd /data/chats/0adm3/workspace/inventory_system && pnpm run dev",
-      "timeline_index": 52,
+      "port": 5174,
+      "subdomain": "inventory-management-system-uy3m8d-0adm3-bc7383",
+      "server": "318a52a7-892f-4fbd-894a-77d17a484e66",
+      "cmd": "pnpm run dev",
+      "timeline_index": 79,
       "status": "success",
       "logs": []
     }

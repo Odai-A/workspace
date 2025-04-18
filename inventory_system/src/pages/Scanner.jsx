@@ -217,6 +217,21 @@ const Scanner = () => {
                 onDetected={handleBarcodeDetected}
                 onError={handleScannerError}
                 scannerRunning={scannerActive}
+                scannerSettings={{
+                  inputStream: {
+                    constraints: {
+                      width: { min: 400 },
+                      height: { min: 300 },
+                      facingMode: 'environment',
+                      aspectRatio: { min: 1, max: 2 }
+                    }
+                  },
+                  locator: {
+                    patchSize: 'medium',
+                    halfSample: true
+                  },
+                  frequency: 15
+                }}
                 className="h-72 bg-black mb-4"
               />
               <Button

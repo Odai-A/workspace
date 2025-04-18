@@ -58,18 +58,44 @@ const BarcodeScanner = ({
 
     // Start scanner if scannerRunning is true
     if (scannerRunning && !initialized) {
-      Quagga.init(scannerConfig, (err) => {
-        if (err) {
-          console.error('Error initializing Quagga:', err);
-          if (onError) {
-            onError(err);
-          }
-          return;
+      // Make sure scannerConfig points to the correct DOM element
+      const updatedConfig = {
+        ...scannerConfig,
+        inputStream: {
+          ...scannerConfig.inputStream,
+          target: scannerRef.current.querySelector('.viewport') || scannerRef.current
         }
+      };
 
-        setInitialized(true);
-        Quagga.start();
-      });
+      try {
+        Quagga.init(updatedConfig, (err) => {
+          if (err) {
+            console.error('Error initializing Quagga:', err);
+            if (onError) {
+              onError(err);
+            }
+            return;
+          }
+          
+          console.log('Quagga initialized successfully');
+          setInitialized(true);
+          
+          try {
+            Quagga.start();
+            console.log('Quagga started successfully');
+          } catch (startErr) {
+            console.error('Error starting Quagga:', startErr);
+            if (onError) {
+              onError(startErr);
+            }
+          }
+        });
+      } catch (initErr) {
+        console.error('Error in Quagga initialization:', initErr);
+        if (onError) {
+          onError(initErr);
+        }
+      }
 
       // Set up barcode detection handler
       Quagga.onDetected((result) => {
@@ -155,7 +181,12 @@ const BarcodeScanner = ({
   useEffect(() => {
     return () => {
       if (initialized) {
-        Quagga.stop();
+        try {
+          Quagga.stop();
+          console.log('Quagga scanner stopped successfully');
+        } catch (err) {
+          console.error('Error stopping Quagga:', err);
+        }
       }
     };
   }, [initialized]);
