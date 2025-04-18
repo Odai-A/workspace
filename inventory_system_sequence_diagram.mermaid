@@ -1,0 +1,135 @@
+sequenceDiagram
+    %% Authentication Flow
+    participant User as User (Browser)
+    participant Auth as Authentication Service
+    participant API as API Backend
+    participant DB as Database
+    
+    %% Authentication Flow
+    User->>Auth: Login with username/password
+    Auth->>DB: Validate credentials
+    DB-->>Auth: Return user if valid
+    Auth-->>User: Return JWT token
+    
+    %% Barcode Scanning Flow
+    participant Scanner as Barcode Scanner
+    participant ProdSvc as Product Service
+    
+    User->>Scanner: Scan product barcode
+    Scanner->>API: Send barcode to /api/barcode
+    API->>DB: Search for product by FNSKU
+    DB-->>API: Return product details
+    API-->>User: Display product information
+    
+    %% Inventory Transaction Flow
+    participant InvSvc as Inventory Service
+    participant Queue as Task Queue (Celery)
+    participant Notify as Notification Service
+    
+    User->>API: Create inventory transaction
+    API->>DB: Save transaction record
+    DB-->>API: Confirm transaction saved
+    API->>Queue: Trigger update_inventory_from_transaction task
+    API-->>User: Return transaction confirmation
+    
+    Queue->>InvSvc: Process inventory update
+    InvSvc->>DB: Update inventory levels
+    DB-->>InvSvc: Confirm inventory updated
+    InvSvc->>DB: Check for low stock items
+    DB-->>InvSvc: Return low stock items
+    InvSvc->>Notify: Create notifications for low stock
+    Notify->>DB: Save notifications
+    Notify-->>User: Push real-time notification
+    
+    %% Stock Transfer Flow
+    participant SrcLoc as Source Location
+    participant DstLoc as Destination Location
+    
+    User->>API: Create stock transfer request
+    API->>DB: Save stock transfer record
+    DB-->>API: Confirm transfer created
+    API-->>User: Return transfer confirmation
+    
+    User->>API: Mark transfer as in_transit
+    API->>DB: Update transfer status
+    DB-->>API: Confirm status updated
+    API-->>User: Return updated transfer
+    
+    User->>API: Complete transfer
+    API->>Queue: Trigger complete_stock_transfer task
+    API-->>User: Return confirmation
+    
+    Queue->>InvSvc: Process transfer completion
+    InvSvc->>DB: Reduce inventory at source
+    DB-->>InvSvc: Confirm source inventory updated
+    InvSvc->>DB: Increase inventory at destination
+    DB-->>InvSvc: Confirm destination inventory updated
+    InvSvc->>DB: Update transfer status to completed
+    DB-->>InvSvc: Confirm status updated
+    InvSvc->>Notify: Create transfer completion notification
+    Notify->>DB: Save notification
+    Notify-->>User: Push real-time notification
+    
+    %% Report Generation Flow
+    participant Reports as Report Service
+    
+    User->>API: Request inventory valuation report
+    API->>Reports: Generate report
+    Reports->>DB: Fetch inventory data
+    DB-->>Reports: Return inventory items
+    Reports->>Reports: Calculate valuations
+    
+    alt CSV Format
+        Reports->>Reports: Format as CSV
+        Reports-->>User: Return CSV file for download
+    else JSON Format
+        Reports->>Reports: Format as JSON
+        Reports-->>User: Return JSON response
+    end
+    
+    %% Product Data Sync Flow
+    participant Scheduler as Scheduled Tasks
+    participant ExtAPI as External Product API
+    participant S3 as S3 Storage
+    
+    Scheduler->>Queue: Trigger product sync task
+    Queue->>ProdSvc: Execute sync_products_with_api
+    ProdSvc->>ExtAPI: Fetch latest product data
+    ExtAPI-->>ProdSvc: Return product data
+    
+    loop For each updated product
+        ProdSvc->>DB: Update product record
+        DB-->>ProdSvc: Confirm product updated
+        
+        alt New/Updated Image
+            ProdSvc->>ExtAPI: Fetch product image
+            ExtAPI-->>ProdSvc: Return image data
+            ProdSvc->>S3: Upload image
+            S3-->>ProdSvc: Confirm upload
+            ProdSvc->>DB: Update product image_url
+            DB-->>ProdSvc: Confirm update
+        end
+    end
+    
+    %% Dashboard Data Flow
+    User->>API: Request dashboard data
+    API->>DB: Get total products count
+    DB-->>API: Return count
+    API->>DB: Get low stock items count
+    DB-->>API: Return count
+    API->>DB: Get recent transactions
+    DB-->>API: Return transactions
+    API-->>User: Return dashboard data
+    
+    %% User Registration Flow (Admin-controlled)
+    participant Admin as Administrator
+    
+    Admin->>API: Create new user account
+    API->>Auth: Hash password
+    Auth-->>API: Return password hash
+    API->>DB: Save new user record
+    DB-->>API: Confirm user created
+    API->>Notify: Generate welcome notification
+    Notify->>DB: Save notification
+    API-->>Admin: Return confirmation
+    Notify-->>User: Send welcome email

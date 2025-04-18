@@ -1,0 +1,274 @@
+classDiagram
+    %% User Management Classes
+    class User {
+        +UUID user_id
+        +String username
+        +String email
+        +String first_name
+        +String last_name
+        +Boolean is_active
+        +Boolean is_staff
+        +DateTime date_joined
+        +DateTime last_login
+    }
+    
+    class Role {
+        +UUID role_id
+        +String name
+        +String description
+    }
+    
+    class UserRole {
+        +UUID user_role_id
+        +User user
+        +Role role
+        +DateTime assigned_at
+    }
+    
+    class Permission {
+        +UUID permission_id
+        +String name
+        +String codename
+        +String description
+    }
+    
+    class RolePermission {
+        +UUID role_permission_id
+        +Role role
+        +Permission permission
+    }
+    
+    %% Product & Inventory Classes
+    class Category {
+        +UUID category_id
+        +String name
+        +String description
+        +Category parent_category
+    }
+    
+    class Product {
+        +UUID product_id
+        +String sku
+        +String fnsku
+        +String asin
+        +String name
+        +String description
+        +Decimal unit_price
+        +Decimal cost_price
+        +Category category
+        +DateTime created_at
+        +DateTime updated_at
+        +Boolean is_active
+        +String image_url
+        +Decimal weight
+        +String dimensions
+        +Image barcode_image
+    }
+    
+    class Location {
+        +UUID location_id
+        +String name
+        +String address
+        +String city
+        +String state
+        +String country
+        +String postal_code
+        +Boolean is_active
+        +DateTime created_at
+        +DateTime updated_at
+    }
+    
+    class InventoryItem {
+        +UUID inventory_item_id
+        +Product product
+        +Location location
+        +Integer quantity
+        +Integer reorder_point
+        +Integer reorder_quantity
+        +DateTime created_at
+        +DateTime updated_at
+    }
+    
+    %% Transaction Classes
+    class InventoryTransaction {
+        +UUID transaction_id
+        +Product product
+        +Integer quantity
+        +String transaction_type
+        +String reference_id
+        +Location location
+        +User user
+        +DateTime transaction_date
+        +String notes
+    }
+    
+    class StockTransfer {
+        +UUID transfer_id
+        +Location from_location
+        +Location to_location
+        +String status
+        +User created_by
+        +DateTime created_at
+        +DateTime completed_at
+        +String notes
+    }
+    
+    class StockTransferItem {
+        +UUID transfer_item_id
+        +StockTransfer transfer
+        +Product product
+        +Integer quantity
+    }
+    
+    %% Notification Class
+    class Notification {
+        +UUID notification_id
+        +User user
+        +String title
+        +String message
+        +String notification_type
+        +String related_object_id
+        +String related_object_type
+        +Boolean is_read
+        +DateTime created_at
+    }
+    
+    %% API Controller Classes
+    class UserViewSet {
+        +get_queryset()
+        +get_serializer_class()
+    }
+    
+    class RoleViewSet {
+        +queryset
+        +serializer_class
+        +permission_classes
+    }
+    
+    class ProductViewSet {
+        +get_queryset()
+        +get_serializer_class()
+        +generate_barcode()
+    }
+    
+    class BarcodeScanner {
+        +post(request)
+    }
+    
+    class InventoryItemViewSet {
+        +get_queryset()
+        +get_serializer_class()
+        +low_stock()
+    }
+    
+    class InventoryTransactionViewSet {
+        +get_queryset()
+        +get_serializer_class()
+        +perform_create(serializer)
+    }
+    
+    class StockTransferViewSet {
+        +get_queryset()
+        +get_serializer_class()
+        +complete()
+    }
+    
+    class DashboardView {
+        +get(request)
+    }
+    
+    class ReportViewSet {
+        +inventory_valuation()
+    }
+    
+    %% Service Classes
+    class AuthService {
+        +login(username, password)
+        +logout()
+        +refresh_token()
+    }
+    
+    class InventoryService {
+        +update_inventory_levels(transaction)
+        +check_low_stock_items()
+        +create_stock_transfer(from_location, to_location, items)
+        +complete_stock_transfer(transfer_id)
+    }
+    
+    class NotificationService {
+        +create_notification(user, type, message)
+        +mark_as_read(notification_id)
+        +get_unread_notifications(user_id)
+        +send_email_notification(user, subject, content)
+    }
+    
+    class ReportService {
+        +generate_inventory_valuation_report(format)
+        +generate_stock_level_report(format)
+        +generate_transaction_history_report(start_date, end_date, format)
+    }
+    
+    class ProductService {
+        +fetch_product_data_from_api(identifier)
+        +update_product_from_api_data(product_id, api_data)
+        +generate_product_barcode(product_id)
+    }
+    
+    %% Task Classes
+    class AsyncTasks {
+        +update_inventory_from_transaction(transaction_id)
+        +complete_stock_transfer(transfer_id)
+        +sync_products_with_api()
+        +generate_scheduled_reports()
+        +check_low_stock_and_notify()
+    }
+    
+    %% Relationships
+    
+    %% User Management Relationships
+    User "1" -- "*" UserRole
+    Role "1" -- "*" UserRole
+    Role "1" -- "*" RolePermission
+    Permission "1" -- "*" RolePermission
+    User "1" -- "*" Notification
+    
+    %% Product & Inventory Relationships
+    Category "0..1" -- "*" Category: parent
+    Category "1" -- "*" Product
+    Product "1" -- "*" InventoryItem
+    Location "1" -- "*" InventoryItem
+    
+    %% Transaction Relationships
+    Product "1" -- "*" InventoryTransaction
+    Location "1" -- "*" InventoryTransaction
+    User "1" -- "*" InventoryTransaction
+    
+    Location "1" -- "*" StockTransfer: from
+    Location "1" -- "*" StockTransfer: to
+    User "1" -- "*" StockTransfer: created_by
+    
+    StockTransfer "1" -- "*" StockTransferItem
+    Product "1" -- "*" StockTransferItem
+    
+    %% Controller Relationships
+    UserViewSet -- User: manages
+    RoleViewSet -- Role: manages
+    ProductViewSet -- Product: manages
+    BarcodeScanner -- Product: finds
+    InventoryItemViewSet -- InventoryItem: manages
+    InventoryTransactionViewSet -- InventoryTransaction: manages
+    StockTransferViewSet -- StockTransfer: manages
+    
+    %% Service Dependencies
+    AuthService -- User: authenticates
+    InventoryService -- InventoryItem: updates
+    InventoryService -- InventoryTransaction: processes
+    InventoryService -- StockTransfer: manages
+    NotificationService -- Notification: creates
+    ReportService -- InventoryItem: reports on
+    ReportService -- InventoryTransaction: reports on
+    ProductService -- Product: updates
+    AsyncTasks -- InventoryService: uses
+    AsyncTasks -- NotificationService: uses
+    AsyncTasks -- ProductService: uses
+    AsyncTasks -- ReportService: uses
