@@ -8,7 +8,7 @@ import {
   UserIcon,
   Cog6ToothIcon,
 } from '@heroicons/react/24/outline';
-import { useAuth } from '../../contexts/AuthContext';
+import { useAuth } from '../../context/AuthContext';
 import { useNavigation } from '../../contexts/NavigationContext';
 
 const Header = () => {

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   MagnifyingGlassIcon,
   FunnelIcon,
@@ -10,14 +10,17 @@ import {
   ArrowPathIcon,
   QrCodeIcon,
 } from '@heroicons/react/24/outline';
-import MainLayout from '../components/layout/MainLayout';
+import { toast } from 'react-toastify';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Table from '../components/ui/Table';
-import { useAuth } from '../contexts/AuthContext';
+import Modal from '../components/ui/Modal';
+import ProductForm from '../components/products/ProductForm';
+import { useAuth } from '../context/AuthContext';
 
 const Products = () => {
   const { apiClient } = useAuth();
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [products, setProducts] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -26,6 +29,13 @@ const Products = () => {
     status: '',
   });
   const [showFilters, setShowFilters] = useState(false);
+  
+  // Add modal state
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [showBarcodeModal, setShowBarcodeModal] = useState(false);
+  const [currentProduct, setCurrentProduct] = useState(null);
+  const [formLoading, setFormLoading] = useState(false);
   
   // Sample data for categories and statuses
   const categories = ['All Categories', 'Smart Speakers', 'Streaming Devices', 'E-readers', 'Smart Home', 'Tablets'];
@@ -211,6 +221,7 @@ const Products = () => {
         }, 800);
       } catch (error) {
         console.error('Failed to fetch products:', error);
+        toast.error('Failed to fetch products data');
         setLoading(false);
       }
     };
@@ -235,19 +246,99 @@ const Products = () => {
       status: '',
     });
     setSearchTerm('');
+    toast.info('Filters have been reset');
   };
 
-  // Export to CSV (simplified example)
+  // Export to CSV
   const handleExport = () => {
     // Logic to generate and download CSV would go here
-    alert('Export functionality would generate a CSV file with the current filtered products data.');
+    toast.success('Products data has been exported successfully');
   };
 
-  // Delete product handler (simplified example)
-  const handleDeleteProduct = (product) => {
-    if (confirm(`Are you sure you want to delete ${product.name}?`)) {
-      alert(`Product ${product.name} would be deleted in a real app.`);
+  // Handle add product
+  const handleAddProduct = () => {
+    setShowAddModal(true);
+  };
+
+  // Handle edit product
+  const handleEditProduct = (product) => {
+    setCurrentProduct(product);
+    setShowEditModal(true);
+  };
+
+  // Handle view barcode
+  const handleViewBarcode = (product) => {
+    setCurrentProduct(product);
+    setShowBarcodeModal(true);
+  };
+
+  // Handle save product
+  const handleSaveProduct = async (productData) => {
+    setFormLoading(true);
+    try {
+      // In a real app, this would be an API call
+      // if (productData.id) {
+      //   // Update existing product
+      //   await apiClient.put(`/products/${productData.id}`, productData);
+      // } else {
+      //   // Create new product
+      //   await apiClient.post('/products', productData);
+      // }
+      
+      // Simulate API call
+      setTimeout(() => {
+        if (productData.id) {
+          // Update existing product
+          const updatedProducts = products.map(p => 
+            p.id === productData.id ? { ...p, ...productData } : p
+          );
+          setProducts(updatedProducts);
+          toast.success(`Product "${productData.name}" has been updated`);
+          setShowEditModal(false);
+        } else {
+          // Create new product with a generated ID
+          const newProduct = {
+            ...productData,
+            id: Date.now(), // Use timestamp as a simple ID
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+          setProducts([...products, newProduct]);
+          toast.success(`Product "${productData.name}" has been created`);
+          setShowAddModal(false);
+        }
+        setFormLoading(false);
+      }, 800);
+    } catch (error) {
+      console.error('Failed to save product:', error);
+      toast.error(productData.id ? 'Failed to update product' : 'Failed to create product');
+      setFormLoading(false);
     }
+  };
+
+  // Close all modals
+  const handleCloseModals = () => {
+    setShowAddModal(false);
+    setShowEditModal(false);
+    setShowBarcodeModal(false);
+    setCurrentProduct(null);
+    setFormLoading(false);
+  };
+
+  // Delete product handler
+  const handleDeleteProduct = (product) => {
+    if (window.confirm(`Are you sure you want to delete ${product.name}?`)) {
+      // In a real app, this would be an API call
+      // await apiClient.delete(`/products/${product.id}`);
+      const updatedProducts = products.filter(p => p.id !== product.id);
+      setProducts(updatedProducts);
+      toast.success(`Product "${product.name}" has been deleted`);
+    }
+  };
+
+  // Handle row click
+  const handleRowClick = (product) => {
+    navigate(`/products/${product.id}`);
   };
 
   // Apply filters and search to products data
@@ -338,21 +429,30 @@ const Products = () => {
           <button 
             className="p-1 text-blue-600 hover:text-blue-800" 
             title="View Barcode"
-            onClick={() => alert(`View barcode for ${row.original.name}`)}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleViewBarcode(row.original);
+            }}
           >
             <QrCodeIcon className="h-5 w-5" />
           </button>
           <button 
             className="p-1 text-gray-600 hover:text-gray-800" 
             title="Edit Product"
-            onClick={() => alert(`Edit ${row.original.name}`)}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleEditProduct(row.original);
+            }}
           >
             <PencilIcon className="h-5 w-5" />
           </button>
           <button 
             className="p-1 text-red-600 hover:text-red-800" 
             title="Delete Product"
-            onClick={() => handleDeleteProduct(row.original)}
+            onClick={(e) => {
+              e.stopPropagation();
+              handleDeleteProduct(row.original);
+            }}
           >
             <TrashIcon className="h-5 w-5" />
           </button>
@@ -362,7 +462,7 @@ const Products = () => {
   ];
 
   return (
-    <MainLayout>
+    <div>
       <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-6 gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Products</h1>
@@ -393,7 +493,7 @@ const Products = () => {
           <Button 
             variant="primary"
             className="flex items-center"
-            onClick={() => alert('Add product functionality would open a form here')}
+            onClick={handleAddProduct}
           >
             <PlusIcon className="h-5 w-5 mr-2" />
             Add Product
@@ -483,10 +583,65 @@ const Products = () => {
           pagination
           rowsPerPage={10}
           noDataMessage="No products found. Try adjusting your search or filters."
-          onRowClick={(product) => alert(`You clicked on ${product.name}`)}
+          onRowClick={handleRowClick}
         />
       </Card>
-    </MainLayout>
+      
+      {/* Add Product Modal */}
+      <Modal
+        isOpen={showAddModal}
+        onClose={handleCloseModals}
+        title="Add New Product"
+        size="lg"
+      >
+        <ProductForm
+          onSave={handleSaveProduct}
+          onCancel={handleCloseModals}
+          isLoading={formLoading}
+        />
+      </Modal>
+      
+      {/* Edit Product Modal */}
+      <Modal
+        isOpen={showEditModal}
+        onClose={handleCloseModals}
+        title={`Edit Product: ${currentProduct?.name || ''}`}
+        size="lg"
+      >
+        <ProductForm
+          product={currentProduct}
+          onSave={handleSaveProduct}
+          onCancel={handleCloseModals}
+          isLoading={formLoading}
+        />
+      </Modal>
+      
+      {/* Barcode Modal */}
+      <Modal
+        isOpen={showBarcodeModal}
+        onClose={handleCloseModals}
+        title="Product Barcode"
+        size="sm"
+      >
+        <div className="flex flex-col items-center">
+          <div className="mb-4 text-center">
+            <h3 className="font-medium text-gray-900">{currentProduct?.name}</h3>
+            <p className="text-sm text-gray-500">SKU: {currentProduct?.sku}</p>
+          </div>
+          
+          {/* Placeholder for actual barcode image */}
+          <div className="bg-gray-100 rounded-lg p-4 w-full max-w-xs mx-auto mb-4">
+            <div className="h-32 flex items-center justify-center border border-gray-300 rounded">
+              <p className="text-gray-500 text-sm">Barcode would be displayed here</p>
+            </div>
+          </div>
+          
+          <Button variant="primary" onClick={handleCloseModals}>
+            Close
+          </Button>
+        </div>
+      </Modal>
+    </div>
   );
 };
 

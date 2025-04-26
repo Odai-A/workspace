@@ -43,13 +43,6 @@ export const NavigationProvider = ({ children }) => {
       role: null,
     },
     {
-      name: 'Inventory',
-      path: '/inventory',
-      icon: 'ArchiveBoxIcon',
-      permission: 'view_inventory',
-      role: null,
-    },
-    {
       name: 'Products',
       path: '/products',
       icon: 'TagIcon',
@@ -63,32 +56,20 @@ export const NavigationProvider = ({ children }) => {
       permission: 'use_scanner',
       role: null,
     },
+    /* Removed Scan Tasks
     {
-      name: 'Transactions',
-      path: '/transactions',
-      icon: 'ArrowsRightLeftIcon',
-      permission: 'view_transactions',
+      name: 'Scan Tasks',
+      path: '/scan-tasks',
+      icon: 'ClipboardDocumentListIcon',
+      permission: 'use_scanner',
       role: null,
     },
-    {
-      name: 'Shipments',
-      path: '/shipments',
-      icon: 'TruckIcon',
-      permission: 'view_shipments',
-      role: null,
-    },
+    */
     {
       name: 'Reports',
       path: '/reports',
       icon: 'ChartBarIcon',
       permission: 'view_reports',
-      role: null,
-    },
-    {
-      name: 'Locations',
-      path: '/locations',
-      icon: 'MapPinIcon',
-      permission: 'view_locations',
       role: null,
     },
     {

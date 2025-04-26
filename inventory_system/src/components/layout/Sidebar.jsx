@@ -15,7 +15,7 @@ import {
   Cog6ToothIcon,
 } from '@heroicons/react/24/outline';
 import { useNavigation } from '../../contexts/NavigationContext';
-import { useAuth } from '../../contexts/AuthContext';
+import { useAuth } from '../../context/AuthContext';
 
 // Map for icon components
 const iconMap = {

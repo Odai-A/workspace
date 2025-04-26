@@ -1,372 +1,301 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { 
   QrCodeIcon, 
   XMarkIcon, 
   InformationCircleIcon,
-  ArrowUpIcon,
-  ArrowDownIcon,
-  MagnifyingGlassIcon
+  MagnifyingGlassIcon,
+  ArrowPathIcon
 } from '@heroicons/react/24/outline';
 import { toast } from 'react-toastify';
-
-import MainLayout from '../components/layout/MainLayout';
-import BarcodeScanner from '../components/scanner/BarcodeScanner';
-import Button from '../components/ui/Button';
+import { Dialog } from '@headlessui/react';
+import { FiHash, FiCamera, FiBox, FiTag, FiInfo } from 'react-icons/fi';
+import BarcodeReader from '../components/BarcodeReader';
 import Card from '../components/ui/Card';
-import { useAuth } from '../contexts/AuthContext';
-
-// Mode options for the scanner
-const SCANNER_MODES = {
-  LOOKUP: 'lookup',
-  STOCK_IN: 'stock_in',
-  STOCK_OUT: 'stock_out',
-};
-
-// Sample product data - in a real app, this would come from the API
-const sampleProducts = [
-  { id: 1, sku: '123456789012', name: 'Amazon Echo Dot', price: 49.99, category: 'Smart Speakers' },
-  { id: 2, sku: '036000291452', name: 'Fire TV Stick', price: 39.99, category: 'Streaming Devices' },
-  { id: 3, sku: '042100005264', name: 'Kindle Paperwhite', price: 129.99, category: 'E-readers' },
-  { id: 4, sku: '812345678901', name: 'Ring Doorbell', price: 99.99, category: 'Smart Home' },
-];
+import Button from '../components/ui/Button';
+import { productLookupService } from '../services/databaseService';
+import { fetchProductByFnsku } from '../services/api';
 
 const Scanner = () => {
-  const navigate = useNavigate();
-  const { apiClient } = useAuth();
-  
-  const [scannerActive, setScannerActive] = useState(false);
-  const [scanMode, setScanMode] = useState(SCANNER_MODES.LOOKUP);
-  const [scannedProduct, setScannedProduct] = useState(null);
-  const [quantity, setQuantity] = useState(1);
-  const [location, setLocation] = useState('');
+  const [scanning, setScanning] = useState(false);
+  const [scannedCode, setScannedCode] = useState('');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const [manualInput, setManualInput] = useState('');
+  const [productInfo, setProductInfo] = useState(null);
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const mode = searchParams.get('mode');
+  const returnUrl = searchParams.get('return');
   
-  // Sample locations - in a real app, these would be fetched from the API
-  const locations = ['Warehouse A', 'Warehouse B', 'Warehouse C', 'Warehouse D'];
-  
-  // Reset state when scan mode changes
-  useEffect(() => {
-    setScannedProduct(null);
-    setQuantity(1);
-    setError(null);
-  }, [scanMode]);
+  const handleBarcodeDetected = ({ code }) => {
+    setScannedCode(code);
+    setScanning(false);
+    toast.success(`Code detected: ${code}`);
+    lookupProduct(code);
+  };
 
-  // Handle scanner errors
   const handleScannerError = (err) => {
     console.error('Scanner error:', err);
-    setError('Failed to initialize the barcode scanner. Please check camera permissions.');
-    setScannerActive(false);
+    toast.error('Scanner error: ' + (err.message || 'Unknown error'));
+    setScanning(false);
   };
 
-  // Handle barcode detection
-  const handleBarcodeDetected = async ({ code, format, confidence }) => {
-    // Stop scanner after successful detection
-    setScannerActive(false);
+  const handleManualSubmit = (e) => {
+    e.preventDefault();
+    if (!manualInput.trim()) {
+      toast.warning('Please enter a valid FNSKU code');
+      return;
+    }
+    setScannedCode(manualInput);
+    lookupProduct(manualInput);
+  };
+
+  const lookupProduct = async (code) => {
+    if (!code) return;
     
     setLoading(true);
+    setProductInfo(null); // Reset product info at the start of a new lookup
     try {
-      // In a real app, we would fetch product from the API
-      // const response = await apiClient.get(`/products/barcode/${code}`);
-      // const product = response.data;
+      // First check if we have this product cached in our database
+      try {
+        // Use the original service function name
+        const cachedProduct = await productLookupService.getProductByFnsku(code); 
+        
+        if (cachedProduct) {
+          console.log('Found product in database:', cachedProduct);
+          setProductInfo(cachedProduct); // Restore setting state on cache hit
+          toast.info('Product found in local database');
+          setLoading(false);
+          return; // Restore early return on cache hit
+        }
+      } catch (dbError) {
+        // Log the specific error for cache check failure
+        console.error('Error checking local database cache:', dbError);
+        // Continue to API lookup if database check fails
+      }
       
-      // Simulate API call with sample data
-      const product = sampleProducts.find(p => p.sku === code);
+      console.log(`Code ${code} not in cache, proceeding to API lookup.`); // Restore log
       
-      if (product) {
-        setScannedProduct(product);
-        toast.success(`Barcode detected: ${code} (${format})`);
+      // Determine if this is likely an FNSKU code
+      const isFnsku = code.startsWith('X') && code.length >= 10;
+      
+      if (!isFnsku) {
+        toast.warning('The scanned code does not appear to be an FNSKU. Try a different code.');
+        setLoading(false);
+        return;
+      }
+      
+      // Call our API service function - restore useMock: false
+      // fetchProductByFnsku handles saving internally now.
+      const productDetails = await fetchProductByFnsku(code, { useMock: false }); 
+      console.log('API returned product details:', productDetails);
+      
+      // Restore the simpler check and state setting
+      if (productDetails) { 
+        setProductInfo(productDetails); 
+        toast.success('Product details retrieved successfully');
+        // No need for the manual save block here anymore
       } else {
-        // Product not found
-        setError(`No product found with barcode ${code}`);
-        toast.error(`Product not found: ${code}`);
+        // Handle API error response - original mock logic remains
+        toast.error('Could not find product information.'); // Simplified error
+        
+        // Create a mock product for demo purposes (or handle error differently)
+        const mockProduct = {
+          fnsku: code,
+          asin: `B0${Math.random().toString(36).substring(2, 10).toUpperCase()}`,
+          name: `Amazon Product (FNSKU: ${code})`,
+          description: 'This is a mock product generated for demonstration purposes.',
+          price: parseFloat((Math.random() * 100 + 10).toFixed(2)),
+          category: 'Mock Category',
+          image_url: 'https://via.placeholder.com/300',
+          condition: 'New',
+          lookup_timestamp: new Date().toISOString(),
+          source: 'Mock Data'
+        };
+        
+        setProductInfo(mockProduct);
+        toast.info('Using mock data for demonstration');
       }
-    } catch (err) {
-      console.error('Error fetching product:', err);
-      setError('Failed to fetch product details');
-      toast.error('Failed to fetch product details');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Process the scanned item based on the selected mode
-  const handleProcessItem = async () => {
-    if (!scannedProduct) return;
-    
-    setLoading(true);
-    try {
-      // In a real app, these would be API calls
-      switch (scanMode) {
-        case SCANNER_MODES.STOCK_IN:
-          // await apiClient.post('/inventory/stock-in', {
-          //   product_id: scannedProduct.id,
-          //   quantity,
-          //   location,
-          // });
-          toast.success(`Added ${quantity} units of ${scannedProduct.name} to ${location}`);
-          break;
-          
-        case SCANNER_MODES.STOCK_OUT:
-          // await apiClient.post('/inventory/stock-out', {
-          //   product_id: scannedProduct.id,
-          //   quantity,
-          //   location,
-          // });
-          toast.success(`Removed ${quantity} units of ${scannedProduct.name} from ${location}`);
-          break;
-          
-        case SCANNER_MODES.LOOKUP:
-          // No action needed for lookup, just show the product details
-          break;
-      }
+    } catch (error) {
+      // This is our final fallback for any unexpected errors
+      console.error('Unexpected error looking up product:', error);
+      toast.error('An unexpected error occurred: ' + (error.message || 'Unknown error'));
       
-      // Reset for next scan
-      setScannedProduct(null);
-      setQuantity(1);
-    } catch (err) {
-      console.error('Error processing item:', err);
-      toast.error('Failed to process item');
+      // Provide mock data as a last resort
+      const fallbackProduct = {
+        fnsku: code,
+        asin: 'B0UNKNOWN',
+        name: `Scanned Product (FNSKU: ${code})`,
+        description: 'Product information could not be retrieved due to an error.',
+        price: 0,
+        category: 'Unknown',
+        image_url: 'https://via.placeholder.com/300?text=Error',
+        condition: 'Unknown',
+        lookup_timestamp: new Date().toISOString(),
+        source: 'Error Fallback'
+      };
+      
+      setProductInfo(fallbackProduct);
     } finally {
       setLoading(false);
     }
   };
 
-  // Navigate to product details page
-  const handleViewProductDetails = () => {
-    if (scannedProduct) {
-      navigate(`/products/${scannedProduct.id}`);
-    }
-  };
-
-  // Reset the scanner
   const handleReset = () => {
-    setScannedProduct(null);
-    setQuantity(1);
-    setError(null);
-    setScannerActive(false);
+    setScannedCode('');
+    setManualInput('');
+    setProductInfo(null);
   };
 
   return (
-    <MainLayout>
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Barcode Scanner</h1>
-        <p className="text-gray-600">
-          Scan product barcodes to quickly lookup items or process inventory operations.
-        </p>
-      </div>
+    <div className="container mx-auto px-4 py-8">
+      <h1 className="text-2xl font-bold mb-6">FNSKU Scanner</h1>
       
-      {/* Mode Selection */}
-      <div className="mb-6">
-        <div className="bg-white rounded-lg shadow-sm p-4 flex flex-wrap gap-4">
-          <Button
-            variant={scanMode === SCANNER_MODES.LOOKUP ? 'primary' : 'outline'}
-            onClick={() => setScanMode(SCANNER_MODES.LOOKUP)}
-            className="flex items-center"
-          >
-            <MagnifyingGlassIcon className="h-5 w-5 mr-2" />
-            Lookup Item
-          </Button>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+        <Card className="p-4">
+          <h2 className="text-lg font-semibold mb-4">Scan FNSKU Barcode</h2>
           
-          <Button
-            variant={scanMode === SCANNER_MODES.STOCK_IN ? 'primary' : 'outline'}
-            onClick={() => setScanMode(SCANNER_MODES.STOCK_IN)}
-            className="flex items-center"
-          >
-            <ArrowDownIcon className="h-5 w-5 mr-2" />
-            Stock In
-          </Button>
+          <div className="mb-4">
+            <button
+              onClick={() => setScanning(!scanning)}
+              className={`w-full flex items-center justify-center px-4 py-2 rounded-lg ${
+                scanning ? 'bg-red-600 text-white' : 'bg-blue-600 text-white'
+              }`}
+            >
+              {scanning ? (
+                <>
+                  <XMarkIcon className="w-5 h-5 mr-2" />
+                  Stop Scanning
+                </>
+              ) : (
+                <>
+                  <FiCamera className="w-5 h-5 mr-2" />
+                  Start Scanner
+                </>
+              )}
+            </button>
+          </div>
           
-          <Button
-            variant={scanMode === SCANNER_MODES.STOCK_OUT ? 'primary' : 'outline'}
-            onClick={() => setScanMode(SCANNER_MODES.STOCK_OUT)}
-            className="flex items-center"
-          >
-            <ArrowUpIcon className="h-5 w-5 mr-2" />
-            Stock Out
-          </Button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Scanner Section */}
-        <Card 
-          title="Barcode Scanner"
-          subtitle="Position the barcode within the viewfinder"
-        >
-          {!scannerActive ? (
-            <div className="flex flex-col items-center justify-center p-10 border-2 border-dashed border-gray-300 rounded-lg bg-gray-50 mb-4">
-              <QrCodeIcon className="h-16 w-16 text-gray-400 mb-4" />
-              <p className="text-center text-gray-500 mb-4">
-                Click the button below to activate the camera and scan a barcode
-              </p>
-              <Button
-                variant="primary"
-                size="lg"
-                onClick={() => setScannerActive(true)}
-                className="flex items-center"
-              >
-                <QrCodeIcon className="h-5 w-5 mr-2" />
-                Start Scanning
-              </Button>
-            </div>
-          ) : (
-            <div className="relative">
-              <BarcodeScanner
+          {scanning && (
+            <div className="mb-4 border rounded-lg p-2 bg-gray-100 dark:bg-gray-800">
+              <BarcodeReader
+                active={scanning}
                 onDetected={handleBarcodeDetected}
                 onError={handleScannerError}
-                scannerRunning={scannerActive}
-                scannerSettings={{
-                  inputStream: {
-                    constraints: {
-                      width: { min: 400 },
-                      height: { min: 300 },
-                      facingMode: 'environment',
-                      aspectRatio: { min: 1, max: 2 }
-                    }
-                  },
-                  locator: {
-                    patchSize: 'medium',
-                    halfSample: true
-                  },
-                  frequency: 15
-                }}
-                className="h-72 bg-black mb-4"
+                className="w-full h-64"
               />
-              <Button
-                variant="outline"
-                size="sm"
-                className="absolute top-2 right-2 bg-white bg-opacity-70"
-                onClick={() => setScannerActive(false)}
+            </div>
+          )}
+          
+          <div className="mt-4">
+            <p className="text-sm text-gray-600 mb-2">Or enter FNSKU manually:</p>
+            <form onSubmit={handleManualSubmit} className="flex">
+              <input
+                type="text"
+                value={manualInput}
+                onChange={(e) => setManualInput(e.target.value)}
+                placeholder="Enter FNSKU (e.g., X000ABC123)"
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-l-md focus:ring-blue-500 focus:border-blue-500"
+              />
+              <button
+                type="submit"
+                className="bg-blue-600 text-white px-4 py-2 rounded-r-md hover:bg-blue-700"
               >
-                <XMarkIcon className="h-5 w-5" />
-              </Button>
-            </div>
-          )}
-          
-          {error && (
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-700 rounded-md text-sm flex items-start">
-              <InformationCircleIcon className="h-5 w-5 text-red-400 mr-2 flex-shrink-0 mt-0.5" />
-              <span>{error}</span>
-            </div>
-          )}
-          
-          <div className="flex flex-col sm:flex-row sm:justify-between gap-3">
-            <Button
-              variant="secondary"
-              onClick={handleReset}
-            >
-              Reset Scanner
-            </Button>
-            
-            <Button
-              variant="primary"
-              disabled={!scannedProduct}
-              onClick={handleViewProductDetails}
-            >
-              View Product Details
-            </Button>
+                <MagnifyingGlassIcon className="h-5 w-5" />
+              </button>
+            </form>
           </div>
         </Card>
         
-        {/* Results Section */}
-        <Card title={scanMode === SCANNER_MODES.LOOKUP ? "Product Information" : "Process Item"}>
+        <Card className="p-4">
+          <h2 className="text-lg font-semibold mb-4">Scan Results</h2>
+          
           {loading ? (
-            <div className="flex justify-center items-center h-56">
-              <svg className="animate-spin h-8 w-8 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-              </svg>
+            <div className="flex justify-center items-center h-40">
+              <div className="animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-blue-500"></div>
             </div>
-          ) : scannedProduct ? (
+          ) : scannedCode ? (
             <div>
-              {/* Product Details */}
-              <div className="mb-6">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-                  <div>
-                    <p className="text-sm text-gray-500">Product Name</p>
-                    <p className="text-lg font-medium">{scannedProduct.name}</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-500">SKU/Barcode</p>
-                    <p className="text-lg font-medium">{scannedProduct.sku}</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-500">Price</p>
-                    <p className="text-lg font-medium">${scannedProduct.price.toFixed(2)}</p>
-                  </div>
-                  <div>
-                    <p className="text-sm text-gray-500">Category</p>
-                    <p className="text-lg font-medium">{scannedProduct.category}</p>
-                  </div>
+              <div className="p-4 border rounded-lg bg-green-50 dark:bg-green-900 mb-4">
+                <h3 className="text-md font-semibold mb-2">Scanned Code:</h3>
+                <div className="flex items-center">
+                  <FiHash className="w-5 h-5 mr-2" />
+                  <span className="text-lg font-mono">{scannedCode}</span>
                 </div>
               </div>
-
-              {/* Stock Operations Form (only for stock in/out modes) */}
-              {scanMode !== SCANNER_MODES.LOOKUP && (
-                <div className="space-y-4 border-t pt-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label htmlFor="quantity" className="block text-sm font-medium text-gray-700 mb-1">
-                        Quantity
-                      </label>
-                      <input
-                        type="number"
-                        id="quantity"
-                        className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-                        value={quantity}
-                        onChange={(e) => setQuantity(Math.max(1, parseInt(e.target.value) || 0))}
-                        min="1"
-                      />
+              
+              {productInfo && (
+                <div className="p-4 border rounded-lg bg-blue-50 dark:bg-blue-900">
+                  <h3 className="text-md font-semibold mb-2">Product Information:</h3>
+                  <div className="space-y-2">
+                    <div className="flex items-start">
+                      <FiBox className="w-5 h-5 mr-2 mt-1" />
+                      <div>
+                        <span className="font-semibold">Name:</span> {productInfo.name}
+                      </div>
                     </div>
-                    <div>
-                      <label htmlFor="location" className="block text-sm font-medium text-gray-700 mb-1">
-                        Location
-                      </label>
-                      <select
-                        id="location"
-                        className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-                        value={location}
-                        onChange={(e) => setLocation(e.target.value)}
-                        required
-                      >
-                        <option value="">Select a location</option>
-                        {locations.map((loc) => (
-                          <option key={loc} value={loc}>{loc}</option>
-                        ))}
-                      </select>
+                    <div className="flex items-center">
+                      <FiTag className="w-5 h-5 mr-2" />
+                      <div className="flex items-center space-x-2">
+                        <span className="font-semibold">ASIN:</span>
+                        <span>{productInfo.asin || 'N/A'}</span>
+                        {productInfo.asin && (
+                          <button
+                            onClick={() => window.open(`https://www.amazon.com/dp/${productInfo.asin}`, '_blank')}
+                            className="ml-2 inline-flex items-center px-2 py-1 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-yellow-500 hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-400"
+                            title="View this ASIN on Amazon Product Page"
+                          >
+                            <MagnifyingGlassIcon className="h-3 w-3 mr-1" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-start">
+                      <FiInfo className="w-5 h-5 mr-2 mt-1" />
+                      <div>
+                        <span className="font-semibold">Description:</span> {productInfo.description || 'No description available'}
+                      </div>
+                    </div>
+                    <div className="flex items-start">
+                      <span className="font-semibold">Price:</span> ${productInfo.price ? productInfo.price.toFixed(2) : '0.00'}
+                    </div>
+                    <div className="flex items-start">
+                      <span className="font-semibold">Category:</span> {productInfo.category || 'Uncategorized'}
                     </div>
                   </div>
-                  
-                  <Button
-                    variant={scanMode === SCANNER_MODES.STOCK_IN ? 'success' : 'danger'}
-                    fullWidth
-                    size="lg"
-                    disabled={!location}
-                    onClick={handleProcessItem}
-                  >
-                    {scanMode === SCANNER_MODES.STOCK_IN ? 'Confirm Stock In' : 'Confirm Stock Out'}
-                  </Button>
                 </div>
               )}
+              
+              <div className="flex justify-end mt-4">
+                <Button
+                  variant="outline"
+                  onClick={handleReset}
+                  className="flex items-center"
+                >
+                  <ArrowPathIcon className="h-5 w-5 mr-2" />
+                  Reset
+                </Button>
+              </div>
             </div>
           ) : (
-            <div className="flex flex-col items-center justify-center h-56 text-center">
-              <QrCodeIcon className="h-12 w-12 text-gray-300 mb-3" />
-              <p className="text-gray-500">
-                {scanMode === SCANNER_MODES.LOOKUP 
-                  ? 'Scan a barcode to view product information'
-                  : scanMode === SCANNER_MODES.STOCK_IN
-                    ? 'Scan a barcode to add items to inventory' 
-                    : 'Scan a barcode to remove items from inventory'
-                }
-              </p>
+            <div className="flex flex-col items-center justify-center h-40 text-gray-500">
+              <QrCodeIcon className="h-10 w-10 mb-2" />
+              <p>No barcode scanned yet</p>
+              <p className="text-sm">Scan or enter an FNSKU code to see results</p>
             </div>
           )}
         </Card>
       </div>
-    </MainLayout>
+      
+      <div className="flex justify-center">
+        <button 
+          onClick={() => navigate(returnUrl || -1)}
+          className="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded-lg"
+        >
+          Back
+        </button>
+      </div>
+    </div>
   );
 };
 

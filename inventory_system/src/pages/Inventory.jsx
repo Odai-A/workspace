@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   MagnifyingGlassIcon,
   FunnelIcon,
@@ -7,16 +7,22 @@ import {
   ChevronDownIcon,
   XMarkIcon,
   ArrowPathIcon,
+  AdjustmentsHorizontalIcon,
+  PlusIcon,
 } from '@heroicons/react/24/outline';
-import MainLayout from '../components/layout/MainLayout';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Table from '../components/ui/Table';
 import InventoryLevelBadge from '../components/inventory/InventoryLevelBadge';
+import AddStockModal from '../components/inventory/AddStockModal';
 import { useAuth } from '../contexts/AuthContext';
+import { toast } from 'react-toastify';
+import { inventoryService } from '../config/supabaseClient';
+import { productLookupService } from '../services/databaseService';
 
 const Inventory = () => {
   const { apiClient } = useAuth();
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [inventoryItems, setInventoryItems] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -26,158 +32,56 @@ const Inventory = () => {
     category: '',
   });
   const [showFilters, setShowFilters] = useState(false);
+  const [showAddStockModal, setShowAddStockModal] = useState(false);
   
   // Sample data for locations, categories, etc.
   const locations = ['All Locations', 'Warehouse A', 'Warehouse B', 'Warehouse C', 'Warehouse D'];
   const categories = ['All Categories', 'Smart Speakers', 'Streaming Devices', 'E-readers', 'Smart Home', 'Tablets'];
   const statuses = ['All', 'In Stock', 'Low Stock', 'Out of Stock'];
   
-  // Sample inventory data - in a real app, this would come from an API
-  const sampleInventoryData = [
-    { 
-      id: 1, 
-      product_id: 1,
-      product_name: 'Amazon Echo Dot', 
-      sku: '123456789012', 
-      location: 'Warehouse A', 
-      quantity: 245, 
-      min_quantity: 50,
-      category: 'Smart Speakers',
-      last_updated: '2023-04-15T14:30:00Z' 
-    },
-    { 
-      id: 2, 
-      product_id: 1,
-      product_name: 'Amazon Echo Dot', 
-      sku: '123456789012', 
-      location: 'Warehouse B', 
-      quantity: 120, 
-      min_quantity: 50,
-      category: 'Smart Speakers',
-      last_updated: '2023-04-15T14:30:00Z' 
-    },
-    { 
-      id: 3, 
-      product_id: 2,
-      product_name: 'Fire TV Stick', 
-      sku: '036000291452', 
-      location: 'Warehouse A', 
-      quantity: 30, 
-      min_quantity: 40,
-      category: 'Streaming Devices',
-      last_updated: '2023-04-16T09:15:00Z' 
-    },
-    { 
-      id: 4, 
-      product_id: 2,
-      product_name: 'Fire TV Stick', 
-      sku: '036000291452', 
-      location: 'Warehouse C', 
-      quantity: 58, 
-      min_quantity: 40,
-      category: 'Streaming Devices',
-      last_updated: '2023-04-16T09:15:00Z' 
-    },
-    { 
-      id: 5, 
-      product_id: 3,
-      product_name: 'Kindle Paperwhite', 
-      sku: '042100005264', 
-      location: 'Warehouse B', 
-      quantity: 62, 
-      min_quantity: 30,
-      category: 'E-readers',
-      last_updated: '2023-04-16T11:45:00Z' 
-    },
-    { 
-      id: 6, 
-      product_id: 3,
-      product_name: 'Kindle Paperwhite', 
-      sku: '042100005264', 
-      location: 'Warehouse D', 
-      quantity: 18, 
-      min_quantity: 30,
-      category: 'E-readers',
-      last_updated: '2023-04-16T11:45:00Z' 
-    },
-    { 
-      id: 7, 
-      product_id: 4,
-      product_name: 'Ring Doorbell', 
-      sku: '812345678901', 
-      location: 'Warehouse C', 
-      quantity: 0, 
-      min_quantity: 15,
-      category: 'Smart Home',
-      last_updated: '2023-04-17T08:20:00Z' 
-    },
-    { 
-      id: 8, 
-      product_id: 5,
-      product_name: 'Amazon Echo Show', 
-      sku: '712345678901', 
-      location: 'Warehouse A', 
-      quantity: 37, 
-      min_quantity: 25,
-      category: 'Smart Speakers',
-      last_updated: '2023-04-17T10:10:00Z' 
-    },
-    { 
-      id: 9, 
-      product_id: 6,
-      product_name: 'Fire HD Tablet', 
-      sku: '612345678901', 
-      location: 'Warehouse B', 
-      quantity: 12, 
-      min_quantity: 20,
-      category: 'Tablets',
-      last_updated: '2023-04-17T13:45:00Z' 
-    },
-    { 
-      id: 10, 
-      product_id: 7,
-      product_name: 'Amazon Smart Plug', 
-      sku: '512345678901', 
-      location: 'Warehouse D', 
-      quantity: 85, 
-      min_quantity: 30,
-      category: 'Smart Home',
-      last_updated: '2023-04-17T15:30:00Z' 
-    },
-  ];
-
   // Fetch inventory data on component mount
   useEffect(() => {
-    const fetchInventory = async () => {
-      setLoading(true);
-      try {
-        // In a real app, this would be an API call
-        // const response = await apiClient.get('/inventory');
-        // setInventoryItems(response.data);
-        
-        // Using sample data for now
-        setTimeout(() => {
-          setInventoryItems(sampleInventoryData);
-          setLoading(false);
-        }, 800);
-      } catch (error) {
-        console.error('Failed to fetch inventory:', error);
-        setLoading(false);
-      }
-    };
-    
     fetchInventory();
   }, []);
 
+  // Fetch inventory data from Supabase
+  const fetchInventory = async () => {
+    setLoading(true);
+    try {
+      // Use the inventoryService to get inventory data
+      const items = await inventoryService.getInventory();
+      
+      if (items && items.length > 0) {
+        setInventoryItems(items);
+      } else {
+        // If no items found, you might want to show sample data for demo purposes
+        // or just display an empty state
+        toast.info('No inventory items found. Add some items to get started.');
+      }
+    } catch (error) {
+      console.error('Failed to fetch inventory:', error);
+      toast.error('Failed to fetch inventory data. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   // Format date for display
   const formatDate = (dateString) => {
-    const date = new Date(dateString);
-    return new Intl.DateTimeFormat('en-US', {
-      month: 'short',
-      day: 'numeric',
-      hour: 'numeric',
-      minute: 'numeric',
-    }).format(date);
+    if (!dateString) return 'N/A';
+    
+    try {
+      const date = new Date(dateString);
+      return new Intl.DateTimeFormat('en-US', {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: 'numeric',
+      }).format(date);
+    } catch (error) {
+      console.error('Error formatting date:', error);
+      return 'Invalid date';
+    }
   };
 
   // Reset filters
@@ -188,112 +92,313 @@ const Inventory = () => {
       category: '',
     });
     setSearchTerm('');
+    toast.info('Filters have been reset');
   };
 
-  // Export to CSV (simplified example)
+  // Export to CSV
   const handleExport = () => {
-    // Logic to generate and download CSV would go here
-    alert('Export functionality would generate a CSV file with the current filtered inventory data.');
+    try {
+      // Filter items if needed based on current filters/search
+      const dataToExport = getFilteredInventory();
+      
+      // Convert data to CSV format
+      const headers = ['Product Name', 'SKU', 'Quantity', 'Min Quantity', 'Location', 'Category', 'Status', 'Last Updated'];
+      
+      const csvRows = [
+        headers.join(','),
+        ...dataToExport.map(item => [
+          `"${(item.product_name || item.name || '').replace(/"/g, '""')}"`,
+          `"${(item.sku || '').replace(/"/g, '""')}"`,
+          item.quantity || 0,
+          item.min_quantity || 0,
+          `"${(item.location || '').replace(/"/g, '""')}"`,
+          `"${(item.category || '').replace(/"/g, '""')}"`,
+          `"${getInventoryStatus(item.quantity, item.min_quantity)}"`,
+          `"${formatDate(item.updated_at || item.last_updated)}"`
+        ].join(','))
+      ];
+      
+      const csvString = csvRows.join('\n');
+      
+      // Create a download link
+      const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      
+      // Set up CSV file for download
+      link.setAttribute('href', url);
+      link.setAttribute('download', `inventory_export_${new Date().toISOString().split('T')[0]}.csv`);
+      link.style.visibility = 'hidden';
+      
+      // Append to document, trigger download and clean up
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+      toast.success('Inventory data has been exported to CSV');
+    } catch (error) {
+      console.error('Error exporting inventory:', error);
+      toast.error('Failed to export inventory data');
+    }
   };
 
-  // Apply filters and search to inventory data
-  const filteredInventory = inventoryItems.filter(item => {
-    // Search term filter - match against product name or SKU
-    const matchesSearch = searchTerm === '' || 
-      item.product_name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-      item.sku.toLowerCase().includes(searchTerm.toLowerCase());
-      
-    // Location filter
-    const matchesLocation = filters.location === '' || filters.location === 'All Locations' ||
-      item.location === filters.location;
-      
-    // Category filter
-    const matchesCategory = filters.category === '' || filters.category === 'All Categories' ||
-      item.category === filters.category;
-      
-    // Status filter
-    let matchesStatus = true;
-    if (filters.status) {
-      const status = getInventoryStatus(item.quantity, item.min_quantity);
-      matchesStatus = filters.status === 'All' || filters.status === status;
-    }
-    
-    return matchesSearch && matchesLocation && matchesCategory && matchesStatus;
-  });
+  // Handle adding stock - open modal
+  const handleAddStock = () => {
+    setShowAddStockModal(true);
+  };
 
-  // Determine inventory status
+  // Handle adding new items through the modal
+  const handleAddItems = async (newItems) => {
+    try {
+      const addedItems = [];
+      
+      for (const newItem of newItems) {
+        // First, check if the product exists in the product lookup database
+        let productId = null;
+        const existingProduct = await productLookupService.getProductByFnsku(newItem.sku);
+        
+        if (existingProduct) {
+          productId = existingProduct.id;
+        } else {
+          // Create a new product lookup entry
+          const productData = {
+            name: newItem.name,
+            sku: newItem.sku,
+            price: newItem.price || 0,
+            category: newItem.category || 'Uncategorized',
+            condition: newItem.condition || 'New',
+            source: 'Manual Entry',
+            created_at: new Date().toISOString()
+          };
+          
+          const savedProduct = await productLookupService.saveProductLookup(productData);
+          productId = savedProduct.id;
+        }
+        
+        // Check if inventory item with this SKU already exists
+        const existingInventory = await inventoryService.getInventoryBySku(newItem.sku);
+        
+        if (existingInventory) {
+          // Update existing inventory
+          const updatedItem = await inventoryService.addOrUpdateInventory({
+            ...existingInventory,
+            quantity: existingInventory.quantity + (newItem.quantity || 0),
+            updated_at: new Date().toISOString(),
+            last_updated_reason: 'Added stock via form'
+          });
+          
+          addedItems.push(updatedItem);
+          toast.info(`Updated quantity for existing item: ${newItem.name}`);
+        } else {
+          // Add new inventory item
+          const inventoryData = {
+            product_id: productId,
+            product_name: newItem.name,
+            sku: newItem.sku,
+            quantity: newItem.quantity || 0,
+            min_quantity: newItem.min_quantity || 10,
+            location: newItem.location,
+            category: newItem.category || 'Uncategorized',
+            status: 'Active',
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          };
+          
+          const savedItem = await inventoryService.addOrUpdateInventory(inventoryData);
+          addedItems.push(savedItem);
+        }
+      }
+      
+      // Refresh inventory list
+      fetchInventory();
+      
+      // Show success message
+      toast.success(`Added ${addedItems.length} items to inventory`);
+    } catch (error) {
+      console.error('Error adding inventory items:', error);
+      toast.error('Failed to add items to inventory. Please try again.');
+    }
+  };
+
+  // Handle adjust stock for a specific item
+  const handleAdjustStock = async (item) => {
+    // For this example, we'll use a prompt to get a quantity adjustment
+    // In a real app, this would be a modal with a form
+    try {
+      const quantityStr = prompt(`Adjust quantity for ${item.product_name}. Current: ${item.quantity}.\nEnter new quantity or +/- value:`);
+      
+      if (quantityStr === null) return; // User cancelled
+      
+      let newQuantity;
+      if (quantityStr.startsWith('+') || quantityStr.startsWith('-')) {
+        // It's an adjustment
+        const adjustment = parseInt(quantityStr, 10);
+        if (isNaN(adjustment)) {
+          toast.error('Please enter a valid number');
+          return;
+        }
+        newQuantity = item.quantity + adjustment;
+      } else {
+        // It's a new quantity
+        newQuantity = parseInt(quantityStr, 10);
+        if (isNaN(newQuantity)) {
+          toast.error('Please enter a valid number');
+          return;
+        }
+      }
+      
+      // Ensure quantity is not negative
+      newQuantity = Math.max(0, newQuantity);
+      
+      // Update the inventory
+      await inventoryService.addOrUpdateInventory({
+        ...item,
+        quantity: newQuantity,
+        updated_at: new Date().toISOString(),
+        last_updated_reason: 'Manual adjustment'
+      });
+      
+      // Refresh inventory
+      fetchInventory();
+      
+      toast.success(`Updated ${item.product_name} quantity to ${newQuantity}`);
+    } catch (error) {
+      console.error('Error adjusting stock:', error);
+      toast.error('Failed to adjust stock. Please try again.');
+    }
+  };
+
+  // Handle viewing item details
+  const handleViewDetails = (item) => {
+    navigate(`/products/${item.product_id}`);
+  };
+
+  // Delete an inventory item
+  const handleDeleteItem = async (item) => {
+    if (window.confirm(`Are you sure you want to delete "${item.product_name}" from inventory?`)) {
+      try {
+        await inventoryService.deleteInventoryItem(item.id);
+        
+        // Update the local state
+        setInventoryItems(inventoryItems.filter(i => i.id !== item.id));
+        
+        toast.success(`${item.product_name} has been removed from inventory`);
+      } catch (error) {
+        console.error('Error deleting inventory item:', error);
+        toast.error('Failed to delete inventory item. Please try again.');
+      }
+    }
+  };
+
+  // Get inventory status based on quantity vs min quantity
   const getInventoryStatus = (quantity, minQuantity) => {
     if (quantity <= 0) return 'Out of Stock';
     if (quantity < minQuantity) return 'Low Stock';
     return 'In Stock';
   };
 
-  // Table columns configuration
+  // Filter inventory based on search and filters
+  const getFilteredInventory = () => {
+    return inventoryItems.filter(item => {
+      // Search term filter
+      if (searchTerm && !JSON.stringify(item).toLowerCase().includes(searchTerm.toLowerCase())) {
+        return false;
+      }
+      
+      // Location filter
+      if (filters.location && filters.location !== 'All Locations' && item.location !== filters.location) {
+        return false;
+      }
+      
+      // Category filter
+      if (filters.category && filters.category !== 'All Categories' && item.category !== filters.category) {
+        return false;
+      }
+      
+      // Status filter
+      if (filters.status && filters.status !== 'All') {
+        const itemStatus = getInventoryStatus(item.quantity, item.min_quantity);
+        if (itemStatus !== filters.status) {
+          return false;
+        }
+      }
+      
+      return true;
+    });
+  };
+
+  // Define table columns
   const columns = [
     {
-      accessorKey: 'product_name',
       header: 'Product',
-      cell: ({ row }) => (
+      accessor: 'product_name',
+      cell: (row) => (
         <div>
-          <Link 
-            to={`/products/${row.original.product_id}`}
-            className="text-blue-600 hover:text-blue-800 font-medium"
-          >
-            {row.original.product_name}
-          </Link>
-          <div className="text-xs text-gray-500 mt-1">SKU: {row.original.sku}</div>
+          <div className="font-medium">{row.product_name || row.name}</div>
+          <div className="text-sm text-gray-500">SKU: {row.sku}</div>
         </div>
       ),
     },
     {
-      accessorKey: 'location',
       header: 'Location',
+      accessor: 'location',
     },
     {
-      accessorKey: 'quantity',
       header: 'Quantity',
-      cell: ({ row }) => (
-        <div className="font-medium">{row.original.quantity}</div>
+      accessor: 'quantity',
+      cell: (row) => (
+        <div className="text-center">{row.quantity}</div>
       ),
     },
     {
-      accessorKey: 'status',
       header: 'Status',
-      cell: ({ row }) => (
+      accessor: 'status',
+      cell: (row) => (
         <InventoryLevelBadge 
-          quantity={row.original.quantity} 
-          minQuantity={row.original.min_quantity} 
+          status={getInventoryStatus(row.quantity, row.min_quantity)}
         />
       ),
     },
     {
-      accessorKey: 'category',
-      header: 'Category',
-    },
-    {
-      accessorKey: 'last_updated',
       header: 'Last Updated',
-      cell: ({ row }) => formatDate(row.original.last_updated),
+      accessor: 'last_updated',
+      cell: (row) => (
+        <div className="text-sm">
+          {formatDate(row.updated_at || row.last_updated)}
+        </div>
+      ),
     },
     {
-      id: 'actions',
-      header: '',
-      cell: ({ row }) => (
+      header: 'Actions',
+      accessor: 'actions',
+      cell: (row) => (
         <div className="flex justify-end space-x-2">
-          <Button variant="ghost" size="sm">Adjust</Button>
-          <Button variant="outline" size="sm">Details</Button>
+          <button
+            onClick={() => handleAdjustStock(row)}
+            className="text-blue-600 hover:text-blue-800"
+            title="Adjust Stock"
+          >
+            <AdjustmentsHorizontalIcon className="h-5 w-5" />
+          </button>
+          <button
+            onClick={() => handleViewDetails(row)}
+            className="text-indigo-600 hover:text-indigo-800"
+            title="View Details"
+          >
+            <ChevronDownIcon className="h-5 w-5" />
+          </button>
         </div>
       ),
     },
   ];
 
   return (
-    <MainLayout>
+    <div>
       <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-6 gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Inventory</h1>
           <p className="text-gray-600">
-            View and manage your inventory across all locations
+            Track and manage stock levels across all locations
           </p>
         </div>
         
@@ -318,9 +423,11 @@ const Inventory = () => {
           
           <Button 
             variant="primary"
-            onClick={() => alert('Add inventory item functionality would open a form here')}
+            className="flex items-center"
+            onClick={handleAddStock}
           >
-            Add Inventory
+            <PlusIcon className="h-5 w-5 mr-2" />
+            Add Stock
           </Button>
         </div>
       </div>
@@ -420,15 +527,23 @@ const Inventory = () => {
         
         {/* Inventory Table */}
         <Table 
-          data={filteredInventory}
+          data={getFilteredInventory()}
           columns={columns}
           loading={loading}
           pagination
           rowsPerPage={10}
           noDataMessage="No inventory items found. Try adjusting your search or filters."
+          onRowClick={handleViewDetails}
         />
       </Card>
-    </MainLayout>
+
+      {/* Add Stock Modal */}
+      <AddStockModal 
+        isOpen={showAddStockModal}
+        onClose={() => setShowAddStockModal(false)}
+        onAddItems={handleAddItems}
+      />
+    </div>
   );
 };
 

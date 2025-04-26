@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import axios from 'axios';
+import supabase from '../utils/supabase';
 
 // Create the auth context
 const AuthContext = createContext();
@@ -56,9 +57,19 @@ export const AuthProvider = ({ children }) => {
       try {
         const token = localStorage.getItem('auth_token');
         if (token) {
-          // In a real app, this would verify the token with the server
-          // const response = await apiClient.get('/auth/me');
-          // setCurrentUser(response.data);
+          // In a real app with Supabase, we would use:
+          // const { data: { user }, error } = await supabase.auth.getUser();
+          // if (error) throw error;
+          // if (user) {
+          //   setCurrentUser({
+          //     id: user.id,
+          //     username: user.email,
+          //     name: user.user_metadata?.name || 'User',
+          //     email: user.email,
+          //     role: user.user_metadata?.role || 'user',
+          //     permissions: user.user_metadata?.permissions || [],
+          //   });
+          // }
 
           // For demo purposes, we'll use a mock user
           setCurrentUser({
@@ -98,10 +109,21 @@ export const AuthProvider = ({ children }) => {
     setIsLoading(true);
     setError(null);
     try {
-      // In a real app, this would be an API call
-      // const response = await apiClient.post('/auth/login', { username, password });
-      // localStorage.setItem('auth_token', response.data.token);
-      // setCurrentUser(response.data.user);
+      // In a real app with Supabase, we would use:
+      // const { data, error } = await supabase.auth.signInWithPassword({
+      //   email: username,
+      //   password: password,
+      // });
+      // if (error) throw error;
+      // localStorage.setItem('auth_token', data.session.access_token);
+      // setCurrentUser({
+      //   id: data.user.id,
+      //   username: data.user.email,
+      //   name: data.user.user_metadata?.name || 'User',
+      //   email: data.user.email,
+      //   role: data.user.user_metadata?.role || 'user',
+      //   permissions: data.user.user_metadata?.permissions || [],
+      // });
 
       // For demo purposes, accept any username/password
       if (username && password) {
@@ -145,8 +167,9 @@ export const AuthProvider = ({ children }) => {
   const logout = async () => {
     setIsLoading(true);
     try {
-      // In a real app, this might include an API call to invalidate the token
-      // await apiClient.post('/auth/logout');
+      // In a real app with Supabase, we would use:
+      // const { error } = await supabase.auth.signOut();
+      // if (error) throw error;
       
       localStorage.removeItem('auth_token');
       setCurrentUser(null);
@@ -162,8 +185,19 @@ export const AuthProvider = ({ children }) => {
     setIsLoading(true);
     setError(null);
     try {
-      // const response = await apiClient.post('/auth/register', userData);
-      // return response.data;
+      // In a real app with Supabase, we would use:
+      // const { data, error } = await supabase.auth.signUp({
+      //   email: userData.email,
+      //   password: userData.password,
+      //   options: {
+      //     data: {
+      //       name: userData.name,
+      //       role: 'user',
+      //       permissions: [],
+      //     },
+      //   },
+      // });
+      // if (error) throw error;
       
       // For demo, just pretend it worked
       setIsLoading(false);
@@ -201,6 +235,7 @@ export const AuthProvider = ({ children }) => {
     hasPermission,
     hasRole,
     apiClient,
+    supabase,
   };
 
   // Provide the auth context to children

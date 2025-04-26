@@ -93,7 +93,7 @@
     "49": 1,
     "50": 1,
     "51": 1,
-    "52": 0,
+    "52": 1,
     "53": 1,
     "55": 1,
     "57": 1,
@@ -135,13 +135,22 @@
   "preview_servers": {
     "4d0a87e3-2f11-42f1-9c37-0e53bebc7383": {
       "role": "Alex",
-      "port": 5174,
+      "port": 5173,
       "subdomain": "inventory-management-system-uy3m8d-0adm3-bc7383",
       "server": "318a52a7-892f-4fbd-894a-77d17a484e66",
       "cmd": "pnpm run dev",
       "timeline_index": 79,
-      "status": "success",
-      "logs": []
+      "status": "initializing",
+      "logs": [
+        "\n",
+        "\n",
+        "> react-template@0.0.0 dev /data/chats/0adm3/workspace/inventory_system\n",
+        "> vite\n",
+        "\n",
+        "\n",
+        "  VITE v5.4.3  ready in 575 ms\n",
+        "\n"
+      ]
     }
   },
   "deploy": {}

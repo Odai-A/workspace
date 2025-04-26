@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArchiveBoxIcon,
@@ -8,10 +8,13 @@ import {
   QrCodeIcon,
   TagIcon,
 } from '@heroicons/react/24/outline';
-import { useAuth } from '../contexts/AuthContext';
-import MainLayout from '../components/layout/MainLayout';
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
+import DebugInfo from '../components/ui/DebugInfo';
+import { FiPackage, FiDatabase, FiBarChart2, FiUsers, FiActivity, FiSearch } from 'react-icons/fi';
+import { useAuth } from '../context/AuthContext';
+import { fetchProductByFnsku } from '../services/api';
+import { toast } from 'react-toastify';
 
 // Sample data - in a real app, this would come from the API
 const sampleRecentActivity = [
@@ -37,257 +40,209 @@ const sampleTopProducts = [
   { name: 'Echo Show', stock: 175, movement: '-3%' },
 ];
 
-const Dashboard = () => {
-  const { currentUser } = useAuth();
-  const [inventorySummary, setInventorySummary] = useState(sampleInventorySummary);
-  const [recentActivity, setRecentActivity] = useState(sampleRecentActivity);
-  const [topProducts, setTopProducts] = useState(sampleTopProducts);
-  const [loading, setLoading] = useState(false);
+const StatCard = ({ title, value, icon, color, href }) => {
+  return (
+    <Link 
+      to={href} 
+      className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 hover:shadow-lg transition-shadow duration-300"
+    >
+      <div className="flex items-center">
+        <div className={`p-3 rounded-full ${color} text-white`}>
+          {icon}
+        </div>
+        <div className="ml-4">
+          <p className="text-sm font-medium text-gray-500 dark:text-gray-400">{title}</p>
+          <p className="text-2xl font-semibold text-gray-700 dark:text-gray-200">{value}</p>
+        </div>
+      </div>
+    </Link>
+  );
+};
 
+const Dashboard = () => {
+  const { user } = useAuth();
+  const [stats, setStats] = useState({
+    totalProducts: 245,
+    totalInventory: 1823,
+    recentScans: 37,
+    lowStock: 12
+  });
+  const [isLoading, setIsLoading] = useState(false);
+  const [lookupFnsku, setLookupFnsku] = useState('');
+  const [isLookingUp, setIsLookingUp] = useState(false);
+  const lookupTimeoutRef = useRef(null);
+  
+  // Log when Dashboard component mounts
   useEffect(() => {
-    // In a real app, fetch data from API here
-    const fetchDashboardData = async () => {
-      setLoading(true);
-      try {
-        // Simulating API calls
-        // const summaryResponse = await api.get('/analytics/summary');
-        // const activityResponse = await api.get('/transactions/recent');
-        // const productsResponse = await api.get('/products/top');
-        
-        // setInventorySummary(summaryResponse.data);
-        // setRecentActivity(activityResponse.data);
-        // setTopProducts(productsResponse.data);
-        
-        // Using sample data for now
-        setTimeout(() => {
-          setLoading(false);
-        }, 500);
-      } catch (error) {
-        console.error('Error fetching dashboard data:', error);
-        setLoading(false);
+    console.log('Dashboard component mounted');
+    console.log('Current user:', user?.email);
+  }, [user]);
+
+  // Effect to handle automatic lookup on FNSKU input change (with debounce)
+  useEffect(() => {
+    // Clear the previous timeout if there is one
+    if (lookupTimeoutRef.current) {
+      clearTimeout(lookupTimeoutRef.current);
+    }
+
+    const trimmedFnsku = lookupFnsku.trim();
+
+    // Basic FNSKU format check (starts with X, at least 10 chars)
+    if (trimmedFnsku.startsWith('X') && trimmedFnsku.length >= 10) {
+      // Set a timeout to wait before performing the lookup
+      lookupTimeoutRef.current = setTimeout(async () => {
+        console.log(`Debounced lookup triggered for: ${trimmedFnsku}`);
+        setIsLookingUp(true);
+        try {
+          // Call the API service (no mock data here)
+          const productDetails = await fetchProductByFnsku(trimmedFnsku, { useMock: false });
+
+          if (productDetails && productDetails.asin) {
+            console.log(`ASIN found: ${productDetails.asin}. Opening Amazon page.`);
+            toast.success(`ASIN ${productDetails.asin} found! Opening Amazon page...`);
+            window.open(`https://www.amazon.com/dp/${productDetails.asin}`, '_blank');
+            setLookupFnsku(''); // Clear input after successful lookup
+          } else {
+            console.warn('Product not found via API for FNSKU:', trimmedFnsku);
+            toast.warn('Product information not found for this FNSKU.');
+          }
+        } catch (error) {
+          console.error('Error during automatic FNSKU lookup:', error);
+          toast.error('An error occurred during lookup.');
+        } finally {
+          setIsLookingUp(false);
+        }
+      }, 750); // Adjust debounce delay (milliseconds) as needed (e.g., 750ms)
+    }
+
+    // Cleanup function to clear timeout if component unmounts or lookupFnsku changes again
+    return () => {
+      if (lookupTimeoutRef.current) {
+        clearTimeout(lookupTimeoutRef.current);
       }
     };
-
-    fetchDashboardData();
-  }, []);
-
-  // Format timestamp to a more readable format
-  const formatDate = (timestamp) => {
-    const date = new Date(timestamp);
-    return new Intl.DateTimeFormat('en-US', {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    }).format(date);
-  };
-
-  // Get icon for activity type
-  const getActivityIcon = (type) => {
-    switch (type) {
-      case 'stock_in':
-        return <ArrowDownIcon className="h-5 w-5 text-green-500" />;
-      case 'stock_out':
-        return <ArrowUpIcon className="h-5 w-5 text-red-500" />;
-      case 'transfer':
-        return <ArrowUpIcon className="h-5 w-5 text-blue-500" />;
-      default:
-        return null;
-    }
-  };
-
-  // Get description for activity type
-  const getActivityDescription = (activity) => {
-    switch (activity.type) {
-      case 'stock_in':
-        return `${activity.quantity} units received at ${activity.location}`;
-      case 'stock_out':
-        return `${activity.quantity} units shipped from ${activity.location}`;
-      case 'transfer':
-        return `${activity.quantity} units transferred from ${activity.fromLocation} to ${activity.toLocation}`;
-      default:
-        return '';
-    }
-  };
+  }, [lookupFnsku]); // Rerun effect when lookupFnsku changes
 
   return (
-    <MainLayout>
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-        <p className="text-gray-600">
-          Welcome back, {currentUser?.username || 'User'}. Here's what's happening with your inventory today.
+    <div className="px-4 py-6">
+      {/* Add debug component */}
+      <DebugInfo />
+      
+      <div className="mb-8">
+        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
+          Welcome back, {user?.email || 'User'}
+        </h1>
+        <p className="text-gray-600 dark:text-gray-400 mt-1">
+          Here's an overview of your inventory management system
         </p>
       </div>
 
-      {loading ? (
-        <div className="flex justify-center items-center h-64">
-          <svg className="animate-spin h-8 w-8 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-          </svg>
+      {isLoading ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 animate-pulse">
+              <div className="flex items-center">
+                <div className="p-3 rounded-full bg-gray-300 dark:bg-gray-700"></div>
+                <div className="ml-4 w-full">
+                  <div className="h-4 bg-gray-300 dark:bg-gray-700 rounded w-1/4 mb-2"></div>
+                  <div className="h-6 bg-gray-300 dark:bg-gray-700 rounded w-1/2"></div>
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       ) : (
-        <>
-          {/* Summary Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
-            <Card className="bg-white">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-sm font-medium text-gray-600">Total Items</p>
-                  <p className="text-2xl font-bold text-gray-900">{inventorySummary.totalItems.toLocaleString()}</p>
-                </div>
-                <div className="p-2 bg-blue-100 rounded-lg">
-                  <ArchiveBoxIcon className="h-6 w-6 text-blue-600" />
-                </div>
-              </div>
-              <div className="mt-4">
-                <Link to="/inventory" className="text-sm text-blue-600 hover:text-blue-800">
-                  View inventory
-                </Link>
-              </div>
-            </Card>
-
-            <Card className="bg-white">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-sm font-medium text-gray-600">Locations</p>
-                  <p className="text-2xl font-bold text-gray-900">{inventorySummary.totalLocations}</p>
-                </div>
-                <div className="p-2 bg-green-100 rounded-lg">
-                  <TagIcon className="h-6 w-6 text-green-600" />
-                </div>
-              </div>
-              <div className="mt-4">
-                <Link to="/locations" className="text-sm text-green-600 hover:text-green-800">
-                  Manage locations
-                </Link>
-              </div>
-            </Card>
-
-            <Card className="bg-white">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-sm font-medium text-gray-600">Low Stock Items</p>
-                  <p className="text-2xl font-bold text-gray-900">{inventorySummary.lowStockItems}</p>
-                </div>
-                <div className="p-2 bg-yellow-100 rounded-lg">
-                  <ChartBarIcon className="h-6 w-6 text-yellow-600" />
-                </div>
-              </div>
-              <div className="mt-4">
-                <Link to="/reports/low-stock" className="text-sm text-yellow-600 hover:text-yellow-800">
-                  View report
-                </Link>
-              </div>
-            </Card>
-
-            <Card className="bg-white">
-              <div className="flex items-start justify-between">
-                <div>
-                  <p className="text-sm font-medium text-gray-600">Out of Stock</p>
-                  <p className="text-2xl font-bold text-red-600">{inventorySummary.outOfStockItems}</p>
-                </div>
-                <div className="p-2 bg-red-100 rounded-lg">
-                  <QrCodeIcon className="h-6 w-6 text-red-600" />
-                </div>
-              </div>
-              <div className="mt-4">
-                <Link to="/reports/out-of-stock" className="text-sm text-red-600 hover:text-red-800">
-                  View report
-                </Link>
-              </div>
-            </Card>
-          </div>
-
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Recent Activity */}
-            <div className="lg:col-span-2">
-              <Card
-                title="Recent Activity"
-                headerAction={
-                  <Link to="/transactions">
-                    <Button variant="outline" size="sm">View All</Button>
-                  </Link>
-                }
-              >
-                <div className="space-y-4">
-                  {recentActivity.length > 0 ? (
-                    recentActivity.map((activity) => (
-                      <div key={activity.id} className="flex items-start">
-                        <div className="flex-shrink-0 mr-3">
-                          {getActivityIcon(activity.type)}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-gray-900">{activity.item}</p>
-                          <p className="text-xs text-gray-500">{getActivityDescription(activity)}</p>
-                        </div>
-                        <div className="text-xs text-right text-gray-500">
-                          <p>{formatDate(activity.timestamp)}</p>
-                          <p>{activity.user}</p>
-                        </div>
-                      </div>
-                    ))
-                  ) : (
-                    <p className="text-gray-500 text-sm">No recent activity</p>
-                  )}
-                </div>
-              </Card>
-            </div>
-
-            {/* Top Products */}
-            <div>
-              <Card title="Top Products">
-                <div className="space-y-4">
-                  {topProducts.map((product, index) => (
-                    <div key={index} className="flex items-center justify-between">
-                      <div className="flex items-center">
-                        <span className="text-sm font-medium w-6">{index + 1}.</span>
-                        <span className="text-sm">{product.name}</span>
-                      </div>
-                      <div className="flex items-center space-x-3">
-                        <span className="text-sm font-medium">{product.stock}</span>
-                        <span className={`text-xs ${
-                          product.movement.startsWith('+') ? 'text-green-600' : 'text-red-600'
-                        }`}>
-                          {product.movement}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-4 pt-4 border-t border-gray-200">
-                  <Link to="/reports/products" className="text-sm text-blue-600 hover:text-blue-800">
-                    View detailed report
-                  </Link>
-                </div>
-              </Card>
-
-              {/* Quick Actions */}
-              <Card title="Quick Actions" className="mt-6">
-                <div className="grid grid-cols-2 gap-3">
-                  <Button fullWidth variant="outline-primary">
-                    <QrCodeIcon className="h-4 w-4 mr-2" />
-                    Scan Items
-                  </Button>
-                  <Button fullWidth variant="outline-primary">
-                    <ArrowDownIcon className="h-4 w-4 mr-2" />
-                    Receive
-                  </Button>
-                  <Button fullWidth variant="outline-primary">
-                    <ArrowUpIcon className="h-4 w-4 mr-2" />
-                    Ship
-                  </Button>
-                  <Button fullWidth variant="outline-primary">
-                    <ChartBarIcon className="h-4 w-4 mr-2" />
-                    Reports
-                  </Button>
-                </div>
-              </Card>
-            </div>
-          </div>
-        </>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          <StatCard 
+            title="Products" 
+            value={stats.totalProducts} 
+            icon={<FiPackage size={24} />} 
+            color="bg-blue-600" 
+            href="/products" 
+          />
+          <StatCard 
+            title="Inventory Items" 
+            value={stats.totalInventory} 
+            icon={<FiDatabase size={24} />} 
+            color="bg-green-600" 
+            href="/inventory" 
+          />
+          <StatCard 
+            title="Recent Scans (7 days)" 
+            value={stats.recentScans} 
+            icon={<FiActivity size={24} />} 
+            color="bg-purple-600" 
+            href="/scanner" 
+          />
+          <StatCard 
+            title="Low Stock Items" 
+            value={stats.lowStock} 
+            icon={<FiBarChart2 size={24} />} 
+            color="bg-red-600" 
+            href="/reports" 
+          />
+        </div>
       )}
-    </MainLayout>
+
+      <div className="mt-12">
+        <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
+          Quick FNSKU Lookup
+        </h2>
+        <Card className="p-4">
+          <label htmlFor="fnsku-lookup" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+            Enter FNSKU for Automatic Amazon Lookup:
+          </label>
+          <div className="relative">
+            <input
+              type="text"
+              id="fnsku-lookup"
+              value={lookupFnsku}
+              onChange={(e) => setLookupFnsku(e.target.value)}
+              placeholder="Enter FNSKU (e.g., X000ABC123)"
+              className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-md focus:ring-blue-500 focus:border-blue-500 pr-10"
+              disabled={isLookingUp}
+            />
+            {isLookingUp && (
+              <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
+                <div className="animate-spin rounded-full h-5 w-5 border-t-2 border-b-2 border-blue-500"></div>
+              </div>
+            )}
+          </div>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
+            Once a valid FNSKU is entered, the Amazon product page will open automatically.
+          </p>
+        </Card>
+      </div>
+
+      <div className="mt-12">
+        <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
+          Quick Actions
+        </h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <Link 
+            to="/scanner" 
+            className="flex items-center justify-center p-6 bg-white dark:bg-gray-800 rounded-lg shadow-md hover:shadow-lg transition-shadow duration-300"
+          >
+            <FiSearch className="text-blue-600 dark:text-blue-400 w-6 h-6 mr-3" />
+            <span className="font-medium text-gray-700 dark:text-gray-200">Scan Products</span>
+          </Link>
+          <Link 
+            to="/products" 
+            className="flex items-center justify-center p-6 bg-white dark:bg-gray-800 rounded-lg shadow-md hover:shadow-lg transition-shadow duration-300"
+          >
+            <FiPackage className="text-green-600 dark:text-green-400 w-6 h-6 mr-3" />
+            <span className="font-medium text-gray-700 dark:text-gray-200">Manage Products</span>
+          </Link>
+          <Link 
+            to="/reports" 
+            className="flex items-center justify-center p-6 bg-white dark:bg-gray-800 rounded-lg shadow-md hover:shadow-lg transition-shadow duration-300"
+          >
+            <FiBarChart2 className="text-purple-600 dark:text-purple-400 w-6 h-6 mr-3" />
+            <span className="font-medium text-gray-700 dark:text-gray-200">View Reports</span>
+          </Link>
+        </div>
+      </div>
+    </div>
   );
 };
 
