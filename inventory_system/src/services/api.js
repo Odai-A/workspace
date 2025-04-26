@@ -114,21 +114,34 @@ export const scanTaskService = {
         throw new Error('Barcode is required');
       }
       
-      const apiKey = import.meta.env.VITE_F2A_BARCODE_API_KEY;
-      const apiUrl = import.meta.env.VITE_API_URL;
+      // Use the same endpoint base and key as the GetMyByBarCode call
+      // const apiKey = import.meta.env.VITE_F2A_BARCODE_API_KEY;
+      // const apiUrl = import.meta.env.VITE_API_URL;
+      const apiKey = FNSKU_TO_ASIN_API_KEY; // Use consistent key
+      // Construct the AddOrGet URL from the known base endpoint
+      const addOrGetUrl = FNSKU_API_ENDPOINT.replace('/GetMyByBarCode', '/AddOrGet'); 
+      console.log(`Calling AddOrGet API: ${addOrGetUrl} for ${barCode}`); // Add log
       
-      const response = await axios.post(`${apiUrl}/ScanTask/AddOrGet`, 
+      const response = await axios.post(addOrGetUrl, 
         { barCode },
         {
           headers: {
-            'Authorization': `Bearer ${apiKey}`,
+            // 'Authorization': `Bearer ${apiKey}`, // Assuming api-key header is used
+            'api-key': apiKey, // Use consistent header
             'Accept': 'application/json',
             'Content-Type': 'application/json'
           }
         }
       );
       
-      return response.data;
+      console.log('AddOrGet API Response:', response.data); // Add log
+      // We might not need the response data directly, just confirmation
+      if (!response.data || !response.data.succeeded) {
+        // Log a warning if AddOrGet didn't succeed but don't stop the process
+        console.warn('AddOrGet call did not report success:', response.data?.messages?.join(', '));
+      }
+      
+      return response.data; // Return the response anyway
     } catch (error) {
       console.error(`Error adding/getting scan task for barcode ${barCode}:`, error);
       return {
@@ -406,8 +419,8 @@ export const fetchProductByFnsku = async (fnsku, options = {}) => {
     // First check if we have this product cached in our database
     const cachedProduct = await dbProductLookupService.getProductByFnsku(fnsku);
     
-    if (cachedProduct) {
-      console.log('Found cached product in database');
+    if (cachedProduct && cachedProduct.asin) {
+      console.log('Found valid cached product in database (with ASIN):', cachedProduct.asin);
       // Update the last lookup timestamp in the background
       dbProductLookupService.updateLastLookup(fnsku, userId).catch(error => {
         console.error('Failed to update last lookup timestamp:', error);
@@ -415,125 +428,98 @@ export const fetchProductByFnsku = async (fnsku, options = {}) => {
       return cachedProduct;
     }
     
-    console.log('No cached product found, fetching from API');
+    console.log('No cached product found, proceeding to lookup...'); // Updated log
     
-    let product = null;
-    let lastError = null;
-    
-    // Replace the fetchWithRetry function in fetchProductByFnsku with this implementation
-    const fetchWithRetry = async (attempt = 0) => {
-      if (attempt >= maxRetries) {
-        throw new Error(`Maximum retries (${maxRetries}) exceeded`);
-      }
-      
-      let response;
-      let errorOccurred = null;
-      
-      try {
-        console.log(`API attempt ${attempt + 1}/${maxRetries} for FNSKU: ${fnsku}`);
-        
-        // --- MODIFIED: Always attempt the real API call first --- 
-        const apiUrl = `${FNSKU_API_ENDPOINT}?BarCode=${fnsku}`;
-        console.log(`Calling FNSKU-to-ASIN API: ${apiUrl}`);
-        
-        response = await axios.get(apiUrl, {
-          headers: {
-            'accept': 'application/json',
-            'api-key': FNSKU_TO_ASIN_API_KEY
-          },
-          timeout: 10000 // 10 second timeout
-        });
-        
-        console.log('Raw API response:', response.data);
-        
-        // Check if response is successful and contains data
-        if (response.status === 200 && response.data && response.data.succeeded && response.data.data) {
-          const apiData = response.data.data;
-          
-          // Format the API response to match our internal structure
-          return {
-            fnsku: fnsku,
-            asin: apiData.asin || `B${fnsku.slice(-9)}`,
-            sku: `SKU-${fnsku.slice(-6)}`, 
-            name: `Amazon Product (ASIN: ${apiData.asin})`,
-            description: `Product details for FNSKU: ${fnsku}`,
-            price: 0, 
-            category: 'Amazon Products',
-            image_url: `https://placeholder.pics/svg/300/DEDEDE/555555/ASIN${apiData.asin}`,
-            condition: 'New'
-          };
-        } else if (response.status === 200 && response.data && !response.data.succeeded) {
-          // API returned success status but with an error message inside
-          const apiErrorMessage = response.data.messages?.join(', ') || 'API reported failure';
-          console.error('API returned error message:', apiErrorMessage);
-          throw new Error(`API error: ${apiErrorMessage}`); 
-        } else {
-          // Unexpected status code
-          throw new Error(`API returned status ${response.status}`);
-        }
-        // --- END MODIFIED API Call Logic ---
-        
-      } catch (error) {
-        console.error(`API call attempt ${attempt + 1} failed:`, error.message);
-        errorOccurred = error; // Store the error
-        
-        // --- MODIFIED: Only use mock data here if API failed AND useMock is true ---
-        if (useMock) {
-          console.warn('API call failed, falling back to mock data as requested.');
-          return mockProductData[fnsku] || generateMockProductData(fnsku);
-        }
-        // --- END MODIFIED Mock Data Fallback ---
+    // --- NEW STEP: Call AddOrGet before attempting to fetch --- 
+    try {
+      // Attempt to add/register the FNSKU with the external service first.
+      // We don't necessarily need the return value, just ensuring it's registered.
+      await scanTaskService.addOrGetTask(fnsku);
+    } catch (addOrGetError) {
+      // Log the error but continue anyway, as GetMyByBarCode might still work 
+      // or the fetchWithRetry might handle subsequent errors.
+      console.error('Error during AddOrGet pre-call:', addOrGetError);
+    }
+    // --- END NEW STEP ---
 
-        // If not using mock data, proceed to retry logic
-        if (error.response) {
-          // Handle specific response errors for retry logic
-          if (error.response.status === 429 || error.response.status >= 500) {
-              const waitTime = Math.pow(2, attempt + 1) * 1000;
-              console.log(`API Error (${error.response.status}), waiting ${waitTime}ms before retry`);
-              await new Promise(resolve => setTimeout(resolve, waitTime));
-              return fetchWithRetry(attempt + 1);
-          } else if (error.response.status === 404) {
-              console.log('Product not found in API (404).');
-              return null; // Don't retry on 404
-          } else {
-              // Other client errors (4xx) - don't retry, throw the original error
-              throw errorOccurred;
-          }
-        } else if (error.request) {
-          // Network error (no response)
-          const waitTime = Math.pow(2, attempt + 1) * 1000;
-          console.log(`No response from server, waiting ${waitTime}ms before retry`);
-          await new Promise(resolve => setTimeout(resolve, waitTime));
-          return fetchWithRetry(attempt + 1);
+    // --- Replace fetchWithRetry with Polling Logic ---
+    let product = null;
+    let apiData = null;
+    const maxAttempts = 5; // Max polling attempts
+    const pollInterval = 1000; // Milliseconds between attempts (1 second)
+
+    // Helper function for a single fetch attempt
+    const fetchAsinOnce = async (currentFnsku) => {
+      try {
+        const apiUrl = `${FNSKU_API_ENDPOINT}?BarCode=${currentFnsku}`;
+        const response = await axios.get(apiUrl, {
+          headers: { 'accept': 'application/json', 'api-key': FNSKU_TO_ASIN_API_KEY },
+          timeout: 5000 // Shorter timeout for polling checks
+        });
+        // console.log(`Polling check response for ${currentFnsku}:`, response.data); // Optional: verbose logging
+        // Check for success and presence of data.data and data.data.asin
+        if (response.status === 200 && response.data?.succeeded && response.data?.data?.asin) {
+          return response.data.data; // Return the inner data object containing the ASIN
+        } else if (response.status === 200 && response.data?.succeeded) {
+          // Succeeded, but data is null or ASIN is missing/null - still waiting
+          return null; 
         } else {
-          // Other errors (e.g., setup issues) - don't retry
-          throw errorOccurred;
+          // Handle non-success or unexpected structure
+          console.warn(`fetchAsinOnce failed or got unexpected structure for ${currentFnsku}`, response.data);
+          return null; // Indicate failure or still waiting
         }
+      } catch (error) {
+        console.error(`fetchAsinOnce error for ${currentFnsku}:`, error.message);
+        return null; // Indicate failure
       }
     };
-    
-    try {
-      // Try to fetch from API with retry logic
-      product = await fetchWithRetry();
-    } catch (error) {
-      console.error('All API attempts failed:', error.message);
-      lastError = error;
-      
-      // If all API attempts fail and useMock is true, use mock data
-      if (useMock) {
-        console.log('Falling back to mock data after API failure');
-        product = mockProductData[fnsku] || generateMockProductData(fnsku);
-      } else {
-        // If not using mock data and API failed, return null
-        return null;
+
+    // Polling loop
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      console.log(`Polling attempt ${attempt}/${maxAttempts} for FNSKU: ${fnsku}`);
+      apiData = await fetchAsinOnce(fnsku);
+
+      if (apiData) { // apiData will only be truthy if ASIN was found
+        console.log(`ASIN ${apiData.asin} found during polling attempt ${attempt}`);
+        break; // Exit loop, ASIN found
+      }
+
+      // If ASIN not found and not the last attempt, wait
+      if (attempt < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, pollInterval)); 
       }
     }
+
+    // After polling, check if we got the data with ASIN
+    if (apiData) { // If fetchAsinOnce returned valid data.data
+      product = {
+        fnsku: fnsku,
+        asin: apiData.asin,
+        sku: `SKU-${fnsku.slice(-6)}`, 
+        name: `Amazon Product (ASIN: ${apiData.asin})`,
+        description: `Product details for FNSKU: ${fnsku}`,
+        price: 0, 
+        category: 'Amazon Products',
+        image_url: `https://placeholder.pics/svg/300/DEDEDE/555555/ASIN${apiData.asin}`,
+        condition: 'New'
+      };
+    } else {
+      console.warn(`Polling finished after ${maxAttempts} attempts, ASIN not found for ${fnsku}`);
+      // Decide what to return - let's return null if polling failed
+      product = null; 
+    }
+    // --- END Polling Logic ---
     
-    if (product) {
-      // Save the product lookup in the background
+    // --- MODIFIED: Only save if ASIN was actually found --- 
+    if (product && product.asin) {
+      // Save the product lookup (with a valid ASIN) in the background
+      console.log('Saving product with valid ASIN to database:', product);
       dbProductLookupService.saveProductLookup(product, userId).catch(error => {
         console.error('Failed to save product lookup:', error);
       });
+    } else if (product) {
+      // Log if product exists but ASIN is null (won't be saved)
+      console.log('Product retrieved but ASIN is null. Not saving to DB yet.', product);
     }
     
     return product;
