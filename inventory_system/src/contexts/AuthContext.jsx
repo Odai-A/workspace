@@ -1,11 +1,9 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import axios from 'axios';
-import supabase from '../utils/supabase';
 
-// Create the auth context
-const AuthContext = createContext();
+// Create the context
+const AuthContext = createContext(null);
 
-// Hook for using the auth context
+// Export the hook for using the context
 export const useAuth = () => {
   const context = useContext(AuthContext);
   if (!context) {
@@ -14,233 +12,145 @@ export const useAuth = () => {
   return context;
 };
 
-// Auth provider component
+// Provider component
 export const AuthProvider = ({ children }) => {
-  const [currentUser, setCurrentUser] = useState(null);
-  const [error, setError] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [isInitialized, setIsInitialized] = useState(false);
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-  // Create an API client instance
-  const apiClient = axios.create({
-    baseURL: import.meta.env.VITE_API_URL || '/api',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-  });
+  // Debug function to log auth state changes
+  const logAuthState = (label, data = {}) => {
+    console.log(`AUTH STATE [${label}]:`, {
+      isAuthenticated: !!user,
+      userData: user ? { id: user.id, email: user.email } : null,
+      ...data
+    });
+  };
 
-  // Add auth token to requests
-  apiClient.interceptors.request.use((config) => {
-    const token = localStorage.getItem('auth_token');
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  });
-
-  // Handle 401 responses
-  apiClient.interceptors.response.use(
-    (response) => response,
-    (error) => {
-      if (error.response && error.response.status === 401) {
-        // Clear auth state on unauthorized
-        logout();
-      }
-      return Promise.reject(error);
-    }
-  );
-
-  // Check if user is authenticated on app load
+  // Initialize auth state
   useEffect(() => {
-    const initAuth = async () => {
-      setIsLoading(true);
+    console.log('AuthProvider initialized, checking for session...');
+    
+    // Check for stored user data
+    const storedUser = localStorage.getItem('user');
+    if (storedUser) {
       try {
-        const token = localStorage.getItem('auth_token');
-        if (token) {
-          // In a real app with Supabase, we would use:
-          // const { data: { user }, error } = await supabase.auth.getUser();
-          // if (error) throw error;
-          // if (user) {
-          //   setCurrentUser({
-          //     id: user.id,
-          //     username: user.email,
-          //     name: user.user_metadata?.name || 'User',
-          //     email: user.email,
-          //     role: user.user_metadata?.role || 'user',
-          //     permissions: user.user_metadata?.permissions || [],
-          //   });
-          // }
-
-          // For demo purposes, we'll use a mock user
-          setCurrentUser({
-            id: 1,
-            username: 'demo_user',
-            name: 'Demo User',
-            email: 'demo@example.com',
-            role: 'admin',
-            permissions: [
-              'view_inventory',
-              'edit_inventory', 
-              'view_products',
-              'edit_products',
-              'use_scanner',
-              'view_transactions',
-              'view_shipments',
-              'view_reports',
-              'view_locations',
-            ],
-          });
-        }
+        const parsedUser = JSON.parse(storedUser);
+        setUser(parsedUser);
+        logAuthState('init-success', { userId: parsedUser.id });
       } catch (err) {
-        console.error('Auth initialization error:', err);
-        localStorage.removeItem('auth_token');
-        setCurrentUser(null);
-      } finally {
-        setIsLoading(false);
-        setIsInitialized(true);
+        console.error('Error parsing stored user data:', err);
+        localStorage.removeItem('user');
       }
-    };
-
-    initAuth();
+    } else {
+      logAuthState('init-no-session');
+    }
+    setLoading(false);
   }, []);
 
-  // Login function
-  const login = async (username, password) => {
-    setIsLoading(true);
-    setError(null);
+  // Sign in with email and password
+  const signIn = async (email, password) => {
+    console.log('SignIn attempt with email:', email);
     try {
-      // In a real app with Supabase, we would use:
-      // const { data, error } = await supabase.auth.signInWithPassword({
-      //   email: username,
-      //   password: password,
-      // });
-      // if (error) throw error;
-      // localStorage.setItem('auth_token', data.session.access_token);
-      // setCurrentUser({
-      //   id: data.user.id,
-      //   username: data.user.email,
-      //   name: data.user.user_metadata?.name || 'User',
-      //   email: data.user.email,
-      //   role: data.user.user_metadata?.role || 'user',
-      //   permissions: data.user.user_metadata?.permissions || [],
-      // });
-
-      // For demo purposes, accept any username/password
-      if (username && password) {
-        const mockToken = 'mock_jwt_token_12345';
-        localStorage.setItem('auth_token', mockToken);
-        
-        const mockUser = {
-          id: 1,
-          username: username,
-          name: 'Demo User',
-          email: 'demo@example.com',
-          role: 'admin',
-          permissions: [
-            'view_inventory',
-            'edit_inventory', 
-            'view_products',
-            'edit_products',
-            'use_scanner',
-            'view_transactions',
-            'view_shipments',
-            'view_reports',
-            'view_locations',
-          ],
-        };
-        
-        setCurrentUser(mockUser);
-        setIsLoading(false);
-        return true;
-      } else {
-        throw new Error('Username and password are required');
-      }
-    } catch (err) {
-      console.error('Login error:', err);
-      setError(err.response?.data?.message || err.message || 'Login failed');
-      setIsLoading(false);
-      return false;
-    }
-  };
-
-  // Logout function
-  const logout = async () => {
-    setIsLoading(true);
-    try {
-      // In a real app with Supabase, we would use:
-      // const { error } = await supabase.auth.signOut();
-      // if (error) throw error;
+      setLoading(true);
       
-      localStorage.removeItem('auth_token');
-      setCurrentUser(null);
-    } catch (err) {
-      console.error('Logout error:', err);
+      // For demo purposes, accept any email/password combination
+      // In a real app, you would validate against your backend
+      const userData = {
+        id: '1',
+        email: email,
+        name: email.split('@')[0],
+        role: 'admin'
+      };
+      
+      setUser(userData);
+      localStorage.setItem('user', JSON.stringify(userData));
+      
+      logAuthState('signin-success', { userId: userData.id });
+      return { success: true, data: userData };
+    } catch (error) {
+      console.error('Login exception:', error);
+      logAuthState('signin-exception', { error });
+      return { success: false, error: error.message, data: null };
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   };
 
-  // Register function (for a real app)
-  const register = async (userData) => {
-    setIsLoading(true);
-    setError(null);
+  // Sign up with email and password
+  const signUp = async (email, password) => {
+    console.log('SignUp attempt with email:', email);
     try {
-      // In a real app with Supabase, we would use:
-      // const { data, error } = await supabase.auth.signUp({
-      //   email: userData.email,
-      //   password: userData.password,
-      //   options: {
-      //     data: {
-      //       name: userData.name,
-      //       role: 'user',
-      //       permissions: [],
-      //     },
-      //   },
-      // });
-      // if (error) throw error;
+      setLoading(true);
       
-      // For demo, just pretend it worked
-      setIsLoading(false);
-      return { success: true };
-    } catch (err) {
-      console.error('Registration error:', err);
-      setError(err.response?.data?.message || err.message || 'Registration failed');
-      setIsLoading(false);
-      return { success: false, error: err.message };
+      // For demo purposes, create a new user
+      // In a real app, you would create the user in your backend
+      const userData = {
+        id: Date.now().toString(),
+        email: email,
+        name: email.split('@')[0],
+        role: 'user'
+      };
+      
+      setUser(userData);
+      localStorage.setItem('user', JSON.stringify(userData));
+      
+      logAuthState('signup-success', { userId: userData.id });
+      return { success: true, data: userData };
+    } catch (error) {
+      console.error('Signup exception:', error);
+      logAuthState('signup-exception', { error });
+      return { success: false, error: error.message };
+    } finally {
+      setLoading(false);
     }
   };
 
-  // Check if user has a permission
+  // Sign out
+  const signOut = async () => {
+    console.log('SignOut attempt');
+    try {
+      setLoading(true);
+      setUser(null);
+      localStorage.removeItem('user');
+      logAuthState('signout-success');
+      return { success: true };
+    } catch (error) {
+      console.error('Signout exception:', error);
+      logAuthState('signout-exception', { error });
+      return { success: false, error: error.message };
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Check if user has a specific permission
   const hasPermission = (permission) => {
-    if (!currentUser || !currentUser.permissions) return false;
-    return currentUser.permissions.includes(permission);
+    // For now, just return true for any permission check
+    console.log('Permission check:', permission);
+    return true;
   };
 
-  // Check if user has a role
+  // Check if user has a specific role
   const hasRole = (role) => {
-    if (!currentUser || !currentUser.role) return false;
-    return currentUser.role === role;
+    // For now, just return true for any role check
+    console.log('Role check:', role);
+    return true;
   };
 
-  // Context value
-  const contextValue = {
-    currentUser,
-    isLoading,
-    isInitialized,
-    error,
-    setError,
-    login,
-    logout,
-    register,
+  // Value object to be provided to consumers
+  const value = {
+    user,
+    loading,
+    isAuthenticated: !!user,
+    signIn,
+    signUp,
+    signOut,
     hasPermission,
-    hasRole,
-    apiClient,
-    supabase,
+    hasRole
   };
 
-  // Provide the auth context to children
   return (
-    <AuthContext.Provider value={contextValue}>
+    <AuthContext.Provider value={value}>
       {children}
     </AuthContext.Provider>
   );

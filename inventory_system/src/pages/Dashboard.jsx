@@ -11,8 +11,8 @@ import {
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import DebugInfo from '../components/ui/DebugInfo';
-import { FiPackage, FiDatabase, FiBarChart2, FiUsers, FiActivity, FiSearch } from 'react-icons/fi';
-import { useAuth } from '../context/AuthContext';
+import { FiPackage, FiDatabase, FiBarChart2, FiUsers, FiActivity, FiSearch, FiShoppingCart, FiAlertCircle, FiTrendingUp } from 'react-icons/fi';
+import { useAuth } from '../contexts/AuthContext';
 import { fetchProductByFnsku } from '../services/api';
 import { toast } from 'react-toastify';
 
@@ -123,123 +123,83 @@ const Dashboard = () => {
     };
   }, [lookupFnsku]); // Rerun effect when lookupFnsku changes
 
-  return (
-    <div className="px-4 py-6">
-      {/* Add debug component */}
-      <DebugInfo />
-      
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-          Welcome back, {user?.email || 'User'}
-        </h1>
-        <p className="text-gray-600 dark:text-gray-400 mt-1">
-          Here's an overview of your inventory management system
-        </p>
-      </div>
+  // Mock data for demonstration
+  const mockStats = [
+    { title: 'Total Products', value: '1,234', icon: FiPackage, color: 'bg-blue-500' },
+    { title: 'Active Orders', value: '56', icon: FiShoppingCart, color: 'bg-green-500' },
+    { title: 'Low Stock Items', value: '12', icon: FiAlertCircle, color: 'bg-yellow-500' },
+    { title: 'Monthly Sales', value: '$45,678', icon: FiTrendingUp, color: 'bg-purple-500' },
+  ];
 
-      {isLoading ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          {[...Array(4)].map((_, i) => (
-            <div key={i} className="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 animate-pulse">
+  return (
+    <div className="space-y-6">
+      <h1 className="text-2xl font-semibold text-gray-900">Dashboard</h1>
+      
+      {/* Stats Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        {mockStats.map((stat, index) => {
+          const Icon = stat.icon;
+          return (
+            <div key={index} className="bg-white rounded-lg shadow p-6">
               <div className="flex items-center">
-                <div className="p-3 rounded-full bg-gray-300 dark:bg-gray-700"></div>
-                <div className="ml-4 w-full">
-                  <div className="h-4 bg-gray-300 dark:bg-gray-700 rounded w-1/4 mb-2"></div>
-                  <div className="h-6 bg-gray-300 dark:bg-gray-700 rounded w-1/2"></div>
+                <div className={`p-3 rounded-full ${stat.color} bg-opacity-10`}>
+                  <Icon className={`h-6 w-6 ${stat.color.replace('bg-', 'text-')}`} />
+                </div>
+                <div className="ml-4">
+                  <p className="text-sm font-medium text-gray-600">{stat.title}</p>
+                  <p className="text-lg font-semibold text-gray-900">{stat.value}</p>
                 </div>
               </div>
             </div>
-          ))}
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          <StatCard 
-            title="Products" 
-            value={stats.totalProducts} 
-            icon={<FiPackage size={24} />} 
-            color="bg-blue-600" 
-            href="/products" 
-          />
-          <StatCard 
-            title="Inventory Items" 
-            value={stats.totalInventory} 
-            icon={<FiDatabase size={24} />} 
-            color="bg-green-600" 
-            href="/inventory" 
-          />
-          <StatCard 
-            title="Recent Scans (7 days)" 
-            value={stats.recentScans} 
-            icon={<FiActivity size={24} />} 
-            color="bg-purple-600" 
-            href="/scanner" 
-          />
-          <StatCard 
-            title="Low Stock Items" 
-            value={stats.lowStock} 
-            icon={<FiBarChart2 size={24} />} 
-            color="bg-red-600" 
-            href="/reports" 
-          />
-        </div>
-      )}
-
-      <div className="mt-12">
-        <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
-          Quick FNSKU Lookup
-        </h2>
-        <Card className="p-4">
-          <label htmlFor="fnsku-lookup" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-            Enter FNSKU for Automatic Amazon Lookup:
-          </label>
-          <div className="relative">
-            <input
-              type="text"
-              id="fnsku-lookup"
-              value={lookupFnsku}
-              onChange={(e) => setLookupFnsku(e.target.value)}
-              placeholder="Enter FNSKU (e.g., X000ABC123)"
-              className="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 dark:bg-gray-700 dark:text-white rounded-md focus:ring-blue-500 focus:border-blue-500 pr-10"
-              disabled={isLookingUp}
-            />
-            {isLookingUp && (
-              <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
-                <div className="animate-spin rounded-full h-5 w-5 border-t-2 border-b-2 border-blue-500"></div>
-              </div>
-            )}
-          </div>
-          <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
-            Once a valid FNSKU is entered, the Amazon product page will open automatically.
-          </p>
-        </Card>
+          );
+        })}
       </div>
 
-      <div className="mt-12">
-        <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">
-          Quick Actions
-        </h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <Link 
-            to="/scanner" 
-            className="flex items-center justify-center p-6 bg-white dark:bg-gray-800 rounded-lg shadow-md hover:shadow-lg transition-shadow duration-300"
-          >
-            <FiSearch className="text-blue-600 dark:text-blue-400 w-6 h-6 mr-3" />
-            <span className="font-medium text-gray-700 dark:text-gray-200">Scan Products</span>
-          </Link>
-          <Link 
-            to="/products" 
-            className="flex items-center justify-center p-6 bg-white dark:bg-gray-800 rounded-lg shadow-md hover:shadow-lg transition-shadow duration-300"
-          >
-            <FiPackage className="text-green-600 dark:text-green-400 w-6 h-6 mr-3" />
-            <span className="font-medium text-gray-700 dark:text-gray-200">Manage Products</span>
-          </Link>
-          <Link 
-            to="/reports" 
-            className="flex items-center justify-center p-6 bg-white dark:bg-gray-800 rounded-lg shadow-md hover:shadow-lg transition-shadow duration-300"
-          >
-            <FiBarChart2 className="text-purple-600 dark:text-purple-400 w-6 h-6 mr-3" />
-            <span className="font-medium text-gray-700 dark:text-gray-200">View Reports</span>
-          </Link>
+      {/* Recent Activity */}
+      <div className="bg-white rounded-lg shadow">
+        <div className="p-6">
+          <h2 className="text-lg font-medium text-gray-900 mb-4">Recent Activity</h2>
+          <div className="space-y-4">
+            {[1, 2, 3].map((item) => (
+              <div key={item} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+                <div className="flex items-center">
+                  <div className="h-10 w-10 rounded-full bg-blue-100 flex items-center justify-center">
+                    <FiPackage className="h-5 w-5 text-blue-600" />
+                  </div>
+                  <div className="ml-4">
+                    <p className="text-sm font-medium text-gray-900">Product Update</p>
+                    <p className="text-sm text-gray-500">Updated inventory for Product {item}</p>
+                  </div>
+                </div>
+                <span className="text-sm text-gray-500">2 hours ago</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Quick Actions */}
+      <div className="bg-white rounded-lg shadow">
+        <div className="p-6">
+          <h2 className="text-lg font-medium text-gray-900 mb-4">Quick Actions</h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <button className="p-4 bg-blue-50 rounded-lg hover:bg-blue-100 transition-colors">
+              <div className="text-blue-600 mb-2">📦</div>
+              <span className="text-sm font-medium">New Scan</span>
+            </button>
+            <button className="p-4 bg-green-50 rounded-lg hover:bg-green-100 transition-colors">
+              <div className="text-green-600 mb-2">➕</div>
+              <span className="text-sm font-medium">Add Product</span>
+            </button>
+            <button className="p-4 bg-purple-50 rounded-lg hover:bg-purple-100 transition-colors">
+              <div className="text-purple-600 mb-2">📊</div>
+              <span className="text-sm font-medium">View Reports</span>
+            </button>
+            <button className="p-4 bg-yellow-50 rounded-lg hover:bg-yellow-100 transition-colors">
+              <div className="text-yellow-600 mb-2">⚙️</div>
+              <span className="text-sm font-medium">Settings</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

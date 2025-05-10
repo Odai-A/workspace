@@ -6,6 +6,7 @@ import { getProductLookup } from '../services/api';
 import { productLookupService as dbProductLookupService } from '../services/databaseService';
 import { inventoryService } from '../config/supabaseClient';
 import { XMarkIcon, ArrowUpTrayIcon } from '@heroicons/react/24/outline';
+import { mockService } from '../services/mockData';
 
 /**
  * Scanner component for barcode scanning and product lookup
@@ -55,6 +56,10 @@ const Scanner = () => {
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [exactMatch, setExactMatch] = useState(false);
   const searchDebounceTimer = useRef(null);
+
+  const [scanning, setScanning] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     return () => {
@@ -108,11 +113,25 @@ const Scanner = () => {
     }
   }
 
-  const handleScan = async () => {
-    if (isScanning) {
-      stopScanner();
-    } else {
-      startScanner();
+  const handleScan = async (barcode) => {
+    try {
+      setScanning(true);
+      setError(null);
+      
+      const { data, error } = await mockService.scanBarcode(barcode);
+      
+      if (error) {
+        setError(error);
+        toast.error(error);
+      } else {
+        setResult(data);
+        toast.success('Product found!');
+      }
+    } catch (err) {
+      setError(err.message);
+      toast.error('Error scanning barcode');
+    } finally {
+      setScanning(false);
     }
   };
 
@@ -560,29 +579,39 @@ const Scanner = () => {
           <h2 className="text-xl font-bold mb-4">Barcode Scanner</h2>
           
           <div className="mb-4">
-            <button
-              onClick={handleScan}
-              className={`px-4 py-2 rounded ${
-                isScanning
-                  ? "bg-red-500 hover:bg-red-600 text-white"
-                  : "bg-blue-500 hover:bg-blue-600 text-white"
-              }`}
-            >
-              {isScanning ? "Stop Scanner" : "Start Scanner"}
-            </button>
+            <input
+              type="text"
+              placeholder="Enter barcode manually"
+              className="border p-2 rounded"
+              onKeyPress={(e) => {
+                if (e.key === 'Enter') {
+                  handleScan(e.target.value);
+                }
+              }}
+            />
           </div>
           
-          <div className="relative">
-            {/* Scanner will be mounted to this ref */}
-            <div 
-              ref={scannerRef} 
-              className="border-2 border-gray-300 rounded-lg overflow-hidden h-64 flex items-center justify-center bg-gray-100"
-            >
-              {!isScanning && (
-                <p className="text-gray-500">Click "Start Scanner" to begin</p>
-              )}
+          {scanning && (
+            <div className="text-center">
+              <p>Scanning...</p>
             </div>
-          </div>
+          )}
+          
+          {error && (
+            <div className="text-red-500 mb-4">
+              <p>{error}</p>
+            </div>
+          )}
+          
+          {result && (
+            <div className="border p-4 rounded">
+              <h3 className="font-bold">{result.name}</h3>
+              <p>SKU: {result.sku}</p>
+              <p>Price: ${result.price}</p>
+              <p>Quantity: {result.quantity}</p>
+              <p>Location: {result.location}</p>
+            </div>
+          )}
         </div>
       
         <div className="bg-white p-4 rounded-lg shadow">

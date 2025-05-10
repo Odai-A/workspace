@@ -7,7 +7,7 @@ import Badge from '../components/ui/Badge';
 import Pagination from '../components/ui/Pagination';
 import { MagnifyingGlassIcon, PlusIcon } from '@heroicons/react/24/outline';
 import { scanTaskService } from '../services/api';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../contexts/AuthContext';
 import { toast } from 'react-toastify';
 
 const ScanTasks = () => {

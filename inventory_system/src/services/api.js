@@ -1,6 +1,5 @@
 import axios from 'axios';
-import { supabase } from '../config/supabaseClient';
-import { productLookupService as dbProductLookupService } from './databaseService';
+import { mockService } from './mockData';
 
 // Axios instance for API calls
 const apiClient = axios.create({
@@ -115,8 +114,6 @@ export const scanTaskService = {
       }
       
       // Use the same endpoint base and key as the GetMyByBarCode call
-      // const apiKey = import.meta.env.VITE_F2A_BARCODE_API_KEY;
-      // const apiUrl = import.meta.env.VITE_API_URL;
       const apiKey = FNSKU_TO_ASIN_API_KEY; // Use consistent key
       // Construct the AddOrGet URL from the known base endpoint
       const addOrGetUrl = FNSKU_API_ENDPOINT.replace('/GetMyByBarCode', '/AddOrGet'); 
@@ -126,7 +123,6 @@ export const scanTaskService = {
         { barCode },
         {
           headers: {
-            // 'Authorization': `Bearer ${apiKey}`, // Assuming api-key header is used
             'api-key': apiKey, // Use consistent header
             'Accept': 'application/json',
             'Content-Type': 'application/json'
@@ -217,97 +213,27 @@ const mockProductData = {
 // Mock API service for inventory management
 const apiService = {
   async getInventory() {
-    // In a real app with Supabase:
-    const { data, error } = await supabase
-      .from('inventory')
-      .select('*')
-      .order('created_at', { ascending: false });
-    
-    if (error) {
-      console.error('Error fetching inventory:', error);
-      throw error;
-    }
-    
-    return data || [];
+    return await mockService.getInventory();
   },
   
   async getInventoryItem(id) {
-    // In a real app with Supabase:
-    const { data, error } = await supabase
-      .from('inventory')
-      .select('*')
-      .eq('id', id)
-      .single();
-    
-    if (error) {
-      console.error(`Error fetching inventory item ${id}:`, error);
-      throw error;
-    }
-    
-    return data;
+    return await mockService.getInventoryItem(id);
   },
   
   async updateInventoryItem(id, itemData) {
-    // In a real app with Supabase:
-    const { data, error } = await supabase
-      .from('inventory')
-      .update(itemData)
-      .eq('id', id)
-      .select()
-      .single();
-    
-    if (error) {
-      console.error(`Error updating inventory item ${id}:`, error);
-      throw error;
-    }
-    
-    return data;
+    return await mockService.updateInventory(id, itemData);
   },
   
   async addInventoryItem(itemData) {
-    // In a real app with Supabase:
-    const { data, error } = await supabase
-      .from('inventory')
-      .insert(itemData)
-      .select()
-      .single();
-    
-    if (error) {
-      console.error('Error adding inventory item:', error);
-      throw error;
-    }
-    
-    return data;
+    return await mockService.createProduct(itemData);
   },
   
   async deleteInventoryItem(id) {
-    // In a real app with Supabase:
-    const { error } = await supabase
-      .from('inventory')
-      .delete()
-      .eq('id', id);
-    
-    if (error) {
-      console.error(`Error deleting inventory item ${id}:`, error);
-      throw error;
-    }
-    
-    return true;
+    return await mockService.deleteProduct(id);
   },
   
   async getProducts() {
-    // In a real app with Supabase:
-    const { data, error } = await supabase
-      .from('products')
-      .select('*')
-      .order('created_at', { ascending: false });
-    
-    if (error) {
-      console.error('Error fetching products:', error);
-      throw error;
-    }
-    
-    return data || [];
+    return await mockService.getProducts();
   },
   
   // Get all available product categories
@@ -333,7 +259,7 @@ export const apiProductLookupService = {
   // Save product lookup data to database
   async saveProductLookup(productData, userId) {
     try {
-      return await dbProductLookupService.saveProductLookup(productData, userId);
+      return await mockService.createProduct(productData);
     } catch (error) {
       console.error('Error saving product lookup:', error);
       return null;
@@ -343,7 +269,7 @@ export const apiProductLookupService = {
   // Check if product lookup data exists in database
   async getProductLookup(fnsku, userId) {
     try {
-      return await dbProductLookupService.getProductByFnsku(fnsku, userId);
+      return await mockService.getProduct(fnsku);
     } catch (error) {
       console.error('Error getting product lookup:', error);
       return null;
@@ -353,15 +279,15 @@ export const apiProductLookupService = {
   // Search for products by any field (name, description, ASIN, SKU, etc.)
   async searchProducts(query, options = {}) {
     try {
-      // Get recent lookups from the user
-      const { userId } = options;
-      if (!query && userId) {
-        return await dbProductLookupService.getRecentLookups(userId, options.limit || 10);
-      }
+      const { data } = await mockService.getProducts();
+      if (!query) return data;
       
-      // In the future, implement a more sophisticated search
-      // For now, return recent lookups
-      return await dbProductLookupService.getRecentLookups(userId, options.limit || 10);
+      // Simple search implementation
+      return data.filter(product => 
+        Object.values(product).some(value => 
+          String(value).toLowerCase().includes(query.toLowerCase())
+        )
+      );
     } catch (error) {
       console.error('Error searching products:', error);
       return [];
@@ -376,13 +302,13 @@ export const apiProductLookupService = {
  */
 export const getProductLookup = async (code) => {
   try {
-    // First check if we have this in our local database
-    const localData = await dbProductLookupService.getProductByFnsku(code);
+    // First check if we have this in our mock data
+    const { data: localData } = await mockService.getProduct(code);
     if (localData) {
       return localData;
     }
     
-    // If not found locally, use the fetchProductByFnsku function without forcing mock data
+    // If not found locally, use the fetchProductByFnsku function
     return await fetchProductByFnsku(code);
   } catch (error) {
     console.error('Error in getProductLookup:', error);
@@ -416,113 +342,73 @@ export const fetchProductByFnsku = async (fnsku, options = {}) => {
   console.log(`Looking up product with FNSKU: ${fnsku}, userId: ${userId}, useMock: ${useMock}`);
   
   try {
-    // First check if we have this product cached in our database
-    const cachedProduct = await dbProductLookupService.getProductByFnsku(fnsku);
+    // First check if we have this product in our mock data
+    const { data: cachedProduct } = await mockService.getProduct(fnsku);
     
-    if (cachedProduct && cachedProduct.asin) {
-      console.log('Found valid cached product in database (with ASIN):', cachedProduct.asin);
-      // Update the last lookup timestamp in the background
-      dbProductLookupService.updateLastLookup(fnsku, userId).catch(error => {
-        console.error('Failed to update last lookup timestamp:', error);
-      });
+    if (cachedProduct) {
+      console.log('Found product in mock data:', cachedProduct);
       return cachedProduct;
     }
     
-    console.log('No cached product found, proceeding to lookup...'); // Updated log
+    console.log('No cached product found, proceeding to lookup...');
     
-    // --- NEW STEP: Call AddOrGet before attempting to fetch --- 
-    try {
-      // Attempt to add/register the FNSKU with the external service first.
-      // We don't necessarily need the return value, just ensuring it's registered.
-      await scanTaskService.addOrGetTask(fnsku);
-    } catch (addOrGetError) {
-      // Log the error but continue anyway, as GetMyByBarCode might still work 
-      // or the fetchWithRetry might handle subsequent errors.
-      console.error('Error during AddOrGet pre-call:', addOrGetError);
-    }
-    // --- END NEW STEP ---
-
-    // --- Replace fetchWithRetry with Polling Logic ---
-    let product = null;
-    let apiData = null;
-    const maxAttempts = 5; // Max polling attempts
-    const pollInterval = 1000; // Milliseconds between attempts (1 second)
-
-    // Helper function for a single fetch attempt
-    const fetchAsinOnce = async (currentFnsku) => {
+    // If not found in mock data and we're not using mock data, try the external API
+    if (!useMock) {
       try {
-        const apiUrl = `${FNSKU_API_ENDPOINT}?BarCode=${currentFnsku}`;
-        const response = await axios.get(apiUrl, {
-          headers: { 'accept': 'application/json', 'api-key': FNSKU_TO_ASIN_API_KEY },
-          timeout: 5000 // Shorter timeout for polling checks
-        });
-        // console.log(`Polling check response for ${currentFnsku}:`, response.data); // Optional: verbose logging
-        // Check for success and presence of data.data and data.data.asin
-        if (response.status === 200 && response.data?.succeeded && response.data?.data?.asin) {
-          return response.data.data; // Return the inner data object containing the ASIN
-        } else if (response.status === 200 && response.data?.succeeded) {
-          // Succeeded, but data is null or ASIN is missing/null - still waiting
-          return null; 
-        } else {
-          // Handle non-success or unexpected structure
-          console.warn(`fetchAsinOnce failed or got unexpected structure for ${currentFnsku}`, response.data);
-          return null; // Indicate failure or still waiting
+        // Attempt to add/register the FNSKU with the external service first
+        await scanTaskService.addOrGetTask(fnsku);
+        
+        // Poll for results
+        let product = null;
+        let apiData = null;
+        const maxAttempts = 5;
+        const pollInterval = 1000;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          console.log(`Polling attempt ${attempt}/${maxAttempts} for FNSKU: ${fnsku}`);
+          const response = await axios.get(FNSKU_API_ENDPOINT, {
+            params: { BarCode: fnsku },
+            headers: { 
+              'accept': 'application/json', 
+              'api-key': FNSKU_TO_ASIN_API_KEY 
+            },
+            timeout: 5000
+          });
+          
+          if (response.data?.succeeded && response.data?.data?.asin) {
+            apiData = response.data.data;
+            break;
+          }
+          
+          if (attempt < maxAttempts) {
+            await new Promise(resolve => setTimeout(resolve, pollInterval));
+          }
+        }
+
+        if (apiData) {
+          product = {
+            fnsku: fnsku,
+            asin: apiData.asin,
+            sku: `SKU-${fnsku.slice(-6)}`,
+            name: `Amazon Product (ASIN: ${apiData.asin})`,
+            description: `Product details for FNSKU: ${fnsku}`,
+            price: 0,
+            category: 'Amazon Products',
+            image_url: `https://placeholder.pics/svg/300/DEDEDE/555555/ASIN${apiData.asin}`,
+            condition: 'New'
+          };
+          
+          // Save to mock data
+          await mockService.createProduct(product);
+          return product;
         }
       } catch (error) {
-        console.error(`fetchAsinOnce error for ${currentFnsku}:`, error.message);
-        return null; // Indicate failure
+        console.error('Error fetching from external API:', error);
       }
-    };
-
-    // Polling loop
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      console.log(`Polling attempt ${attempt}/${maxAttempts} for FNSKU: ${fnsku}`);
-      apiData = await fetchAsinOnce(fnsku);
-
-      if (apiData) { // apiData will only be truthy if ASIN was found
-        console.log(`ASIN ${apiData.asin} found during polling attempt ${attempt}`);
-        break; // Exit loop, ASIN found
-      }
-
-      // If ASIN not found and not the last attempt, wait
-      if (attempt < maxAttempts) {
-        await new Promise(resolve => setTimeout(resolve, pollInterval)); 
-      }
-    }
-
-    // After polling, check if we got the data with ASIN
-    if (apiData) { // If fetchAsinOnce returned valid data.data
-      product = {
-        fnsku: fnsku,
-        asin: apiData.asin,
-        sku: `SKU-${fnsku.slice(-6)}`, 
-        name: `Amazon Product (ASIN: ${apiData.asin})`,
-        description: `Product details for FNSKU: ${fnsku}`,
-        price: 0, 
-        category: 'Amazon Products',
-        image_url: `https://placeholder.pics/svg/300/DEDEDE/555555/ASIN${apiData.asin}`,
-        condition: 'New'
-      };
-    } else {
-      console.warn(`Polling finished after ${maxAttempts} attempts, ASIN not found for ${fnsku}`);
-      // Decide what to return - let's return null if polling failed
-      product = null; 
-    }
-    // --- END Polling Logic ---
-    
-    // --- MODIFIED: Only save if ASIN was actually found --- 
-    if (product && product.asin) {
-      // Save the product lookup (with a valid ASIN) in the background
-      console.log('Saving product with valid ASIN to database:', product);
-      dbProductLookupService.saveProductLookup(product, userId).catch(error => {
-        console.error('Failed to save product lookup:', error);
-      });
-    } else if (product) {
-      // Log if product exists but ASIN is null (won't be saved)
-      console.log('Product retrieved but ASIN is null. Not saving to DB yet.', product);
     }
     
-    return product;
+    // If we get here, either we're using mock data or the API call failed
+    return generateMockProductData(fnsku);
   } catch (error) {
     console.error('Error in fetchProductByFnsku:', error);
     return null;
@@ -565,4 +451,7 @@ const generateMockProductData = (fnsku) => {
   };
 };
 
-export default apiClient; 
+// Export the mock service as our API service
+export const api = mockService;
+
+export default api; 

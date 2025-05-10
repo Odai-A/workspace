@@ -23,6 +23,59 @@ export const NavigationProvider = ({ children }) => {
   // Get location for active route tracking
   const location = useLocation();
 
+  // Navigation items configuration
+  const navigationItems = [
+    {
+      name: 'Dashboard',
+      path: '/dashboard',
+      icon: 'HomeIcon',
+      permission: null
+    },
+    {
+      name: 'Inventory',
+      path: '/inventory',
+      icon: 'ArchiveBoxIcon',
+      permission: 'view_inventory'
+    },
+    {
+      name: 'Scanner',
+      path: '/scanner',
+      icon: 'QrCodeIcon',
+      permission: 'use_scanner'
+    },
+    {
+      name: 'Product Import',
+      path: '/product-import',
+      icon: 'ArchiveBoxIcon',
+      permission: 'import_products'
+    },
+    {
+      name: 'Scan Tasks',
+      path: '/scan-tasks',
+      icon: 'ArrowsRightLeftIcon',
+      permission: 'view_scan_tasks'
+    },
+    {
+      name: 'Reports',
+      path: '/reports',
+      icon: 'ChartBarIcon',
+      permission: 'view_reports'
+    },
+    {
+      name: 'Users',
+      path: '/users',
+      icon: 'UsersIcon',
+      permission: 'manage_users',
+      role: 'admin'
+    },
+    {
+      name: 'Settings',
+      path: '/settings',
+      icon: 'Cog6ToothIcon',
+      permission: 'manage_settings'
+    }
+  ];
+
   // Set current active route
   const setCurrentRoute = (path) => {
     setActiveRoute(path);
@@ -33,62 +86,7 @@ export const NavigationProvider = ({ children }) => {
     setCurrentRoute(location.pathname);
   }, [location]);
 
-  // Navigation items configuration
-  const navigationItems = [
-    {
-      name: 'Dashboard',
-      path: '/dashboard',
-      icon: 'HomeIcon',
-      permission: null,
-      role: null,
-    },
-    {
-      name: 'Products',
-      path: '/products',
-      icon: 'TagIcon',
-      permission: 'view_products',
-      role: null,
-    },
-    {
-      name: 'Scanner',
-      path: '/scanner',
-      icon: 'QrCodeIcon',
-      permission: 'use_scanner',
-      role: null,
-    },
-    /* Removed Scan Tasks
-    {
-      name: 'Scan Tasks',
-      path: '/scan-tasks',
-      icon: 'ClipboardDocumentListIcon',
-      permission: 'use_scanner',
-      role: null,
-    },
-    */
-    {
-      name: 'Reports',
-      path: '/reports',
-      icon: 'ChartBarIcon',
-      permission: 'view_reports',
-      role: null,
-    },
-    {
-      name: 'Users',
-      path: '/users',
-      icon: 'UsersIcon',
-      permission: null,
-      role: 'admin',
-    },
-    {
-      name: 'Settings',
-      path: '/settings',
-      icon: 'Cog6ToothIcon',
-      permission: null,
-      role: null,
-    },
-  ];
-
-  // Toggle sidebar collapsed state
+  // Toggle sidebar
   const toggleSidebar = () => {
     setSidebarCollapsed(!sidebarCollapsed);
   };
