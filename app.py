@@ -150,8 +150,29 @@ def search():
 
 @app.route('/inventory')
 def inventory():
-    products = Product.query.order_by(Product.title).all() # Get all products, ordered by title
-    return render_template('inventory.html', products=products)
+    search_query = request.args.get('search_query', '').strip()
+    page = request.args.get('page', 1, type=int) # Get current page number, default to 1
+    per_page = 25  # Number of items per page
+
+    query = Product.query
+
+    if search_query:
+        search_term = f"%{search_query}%"
+        query = query.filter(
+            Product.lpn.ilike(search_term) |
+            Product.title.ilike(search_term) |
+            Product.asin.ilike(search_term) |
+            Product.fnsku.ilike(search_term)
+        )
+    
+    # Use paginate instead of .all()
+    pagination = query.order_by(Product.title).paginate(page=page, per_page=per_page, error_out=False)
+    products_on_page = pagination.items
+    
+    return render_template('inventory.html', 
+                           products=products_on_page, 
+                           pagination=pagination, 
+                           search_query=search_query)
 
 @app.route('/scan')
 def scan_barcode():

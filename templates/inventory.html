@@ -4,7 +4,13 @@
 
 {% block content %}
 <div class="container mt-4">
-    <h1 class="mb-4">Product Inventory</h1>
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1>Product Inventory</h1>
+        <form method="GET" action="{{ url_for('inventory') }}" class="form-inline">
+            <input type="text" class="form-control mr-sm-2" name="search_query" placeholder="Search Inventory..." value="{{ request.args.get('search_query', '') }}">
+            <button class="btn btn-outline-primary my-2 my-sm-0" type="submit">Search</button>
+        </form>
+    </div>
 
     {% if products %}
     <div class="table-responsive">
@@ -50,5 +56,38 @@
         No products found in the inventory.
     </div>
     {% endif %}
+
+    <!-- Pagination Links -->
+    {% if pagination and pagination.pages > 1 %}
+    <nav aria-label="Inventory Page Navigation">
+        <ul class="pagination justify-content-center mt-4">
+            <!-- Previous Page Link -->
+            <li class="page-item {% if not pagination.has_prev %}disabled{% endif %}">
+                <a class="page-link" href="{{ url_for('inventory', page=pagination.prev_num, search_query=search_query) if pagination.has_prev else '#' }}" tabindex="-1" aria-disabled="true">Previous</a>
+            </li>
+
+            <!-- Page Numbers -->
+            {% for page_num in pagination.iter_pages(left_edge=1, right_edge=1, left_current=2, right_current=2) %}
+                {% if page_num %}
+                    {% if page_num == pagination.page %}
+                        <li class="page-item active" aria-current="page">
+                            <span class="page-link">{{ page_num }} <span class="sr-only">(current)</span></span>
+                        </li>
+                    {% else %}
+                        <li class="page-item"><a class="page-link" href="{{ url_for('inventory', page=page_num, search_query=search_query) }}">{{ page_num }}</a></li>
+                    {% endif %}
+                {% else %}
+                    <li class="page-item disabled"><span class="page-link">...</span></li>
+                {% endif %}
+            {% endfor %}
+
+            <!-- Next Page Link -->
+            <li class="page-item {% if not pagination.has_next %}disabled{% endif %}">
+                <a class="page-link" href="{{ url_for('inventory', page=pagination.next_num, search_query=search_query) if pagination.has_next else '#' }}">Next</a>
+            </li>
+        </ul>
+    </nav>
+    {% endif %}
+
 </div>
 {% endblock %} 
