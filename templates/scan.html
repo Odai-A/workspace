@@ -6,6 +6,11 @@
 <div class="container mt-4">
     <h1 class="mb-4">Scan Product Barcode</h1>
 
+    <div class="form-group">
+        <label for="camera-select">Select Camera:</label>
+        <select id="camera-select" class="form-control" style="max-width: 500px; margin-bottom: 10px;"></select>
+    </div>
+
     <div id="reader" style="width: 100%; max-width: 500px; margin: auto;"></div>
     <div id="scan-result" class="mt-3 text-center"></div>
     
@@ -27,10 +32,12 @@
 <script>
 document.addEventListener('DOMContentLoaded', (event) => {
     const html5QrCode = new Html5Qrcode("reader");
+    const cameraSelect = document.getElementById('camera-select');
     const startScanButton = document.getElementById('start-scan-btn');
     const stopScanButton = document.getElementById('stop-scan-btn');
     const scanResultDiv = document.getElementById('scan-result');
     let currentCameraId = null;
+    let availableCameras = [];
 
     const qrCodeSuccessCallback = (decodedText, decodedResult) => {
         // Handle on success condition with the decoded text or result.
@@ -55,37 +62,76 @@ document.addEventListener('DOMContentLoaded', (event) => {
     const config = {
         fps: 10, // Optional, frame per seconds for qr code scanning
         qrbox: { width: 250, height: 250 }, // Optional, if you want bounded box UI
-        rememberLastUsedCamera: true,
+        rememberLastUsedCamera: false, // Set to false to respect dropdown selection more reliably
         supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA] // Only use camera
     };
 
-    startScanButton.addEventListener('click', () => {
-        scanResultDiv.innerHTML = '<p>Starting camera...</p>';
-        Html5Qrcode.getCameras().then(cameras => {
-            if (cameras && cameras.length) {
-                currentCameraId = cameras[0].id; // Use the first camera by default
-                // You could add a camera selection dropdown here if desired
-                html5QrCode.start(
-                    currentCameraId,      // Or { facingMode: "environment" }
-                    config,
-                    qrCodeSuccessCallback,
-                    qrCodeErrorCallback
-                ).then(() => {
-                    scanResultDiv.innerHTML = '<p class="text-info">Scanning...</p>';
-                    startScanButton.style.display = 'none';
-                    stopScanButton.style.display = 'inline-block';
-                }).catch(err => {
-                    scanResultDiv.innerHTML = `<p class="text-danger">Error starting camera: ${err}</p>`;
-                    console.error("Error starting camera: ", err);
-                });
-            } else {
-                scanResultDiv.innerHTML = '<p class="text-danger">No cameras found.</p>';
-                console.error("No cameras found.");
-            }
+    function startScan(cameraId) {
+        html5QrCode.start(
+            cameraId,
+            config,
+            qrCodeSuccessCallback,
+            qrCodeErrorCallback
+        ).then(() => {
+            scanResultDiv.innerHTML = '<p class="text-info">Scanning...</p>';
+            startScanButton.style.display = 'none';
+            stopScanButton.style.display = 'inline-block';
+            cameraSelect.disabled = true;
         }).catch(err => {
-            scanResultDiv.innerHTML = `<p class="text-danger">Error getting cameras: ${err}</p>`;
-            console.error("Error getting cameras: ", err);
+            scanResultDiv.innerHTML = `<p class="text-danger">Error starting camera: ${err}</p>`;
+            console.error("Error starting camera: ", err);
+            cameraSelect.disabled = false;
         });
+    }
+
+    // Populate camera select dropdown
+    Html5Qrcode.getCameras().then(cameras => {
+        if (cameras && cameras.length) {
+            availableCameras = cameras;
+            cameras.forEach(camera => {
+                const option = document.createElement('option');
+                option.value = camera.id;
+                option.text = camera.label || `Camera ${cameraSelect.options.length + 1}`;
+                cameraSelect.appendChild(option);
+            });
+            // Select the last camera by default (often back camera on phones)
+            if(cameras.length > 0) {
+                cameraSelect.value = cameras[cameras.length - 1].id;
+            }
+        } else {
+            scanResultDiv.innerHTML = '<p class="text-danger">No cameras found.</p>';
+            console.error("No cameras found.");
+            startScanButton.disabled = true;
+            cameraSelect.disabled = true;
+        }
+    }).catch(err => {
+        scanResultDiv.innerHTML = `<p class="text-danger">Error getting cameras: ${err}</p>`;
+        console.error("Error getting cameras: ", err);
+        startScanButton.disabled = true;
+        cameraSelect.disabled = true;
+    });
+
+    startScanButton.addEventListener('click', () => {
+        currentCameraId = cameraSelect.value;
+        if (!currentCameraId) {
+            scanResultDiv.innerHTML = '<p class="text-warning">Please select a camera.</p>';
+            return;
+        }
+        scanResultDiv.innerHTML = '<p>Starting camera...</p>';
+        startScan(currentCameraId);
+    });
+
+    cameraSelect.addEventListener('change', () => {
+        // If scanning is active, stop it and restart with the new camera
+        if (stopScanButton.style.display !== 'none') {
+            html5QrCode.stop().then(() => {
+                currentCameraId = cameraSelect.value;
+                startScan(currentCameraId);
+            }).catch(err => {
+                console.error("Error stopping/restarting camera on select: ", err);
+                scanResultDiv.innerHTML = `<p class="text-danger">Error changing camera: ${err}</p>`;
+            });
+        }
     });
 
     stopScanButton.addEventListener('click', () => {

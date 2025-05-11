@@ -11,13 +11,21 @@
             /* padding-top: 5rem; Remove top padding from old navbar */
         }
         .container-fluid {
-            height: 100vh; /* Full viewport height */
+            /* height: 100vh; /* Full viewport height - may not be desired if sidebar stacks */
         }
         .sidebar {
             /* background-color: #343a40; /* Dark background for sidebar - REMOVED */
             padding: 20px;
             border-right: 1px solid #dee2e6; /* Add a subtle border to the right of the sidebar */
-            height: 100%; /* Full height of its row */
+            /* height: 100%; /* Full height of its row - adjust for mobile stacking */
+        }
+        @media (min-width: 768px) { /* md breakpoint */
+            .sidebar {
+                height: 100vh; /* Full height only on md and up */
+            }
+            .main-content {
+                 height: 100vh; /* Take full viewport height for scrolling on md and up */
+            }
         }
         .sidebar h4 {
             color: #343a40; /* Dark color for title */
@@ -49,7 +57,7 @@
         .main-content {
             padding: 20px;
             overflow-y: auto; /* Allow scrolling for main content if it overflows */
-            height: 100vh; /* Take full viewport height for scrolling */
+            /* height: 100vh; /* Take full viewport height for scrolling - moved to @media query */
         }
         .form-control-scan {
             height: calc(2.5rem + 2px);
@@ -61,7 +69,7 @@
     <div class="container-fluid">
         <div class="row no-gutters">
             <!-- Sidebar -->
-            <nav class="col-md-3 col-lg-2 d-md-block sidebar collapse" id="sidebarMenu">
+            <nav class="col-12 col-md-3 col-lg-2 sidebar" id="sidebarMenu">
                 <div class="sidebar-sticky pt-3">
                     <h4>Product App</h4>
                     <ul class="nav flex-column nav-pills">
