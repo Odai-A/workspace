@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}Upload CSV - Product App{% endblock %}
+
+{% block content %}
+<div class="jumbotron">
+    <h1 class="display-4">Upload CSV Manifest</h1>
+    <p class="lead">Upload your CSV file to populate or update the product database.</p>
+    <hr class="my-4">
+    <form method="POST" enctype="multipart/form-data" action="{{ url_for('upload_csv') }}">
+        <div class="form-group">
+            <label for="csvfile">Select CSV file</label>
+            <input type="file" class="form-control-file" id="csvfile" name="csvfile" accept=".csv" required>
+        </div>
+        <button type="submit" class="btn btn-primary btn-lg">Upload</button>
+    </form>
+</div>
+
+<div class="mt-5">
+    <h4>CSV File Format:</h4>
+    <p>Your CSV file should contain the following columns (header names are important):</p>
+    <ul>
+        <li><strong>X-Z ASIN</strong> (This will be used as the LPN)</li>
+        <li><strong>B00 Asin</strong> (Used for ASIN)</li>
+        <li><strong>Fn Sku</strong> (Used for FNSKU)</li>
+        <li><strong>Description</strong> (Used for Title)</li>
+        <li><strong>MSRP</strong> (Optional, used for MSRP)</li>
+    </ul>
+    <p>Other columns will be ignored. If an LPN already exists, its details (ASIN, FNSKU, Title, MSRP) will be updated. New LPNs will be added.</p>
+</div>
+{% endblock %} 

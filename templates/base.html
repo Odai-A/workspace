@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+    <link href="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css">
+    <title>{% block title %}Product App{% endblock %}</title>
+    <style>
+        body {
+            /* padding-top: 5rem; Remove top padding from old navbar */
+        }
+        .container-fluid {
+            height: 100vh; /* Full viewport height */
+        }
+        .sidebar {
+            /* background-color: #343a40; /* Dark background for sidebar - REMOVED */
+            padding: 20px;
+            border-right: 1px solid #dee2e6; /* Add a subtle border to the right of the sidebar */
+            height: 100%; /* Full height of its row */
+        }
+        .sidebar h4 {
+            color: #343a40; /* Dark color for title */
+            margin-bottom: 1rem; /* Adjusted margin */
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #e9ecef; /* Line below title */
+        }
+        .sidebar .nav-item {
+            border-bottom: 1px solid #f0f0f0; /* Lighter line to separate items */
+        }
+        .sidebar .nav-item:last-child {
+            border-bottom: none; /* No border for the last item */
+        }
+        .sidebar .nav-link {
+            color: #495057; /* Standard dark text color for nav links */
+            padding-top: 0.75rem;   /* Increased padding for better spacing */
+            padding-bottom: 0.75rem; /* Increased padding for better spacing */
+            border-radius: 0; /* Remove default pill radius if any from nav-pills */
+        }
+        .sidebar .nav-link.active {
+            color: #007bff; /* Bootstrap primary blue for active text */
+            font-weight: 500; /* Slightly bolder for active */
+            background-color: #e9ecef; /* Light grey background for active item */
+        }
+        .sidebar .nav-link:hover:not(.active) { /* Hover for non-active items */
+            color: #0056b3; /* Darker blue on hover */
+            background-color: #f8f9fa; /* Very light grey on hover */
+        }
+        .main-content {
+            padding: 20px;
+            overflow-y: auto; /* Allow scrolling for main content if it overflows */
+            height: 100vh; /* Take full viewport height for scrolling */
+        }
+        .form-control-scan {
+            height: calc(2.5rem + 2px);
+            font-size: 1.25rem;
+        }
+    </style>
+  </head>
+  <body>
+    <div class="container-fluid">
+        <div class="row no-gutters">
+            <!-- Sidebar -->
+            <nav class="col-md-3 col-lg-2 d-md-block sidebar collapse" id="sidebarMenu">
+                <div class="sidebar-sticky pt-3">
+                    <h4>Product App</h4>
+                    <ul class="nav flex-column nav-pills">
+                        <li class="nav-item">
+                            <a class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}" href="{{ url_for('dashboard') }}">
+                                Dashboard
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link {% if request.endpoint == 'search' or request.endpoint == 'index' %}active{% endif %}" href="{{ url_for('search') }}">
+                                Search
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link {% if request.endpoint == 'upload_csv' %}active{% endif %}" href="{{ url_for('upload_csv') }}">
+                                Upload CSV
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link {% if request.endpoint == 'inventory' %}active{% endif %}" href="{{ url_for('inventory') }}">
+                                Inventory
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link {% if request.endpoint == 'scan_barcode' %}active{% endif %}" href="{{ url_for('scan_barcode') }}">
+                                Scan Barcode
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link {% if request.endpoint == 'scan_history_list' %}active{% endif %}" href="{{ url_for('scan_history_list') }}">
+                                Scan History
+                            </a>
+                        </li>
+                    </ul>
+                </div>
+            </nav>
+
+            <!-- Main content -->
+            <main role="main" class="col-md-9 ml-sm-auto col-lg-10 main-content">
+                <div class="container mt-4">
+                    {% with messages = get_flashed_messages(with_categories=true) %}
+                        {% if messages %}
+                            {% for category, message in messages %}
+                            <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                                {{ message }}
+                                <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                                <span aria-hidden="true">&times;</span>
+                                </button>
+                            </div>
+                            {% endfor %}
+                        {% endif %}
+                    {% endwith %}
+                    {% block content %}{% endblock %}
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.5.4/dist/umd/popper.min.js"></script>
+    <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
+    {% block scripts %}{% endblock %}
+  </body>
+</html> 

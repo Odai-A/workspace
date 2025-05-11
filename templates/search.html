@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+
+{% block title %}Search Products - Product App{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <h1 class="text-center mb-0">Product Search</h1>
+                <a href="{{ url_for('upload_csv') }}" class="btn btn-info">Import CSV Manifest</a>
+            </div>
+            <form method="GET" action="{{ url_for('search') }}">
+                <div class="input-group mb-3">
+                    <input type="text" class="form-control form-control-scan" name="query" placeholder="Enter LPN, ASIN, or FNSKU" value="{{ request.args.get('query', '') }}" autofocus>
+                    <div class="input-group-append">
+                        <button class="btn btn-outline-primary" type="submit">Search</button>
+                    </div>
+                </div>
+            </form>
+
+            {% if product %}
+                <div class="card">
+                    <div class="card-header">
+                        Search Result
+                    </div>
+                    <div class="card-body">
+                        <h5 class="card-title">{{ product.title }}</h5>
+                        <p class="card-text">
+                            <strong>LPN:</strong> {{ product.lpn }}<br>
+                            <strong>ASIN:</strong> {{ product.asin }}<br>
+                            <strong>FNSKU:</strong> {{ product.fnsku }}<br>
+                            {% if product.msrp is not none %}
+                            <strong>MSRP:</strong> ${{ "%.2f"|format(product.msrp) }}<br>
+                            {% endif %}
+                        </p>
+                        {% if product.asin %}
+                            <a href="https://www.amazon.com/dp/{{ product.asin }}" class="btn btn-success" target="_blank">View on Amazon</a>
+                        {% else %}
+                            <p class="text-muted">ASIN not available for Amazon link.</p>
+                        {% endif %}
+                    </div>
+                </div>
+            {% elif search_performed and not product %}
+                <div class="alert alert-warning" role="alert">
+                    No product found for query: "{{ request.args.get('query') }}"
+                </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Optional: Auto-submit form if input looks like a typical barcode scan (e.g., ends with a newline or tab)
+    // This might need adjustment based on your scanner's behavior.
+    document.addEventListener('DOMContentLoaded', function() {
+        const searchInput = document.querySelector('input[name="query"]');
+        if (searchInput) {
+            searchInput.addEventListener('input', function(e) {
+                // A common behavior for scanners is to append an Enter/Newline character.
+                // If your scanner behaves differently (e.g. Tab), adjust accordingly.
+                if (e.target.value.includes('\n')) {
+                    e.target.value = e.target.value.replace('\n', ''); // Clean the input
+                    e.target.form.submit(); // Submit the form
+                }
+            });
+        }
+    });
+</script>
+{% endblock %} 
