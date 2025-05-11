@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { toast } from 'react-toastify';
 import { FiSave, FiPlusCircle, FiEdit, FiTrash2, FiKey, FiBell, FiSun, FiMoon } from 'react-icons/fi';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../contexts/AuthContext';
 
 // Toggle switch component
 const Toggle = ({ enabled, onChange, label }) => {

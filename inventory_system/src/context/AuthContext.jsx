@@ -1,5 +1,4 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { supabase } from '../config/supabaseClient';
 
 // Create the context
 const AuthContext = createContext(null);
@@ -16,14 +15,12 @@ export const useAuth = () => {
 // Provider component
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
-  const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
 
   // Debug function to log auth state changes
   const logAuthState = (label, data = {}) => {
     console.log(`AUTH STATE [${label}]:`, {
       isAuthenticated: !!user,
-      hasSession: !!session,
       userData: user ? { id: user.id, email: user.email } : null,
       ...data
     });
@@ -33,55 +30,21 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     console.log('AuthProvider initialized, checking for session...');
     
-    // Get the initial session
-    const initSession = async () => {
+    // Check for stored user data
+    const storedUser = localStorage.getItem('user');
+    if (storedUser) {
       try {
-        console.log('Requesting session from Supabase...');
-        const { data, error } = await supabase.auth.getSession();
-        
-        if (error) {
-          console.error('Error getting session:', error);
-          setUser(null);
-          setSession(null);
-          logAuthState('init-error', { error });
-        } else {
-          if (data?.session) {
-            console.log('Session found:', data.session.user.id);
-            setSession(data.session);
-            setUser(data.session.user);
-            logAuthState('init-success', { userId: data.session.user.id });
-          } else {
-            console.log('No active session found');
-            logAuthState('init-no-session');
-          }
-        }
+        const parsedUser = JSON.parse(storedUser);
+        setUser(parsedUser);
+        logAuthState('init-success', { userId: parsedUser.id });
       } catch (err) {
-        console.error('Unexpected error during auth initialization:', err);
-        logAuthState('init-exception', { error: err });
-      } finally {
-        setLoading(false);
-        console.log('Auth initialization complete');
+        console.error('Error parsing stored user data:', err);
+        localStorage.removeItem('user');
       }
-    };
-
-    initSession();
-
-    // Listen for auth changes
-    const { data: authListener } = supabase.auth.onAuthStateChange(
-      async (event, newSession) => {
-        console.log('Auth state changed:', event, newSession?.user?.id);
-        setSession(newSession);
-        setUser(newSession?.user || null);
-        setLoading(false);
-        logAuthState('state-change', { event, userId: newSession?.user?.id });
-      }
-    );
-
-    // Cleanup listener on unmount
-    return () => {
-      console.log('Cleaning up auth listener');
-      authListener?.subscription?.unsubscribe();
-    };
+    } else {
+      logAuthState('init-no-session');
+    }
+    setLoading(false);
   }, []);
 
   // Sign in with email and password
@@ -89,21 +52,21 @@ export const AuthProvider = ({ children }) => {
     console.log('SignIn attempt with email:', email);
     try {
       setLoading(true);
-      console.log('Calling Supabase signInWithPassword...');
-      const { data, error } = await supabase.auth.signInWithPassword({ 
-        email, 
-        password 
-      });
       
-      if (error) {
-        console.error('Supabase login error:', error);
-        logAuthState('signin-error', { error });
-        return { success: false, error: error.message, data: null };
-      }
+      // For demo purposes, accept any email/password combination
+      // In a real app, you would validate against your backend
+      const userData = {
+        id: '1',
+        email: email,
+        name: email.split('@')[0],
+        role: 'admin'
+      };
       
-      console.log('Sign in successful for user:', data?.user?.id);
-      logAuthState('signin-success', { userId: data?.user?.id });
-      return { success: true, data };
+      setUser(userData);
+      localStorage.setItem('user', JSON.stringify(userData));
+      
+      logAuthState('signin-success', { userId: userData.id });
+      return { success: true, data: userData };
     } catch (error) {
       console.error('Login exception:', error);
       logAuthState('signin-exception', { error });
@@ -118,32 +81,21 @@ export const AuthProvider = ({ children }) => {
     console.log('SignUp attempt with email:', email);
     try {
       setLoading(true);
-      const { data, error } = await supabase.auth.signUp({ 
-        email, 
-        password 
-      });
       
-      if (error) {
-        console.error('Signup error:', error);
-        logAuthState('signup-error', { error });
-        return { success: false, error: error.message };
-      }
+      // For demo purposes, create a new user
+      // In a real app, you would create the user in your backend
+      const userData = {
+        id: Date.now().toString(),
+        email: email,
+        name: email.split('@')[0],
+        role: 'user'
+      };
       
-      console.log('Sign up result:', data);
-      logAuthState('signup-success', { userId: data?.user?.id });
+      setUser(userData);
+      localStorage.setItem('user', JSON.stringify(userData));
       
-      // With Supabase, signUp might not immediately authenticate the user
-      // if email confirmation is required
-      if (data?.user?.identities?.length === 0) {
-        console.log('Email confirmation required');
-        return { 
-          success: true, 
-          requiresEmailConfirmation: true,
-          data 
-        };
-      }
-      
-      return { success: true, data };
+      logAuthState('signup-success', { userId: userData.id });
+      return { success: true, data: userData };
     } catch (error) {
       console.error('Signup exception:', error);
       logAuthState('signup-exception', { error });
@@ -158,15 +110,8 @@ export const AuthProvider = ({ children }) => {
     console.log('SignOut attempt');
     try {
       setLoading(true);
-      const { error } = await supabase.auth.signOut();
-      
-      if (error) {
-        console.error('Signout error:', error);
-        logAuthState('signout-error', { error });
-        return { success: false, error: error.message };
-      }
-      
-      console.log('Sign out successful');
+      setUser(null);
+      localStorage.removeItem('user');
       logAuthState('signout-success');
       return { success: true };
     } catch (error) {
@@ -181,7 +126,6 @@ export const AuthProvider = ({ children }) => {
   // Check if user has a specific permission
   const hasPermission = (permission) => {
     // For now, just return true for any permission check
-    // This will be implemented properly once permission system is in place
     console.log('Permission check:', permission);
     return true;
   };
@@ -189,7 +133,6 @@ export const AuthProvider = ({ children }) => {
   // Check if user has a specific role
   const hasRole = (role) => {
     // For now, just return true for any role check
-    // This will be implemented properly once role system is in place
     console.log('Role check:', role);
     return true;
   };
@@ -197,15 +140,13 @@ export const AuthProvider = ({ children }) => {
   // Value object to be provided to consumers
   const value = {
     user,
-    session,
     loading,
     isAuthenticated: !!user,
     signIn,
     signUp,
     signOut,
     hasPermission,
-    hasRole,
-    currentUser: user
+    hasRole
   };
 
   return (

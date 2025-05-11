@@ -1,13 +1,12 @@
-import React, { useEffect } from 'react';
-import { HashRouter as Router, Routes, Route, Navigate, Outlet } from 'react-router-dom';
+import React from 'react';
+import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { ToastContainer } from 'react-toastify';
-import { useAuth } from './context/AuthContext';
+import { useAuth } from './contexts/AuthContext';
 import { NavigationProvider } from './contexts/NavigationContext';
 import 'react-toastify/dist/ReactToastify.css';
 
 // Pages
 import Dashboard from './pages/Dashboard';
-import Products from './pages/Products';
 import Inventory from './pages/Inventory';
 import Reports from './pages/Reports';
 import Scanner from './pages/Scanner';
@@ -18,16 +17,13 @@ import Register from './pages/Register';
 import Users from './pages/Users';
 import ScanTasks from './pages/ScanTasks';
 import ScanTaskDetail from './pages/ScanTaskDetail';
+import ProductImport from './pages/ProductImport';
 
 // Components
 import Layout from './components/layout/Layout';
 
 function App() {
   const { loading, isAuthenticated } = useAuth();
-  
-  useEffect(() => {
-    console.log('App rendered with auth state:', { loading, isAuthenticated });
-  }, [loading, isAuthenticated]);
   
   // Show a simple loading indicator while auth state is being determined
   if (loading) {
@@ -64,9 +60,8 @@ function App() {
               path="/" 
               element={isAuthenticated ? <Layout /> : <Navigate to="/login" replace />}
             >
-              <Route index element={<Dashboard />} />
+              <Route index element={<Navigate to="/dashboard" replace />} />
               <Route path="dashboard" element={<Dashboard />} />
-              <Route path="products" element={<Products />} />
               <Route path="inventory" element={<Inventory />} />
               <Route path="reports" element={<Reports />} />
               <Route path="scanner" element={<Scanner />} />
@@ -75,6 +70,7 @@ function App() {
               <Route path="users" element={<Users />} />
               <Route path="scan-tasks" element={<ScanTasks />} />
               <Route path="scan-tasks/:id" element={<ScanTaskDetail />} />
+              <Route path="product-import" element={<ProductImport />} />
             </Route>
             
             {/* Fallback for unknown routes */}

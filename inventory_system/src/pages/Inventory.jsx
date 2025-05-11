@@ -17,8 +17,7 @@ import InventoryLevelBadge from '../components/inventory/InventoryLevelBadge';
 import AddStockModal from '../components/inventory/AddStockModal';
 import { useAuth } from '../contexts/AuthContext';
 import { toast } from 'react-toastify';
-import { inventoryService } from '../config/supabaseClient';
-import { productLookupService } from '../services/databaseService';
+import { mockService } from '../services/mockData';
 
 const Inventory = () => {
   const { apiClient } = useAuth();
@@ -33,6 +32,7 @@ const Inventory = () => {
   });
   const [showFilters, setShowFilters] = useState(false);
   const [showAddStockModal, setShowAddStockModal] = useState(false);
+  const [error, setError] = useState(null);
   
   // Sample data for locations, categories, etc.
   const locations = ['All Locations', 'Warehouse A', 'Warehouse B', 'Warehouse C', 'Warehouse D'];
@@ -41,26 +41,19 @@ const Inventory = () => {
   
   // Fetch inventory data on component mount
   useEffect(() => {
-    fetchInventory();
+    loadInventory();
   }, []);
 
-  // Fetch inventory data from Supabase
-  const fetchInventory = async () => {
-    setLoading(true);
+  const loadInventory = async () => {
     try {
-      // Use the inventoryService to get inventory data
-      const items = await inventoryService.getInventory();
-      
-      if (items && items.length > 0) {
-        setInventoryItems(items);
-      } else {
-        // If no items found, you might want to show sample data for demo purposes
-        // or just display an empty state
-        toast.info('No inventory items found. Add some items to get started.');
-      }
-    } catch (error) {
-      console.error('Failed to fetch inventory:', error);
-      toast.error('Failed to fetch inventory data. Please try again.');
+      setLoading(true);
+      const data = await mockService.getInventory();
+      setInventoryItems(data);
+      setError(null);
+    } catch (err) {
+      console.error('Error loading inventory:', err);
+      setError('Failed to load inventory data');
+      toast.error('Failed to load inventory data');
     } finally {
       setLoading(false);
     }
@@ -155,7 +148,7 @@ const Inventory = () => {
       for (const newItem of newItems) {
         // First, check if the product exists in the product lookup database
         let productId = null;
-        const existingProduct = await productLookupService.getProductByFnsku(newItem.sku);
+        const existingProduct = await mockService.getInventoryBySku(newItem.sku);
         
         if (existingProduct) {
           productId = existingProduct.id;
@@ -171,16 +164,16 @@ const Inventory = () => {
             created_at: new Date().toISOString()
           };
           
-          const savedProduct = await productLookupService.saveProductLookup(productData);
+          const savedProduct = await mockService.addOrUpdateInventory(productData);
           productId = savedProduct.id;
         }
         
         // Check if inventory item with this SKU already exists
-        const existingInventory = await inventoryService.getInventoryBySku(newItem.sku);
+        const existingInventory = await mockService.getInventoryBySku(newItem.sku);
         
         if (existingInventory) {
           // Update existing inventory
-          const updatedItem = await inventoryService.addOrUpdateInventory({
+          const updatedItem = await mockService.addOrUpdateInventory({
             ...existingInventory,
             quantity: existingInventory.quantity + (newItem.quantity || 0),
             updated_at: new Date().toISOString(),
@@ -204,13 +197,13 @@ const Inventory = () => {
             updated_at: new Date().toISOString()
           };
           
-          const savedItem = await inventoryService.addOrUpdateInventory(inventoryData);
+          const savedItem = await mockService.addOrUpdateInventory(inventoryData);
           addedItems.push(savedItem);
         }
       }
       
       // Refresh inventory list
-      fetchInventory();
+      loadInventory();
       
       // Show success message
       toast.success(`Added ${addedItems.length} items to inventory`);
@@ -251,7 +244,7 @@ const Inventory = () => {
       newQuantity = Math.max(0, newQuantity);
       
       // Update the inventory
-      await inventoryService.addOrUpdateInventory({
+      await mockService.addOrUpdateInventory({
         ...item,
         quantity: newQuantity,
         updated_at: new Date().toISOString(),
@@ -259,7 +252,7 @@ const Inventory = () => {
       });
       
       // Refresh inventory
-      fetchInventory();
+      loadInventory();
       
       toast.success(`Updated ${item.product_name} quantity to ${newQuantity}`);
     } catch (error) {
@@ -277,7 +270,7 @@ const Inventory = () => {
   const handleDeleteItem = async (item) => {
     if (window.confirm(`Are you sure you want to delete "${item.product_name}" from inventory?`)) {
       try {
-        await inventoryService.deleteInventoryItem(item.id);
+        await mockService.deleteInventoryItem(item.id);
         
         // Update the local state
         setInventoryItems(inventoryItems.filter(i => i.id !== item.id));
@@ -391,6 +384,22 @@ const Inventory = () => {
       ),
     },
   ];
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="text-center text-red-500 p-4">
+        {error}
+      </div>
+    );
+  }
 
   return (
     <div>
