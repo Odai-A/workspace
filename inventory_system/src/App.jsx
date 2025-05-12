@@ -9,14 +9,15 @@ import 'react-toastify/dist/ReactToastify.css';
 import Dashboard from './pages/Dashboard';
 import Inventory from './pages/Inventory';
 import Reports from './pages/Reports';
-import Scanner from './pages/Scanner';
+// import Scanner from './pages/Scanner'; // Commenting out the old Page-based scanner
+import Scanner from './components/Scanner'; // Corrected path
 import Settings from './pages/Settings';
 import Profile from './pages/Profile';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import Users from './pages/Users';
-import ScanTasks from './pages/ScanTasks';
-import ScanTaskDetail from './pages/ScanTaskDetail';
+// import ScanTasks from './pages/ScanTasks'; // REMOVED
+// import ScanTaskDetail from './pages/ScanTaskDetail'; // REMOVED
 import ProductImport from './pages/ProductImport';
 
 // Components
@@ -68,8 +69,7 @@ function App() {
               <Route path="settings" element={<Settings />} />
               <Route path="profile" element={<Profile />} />
               <Route path="users" element={<Users />} />
-              <Route path="scan-tasks" element={<ScanTasks />} />
-              <Route path="scan-tasks/:id" element={<ScanTaskDetail />} />
+              {/* <Route path="scan-tasks" element={<ScanTasks />} /> */}
               <Route path="product-import" element={<ProductImport />} />
             </Route>
             

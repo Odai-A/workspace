@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
-import { useQuagga } from "../hooks/useQuagga";
+import BarcodeReader from './BarcodeReader';
 import { getProductLookup } from '../services/api';
 import { productLookupService as dbProductLookupService } from '../services/databaseService';
 import { inventoryService } from '../config/supabaseClient';
@@ -12,29 +12,6 @@ import { mockService } from '../services/mockData';
  * Scanner component for barcode scanning and product lookup
  */
 const Scanner = () => {
-  const { startScanner, stopScanner, isScanning, scannerRef } = useQuagga({
-    onDetected: handleCodeDetected,
-    scannerOptions: {
-      inputStream: {
-        type: "LiveStream",
-        constraints: {
-          width: 640,
-          height: 480,
-          facingMode: "environment",
-        },
-      },
-      locator: {
-        patchSize: "medium",
-        halfSample: true,
-      },
-      numOfWorkers: 2,
-      decoder: {
-        readers: ["ean_reader", "code_128_reader", "upc_reader"],
-      },
-      locate: true,
-    },
-  });
-
   const [scannedCodes, setScannedCodes] = useState([]);
   const [productInfo, setProductInfo] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -57,24 +34,50 @@ const Scanner = () => {
   const [exactMatch, setExactMatch] = useState(false);
   const searchDebounceTimer = useRef(null);
 
-  const [scanning, setScanning] = useState(false);
-  const [result, setResult] = useState(null);
-  const [error, setError] = useState(null);
+  // State for manual barcode input (from existing code)
+  const [manualBarcode, setManualBarcode] = useState('');
+  const [manualScanResult, setManualScanResult] = useState(null);
+  const [manualScanError, setManualScanError] = useState(null);
+  const [isManualScanning, setIsManualScanning] = useState(false);
+  
+  // State for BarcodeReader component
+  const [isCameraActive, setIsCameraActive] = useState(false);
 
-  useEffect(() => {
-    return () => {
-      if (isScanning) stopScanner();
+  // Helper function to map Supabase data to the structure expected by productInfo JSX
+  const mapSupabaseProductToDisplay = (supabaseProduct) => {
+    if (!supabaseProduct) return null;
+    // Keys here (name, sku, etc.) are what the JSX part of this component expects.
+    // Values (supabaseProduct['Description'], etc.) are actual column names from your Supabase table.
+    return {
+      id: supabaseProduct['id'], // Keep the original Supabase ID
+      name: supabaseProduct['Description'], 
+      sku: supabaseProduct['Fn Sku'], // Using 'Fn Sku' as the primary SKU for display consistency
+      asin: supabaseProduct['B00 Asin'],
+      fnsku: supabaseProduct['Fn Sku'],
+      lpn: supabaseProduct['X-Z ASIN'],
+      description: supabaseProduct['Description'], // Can be the same as name if no separate short name
+      price: supabaseProduct['MSRP'],
+      category: supabaseProduct['Category'],
+      upc: supabaseProduct['UPC'],
+      quantity: supabaseProduct['Quantity'],
+      // You can add image_url here if it exists in your supabaseProduct object and you want to display it
+      // image_url: supabaseProduct['image_url_column_name'], 
+      rawSupabase: supabaseProduct, // Keep the raw object if needed for other operations
     };
-  }, [isScanning, stopScanner]);
+  };
 
-  function handleCodeDetected(result) {
-    const code = result.codeResult.code;
-    console.log("Detected code:", code);
+  function handleCodeDetected(detectedData) {
+    const code = detectedData.code;
+    if (!code) {
+      console.warn("handleCodeDetected called with no code:", detectedData);
+      return;
+    }
+    console.log("Detected code via Camera:", code);
+    setIsCameraActive(false);
     
-    // Add to scanned codes history
     setScannedCodes(prev => {
       const newHistory = [
-        { code, timestamp: new Date().toISOString() },
+        { code, timestamp: new Date().toISOString(), type: 'camera' },
         ...prev.filter(item => item.code !== code)
       ].slice(0, 10);
       return newHistory;
@@ -85,54 +88,85 @@ const Scanner = () => {
 
   async function lookupProductByCode(code) {
     setLoading(true);
+    setProductInfo(null); // Clear previous product info
     try {
-      // First try looking up from local database
-      const localResult = await dbProductLookupService.getProductByFnsku(code);
-      
-      if (localResult) {
-        setProductInfo(localResult);
-        toast.success("Product found in local database");
+      let productFromDb = await dbProductLookupService.getProductByFnsku(code);
+
+      if (!productFromDb) {
+        console.log(`Product not found by FNSKU (${code}), trying as LPN...`);
+        productFromDb = await dbProductLookupService.getProductByLpn(code);
+      }
+
+      if (productFromDb) {
+        const displayProduct = mapSupabaseProductToDisplay(productFromDb);
+        setProductInfo(displayProduct);
+        toast.success("Product found in database");
+        if (displayProduct) {
+          console.log("[Scanner.jsx] Attempting to log scan event (from DB). Code:", code, "Product Details:", displayProduct);
+          const logResult = await dbProductLookupService.logScanEvent(code, displayProduct);
+          console.log("[Scanner.jsx] Scan event log result (from DB):", logResult);
+        }
       } else {
-        // If not found locally, try external API
-        const apiResult = await getProductLookup(code);
+        console.log(`Product not found in DB by FNSKU or LPN (${code}), trying external API...`);
+        const apiResult = await getProductLookup(code); 
         
         if (apiResult) {
-          setProductInfo(apiResult);
-          // Save to local database
-          await dbProductLookupService.saveProductLookup(apiResult);
-          toast.success("Product found and saved to database");
+          let displayableProduct = null;
+          let productForLogging = apiResult; 
+          try {
+            const savedProduct = await dbProductLookupService.saveProductLookup(apiResult); 
+            
+            if (savedProduct) {
+              toast.success("Product found via API and saved to database");
+              displayableProduct = mapSupabaseProductToDisplay(savedProduct);
+              productForLogging = displayableProduct; 
+            } else {
+              toast.warn("Product found via API, but failed to save to our database.");
+              displayableProduct = mapSupabaseProductToDisplay(apiResult); 
+            }
+          } catch (saveError) {
+            console.error("Error saving API result to Supabase:", saveError);
+            toast.error("Product found via API, but error saving to our database.");
+            displayableProduct = mapSupabaseProductToDisplay(apiResult);
+          }
+          setProductInfo(displayableProduct);
+          if (displayableProduct) {
+            console.log("[Scanner.jsx] Attempting to log scan event (from API). Code:", code, "Product Details:", productForLogging);
+            const logResult = await dbProductLookupService.logScanEvent(code, productForLogging);
+            console.log("[Scanner.jsx] Scan event log result (from API):", logResult);
+          }
         } else {
-          toast.error("Product not found");
+          toast.error("Product not found by scanned code in database or via API.");
         }
       }
     } catch (error) {
-      console.error("Error looking up product:", error);
-      toast.error("Error looking up product");
+      console.error("Error looking up product by code:", error);
+      toast.error("Error looking up product by code");
     } finally {
       setLoading(false);
     }
   }
 
-  const handleScan = async (barcode) => {
-    try {
-      setScanning(true);
-      setError(null);
-      
-      const { data, error } = await mockService.scanBarcode(barcode);
-      
-      if (error) {
-        setError(error);
-        toast.error(error);
-      } else {
-        setResult(data);
-        toast.success('Product found!');
-      }
-    } catch (err) {
-      setError(err.message);
-      toast.error('Error scanning barcode');
-    } finally {
-      setScanning(false);
+  const handleManualScan = async (barcodeToScan) => {
+    if (!barcodeToScan.trim()) {
+      toast.error("Please enter a barcode to scan.");
+      return;
     }
+    setIsManualScanning(true);
+    setManualScanError(null);
+    setManualScanResult(null);
+    setProductInfo(null);
+    
+    setScannedCodes(prev => {
+      const newHistory = [
+        { code: barcodeToScan, timestamp: new Date().toISOString(), type: 'manual' },
+        ...prev.filter(item => item.code !== barcodeToScan)
+      ].slice(0, 10);
+      return newHistory;
+    });
+
+    await lookupProductByCode(barcodeToScan);
+    setIsManualScanning(false);
   };
 
   const handleViewDetails = () => {
@@ -169,7 +203,7 @@ const Scanner = () => {
     try {
       const results = await dbProductLookupService.searchProducts(query, {
         exactMatch: exactMatch,
-        fields: ['name', 'sku', 'asin', 'fnsku', 'description', 'category'],
+        fields: ['name', 'sku', 'asin', 'fnsku', 'description', 'category', 'lpn'],
         limit: 10
       });
       setSearchResults(results);
@@ -520,7 +554,7 @@ const Scanner = () => {
               type="text"
               value={searchQuery}
               onChange={handleSearchChange}
-              placeholder="Search by product name, SKU, ASIN..."
+              placeholder="Search by LPN, FNSKU, or ASIN"
               className="w-full p-2 border rounded-lg"
             />
             {searchLoading && (
@@ -578,40 +612,60 @@ const Scanner = () => {
         <div className="bg-white p-4 rounded-lg shadow">
           <h2 className="text-xl font-bold mb-4">Barcode Scanner</h2>
           
+          {/* Camera Scanner Section */}
           <div className="mb-4">
+            <button
+              onClick={() => setIsCameraActive(prev => !prev)}
+              className={`w-full px-4 py-2 rounded text-white font-semibold ${isCameraActive ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-500 hover:bg-blue-600'}`}
+            >
+              {isCameraActive ? 'Stop Camera Scan' : 'Start Camera Scan'}
+            </button>
+          </div>
+          {isCameraActive && (
+            <div className="border p-2 rounded-lg mb-4 bg-gray-100 min-h-[300px]">
+              <BarcodeReader
+                active={isCameraActive}
+                onDetected={handleCodeDetected}
+                onError={(err) => {
+                  console.error("BarcodeReader component error:", err);
+                  toast.error("Camera scanner error. Please ensure camera permissions are granted.");
+                  setIsCameraActive(false);
+                }}
+                showViewFinder={true}
+                className="w-full h-full"
+              />
+            </div>
+          )}
+          
+          {/* Manual Barcode Input Section */}
+          <h3 className="text-lg font-semibold mb-2 mt-6">Manual Barcode Entry</h3>
+          <div className="mb-4 flex items-center gap-2">
             <input
               type="text"
               placeholder="Enter barcode manually"
-              className="border p-2 rounded"
+              className="border p-2 rounded flex-grow"
+              value={manualBarcode}
+              onChange={(e) => setManualBarcode(e.target.value)}
               onKeyPress={(e) => {
-                if (e.key === 'Enter') {
-                  handleScan(e.target.value);
+                if (e.key === 'Enter' && manualBarcode.trim()) {
+                  handleManualScan(manualBarcode);
                 }
               }}
+              disabled={isManualScanning}
             />
+            <button
+              onClick={() => handleManualScan(manualBarcode)}
+              className="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded"
+              disabled={isManualScanning || !manualBarcode.trim()}
+            >
+              {isManualScanning ? 'Looking up...' : 'Lookup'}
+            </button>
           </div>
           
-          {scanning && (
-            <div className="text-center">
-              <p>Scanning...</p>
-            </div>
-          )}
-          
-          {error && (
-            <div className="text-red-500 mb-4">
-              <p>{error}</p>
-            </div>
-          )}
-          
-          {result && (
-            <div className="border p-4 rounded">
-              <h3 className="font-bold">{result.name}</h3>
-              <p>SKU: {result.sku}</p>
-              <p>Price: ${result.price}</p>
-              <p>Quantity: {result.quantity}</p>
-              <p>Location: {result.location}</p>
-            </div>
-          )}
+          {/* Display area for manual scan status (optional, productInfo is primary) */}
+          {isManualScanning && <p className="text-center text-gray-600">Looking up manual barcode...</p>}
+          {/* productInfo will be displayed in the "Product Information" section */}
+
         </div>
       
         <div className="bg-white p-4 rounded-lg shadow">
@@ -622,7 +676,7 @@ const Scanner = () => {
             <button
               onClick={() => setProductInfo(null)}
               className="bg-gray-300 hover:bg-gray-400 text-gray-800 px-4 py-2 rounded"
-              disabled={!productInfo}
+              disabled={!productInfo || loading}
             >
               Reset
             </button>
@@ -646,34 +700,77 @@ const Scanner = () => {
           
           {/* Product Info Display */}
           {!loading && productInfo && (
-            <div className="border p-4 rounded-lg">
-              <h3 className="text-lg font-bold">{productInfo.name}</h3>
-              <p className="text-gray-600 mb-2">SKU/Barcode: {productInfo.sku || productInfo.asin || productInfo.fnsku}</p>
-              <p className="text-green-600 font-bold text-lg mb-2">${productInfo.price?.toFixed(2) || 'N/A'}</p>
-              <p className="text-gray-600">Category: {productInfo.category || 'N/A'}</p>
+            <div className="border p-4 rounded-lg space-y-2">
+              <h3 className="text-lg font-bold truncate" title={productInfo.name}>{productInfo.name}</h3>
               
-              {productInfo.description && (
-                <div className="mt-2">
-                  <h4 className="font-semibold">Description:</h4>
-                  <p className="text-gray-700 text-sm">{productInfo.description}</p>
+              <p className="text-sm text-gray-700">
+                <strong>LPN (X-Z ASIN):</strong> {productInfo.lpn || 'N/A'}
+              </p>
+              <p className="text-sm text-gray-700">
+                <strong>FNSKU:</strong> {productInfo.fnsku || 'N/A'}
+              </p>
+              <p className="text-sm text-gray-700">
+                <strong>ASIN (B00):</strong> {productInfo.asin || 'N/A'}
+              </p>
+              <p className="text-sm text-gray-700">
+                <strong>UPC:</strong> {productInfo.upc || 'N/A'}
+              </p>
+              <p className="text-sm text-gray-700">
+                <strong>Category:</strong> {productInfo.category || 'N/A'}
+              </p>
+              <p className="text-sm text-gray-700">
+                <strong>Quantity:</strong> {productInfo.quantity !== undefined ? productInfo.quantity : 'N/A'}
+              </p>
+              <p className="text-green-600 font-semibold text-md">
+                <strong>MSRP:</strong> ${typeof productInfo.price === 'number' ? productInfo.price.toFixed(2) : 'N/A'}
+              </p>
+
+              {/* Add View on Amazon button if ASIN is available */}
+              {productInfo.asin && (
+                <div className="mt-4">
+                  <button
+                    onClick={() => window.open(`https://www.amazon.com/dp/${productInfo.asin}`, '_blank')}
+                    className="w-full bg-yellow-500 hover:bg-yellow-600 text-black font-bold py-2 px-4 rounded flex items-center justify-center"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" className="w-5 h-5 mr-2" viewBox="0 0 16 16">
+                      <path d="M2.534 16c-.263 0-.44-.093-.553-.27C1.869 15.55.034 11.29.034 7.785c0-2.81.908-4.943 2.804-6.4C4.133.463 5.78-.001 7.683-.001c2.473 0 4.03.902 5.132 2.104s1.31 2.964 1.31 5.317c0 .312-.02.69-.06 1.146-.093.986-.335 2.033-.94 3.288-.513 1.073-1.18 1.986-2.004 2.727-.832.748-1.82 1.244-3.013 1.5-.3.06-.728.093-1.293.093-.613 0-1.107-.033-1.48-.093a4.59 4.59 0 0 1-.373-.066c-.68-.153-1.233-.426-1.653-.813-.6-.6-.98-1.433-.98-2.51s.413-1.913 1.026-2.486c.62-.58 1.48-.873 2.573-.873.933 0 1.68.206 2.24.62.56.413.946 1.006 1.16 1.786.04.153.06.293.06.426 0 .32-.086.58-.26.78-.173.2-.406.3-.7.3-.246 0-.466-.073-.66-.22-.193-.146-.373-.4-.54-.76-.166-.36-.36-.633-.58-.82-.22-.186-.486-.28-.793-.28-.633 0-1.173.22-1.62.66-.446.44-.67 1.013-.67 1.72 0 .613.186 1.093.56 1.44.373.346.866.52 1.48.52.446 0 .84-.086 1.18-.26.34-.173.613-.406.82-.7.206-.293.34-.646.406-1.06.066-.413.1-.866.1-1.36 0-2.006-.506-3.64-1.52-4.9-1.006-1.26-2.42-1.893-4.24-1.893-1.64 0-3.006.486-4.093 1.46-.966.86-1.45 2.233-1.45 4.112 0 3.013 1.493 6.446 2.666 7.926.12.16.18.286.18.373 0 .186-.073.28-.22.28Z"/>
+                      <path d="M12.872.62H16v2.977h-1.126V1.747h-2.002V.62Zm-1.405 0V1.747h2.002v1.85H16V.62h-4.533Z"/>
+                    </svg>
+                    View on Amazon
+                  </button>
                 </div>
               )}
+
               
+              {/* Displaying productInfo.description if it was mapped and different from name, 
+                  but our current mapSupabaseProductToDisplay maps both to Supabase 'Description' column. 
+                  If 'Description' is long, the h3 title is already showing it. 
+                  You can uncomment this if you have a separate, more detailed description field. 
+              {productInfo.description && productInfo.description !== productInfo.name && (
+                <div className="mt-2">
+                  <h4 className="font-semibold text-sm">Full Description:</h4>
+                  <p className="text-gray-700 text-xs whitespace-pre-wrap">{productInfo.description}</p>
+                </div>
+              )} 
+              */}
+              
+              {/* Placeholder for image if you map an image_url in productInfo
               {productInfo.image_url && (
                 <div className="mt-4 flex justify-center">
                   <img 
                     src={productInfo.image_url} 
                     alt={productInfo.name} 
-                    className="max-h-48 object-contain"
+                    className="max-h-48 object-contain rounded"
                   />
                 </div>
-              )}
+              )} 
+              */}
             </div>
           )}
           
           {!loading && !productInfo && (
             <div className="border p-4 rounded-lg text-center text-gray-500">
-              <p>Scan a barcode or search for a product to view details</p>
+              <p>Scan a barcode, use manual lookup, or search for a product to view details.</p>
             </div>
           )}
         </div>

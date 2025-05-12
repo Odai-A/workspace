@@ -50,12 +50,6 @@ export const NavigationProvider = ({ children }) => {
       permission: 'import_products'
     },
     {
-      name: 'Scan Tasks',
-      path: '/scan-tasks',
-      icon: 'ArrowsRightLeftIcon',
-      permission: 'view_scan_tasks'
-    },
-    {
       name: 'Reports',
       path: '/reports',
       icon: 'ChartBarIcon',

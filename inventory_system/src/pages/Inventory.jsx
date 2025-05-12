@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   MagnifyingGlassIcon,
@@ -13,25 +13,24 @@ import {
 import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Table from '../components/ui/Table';
+import Pagination from '../components/ui/Pagination';
 import InventoryLevelBadge from '../components/inventory/InventoryLevelBadge';
 import AddStockModal from '../components/inventory/AddStockModal';
 import { useAuth } from '../contexts/AuthContext';
 import { toast } from 'react-toastify';
-import { mockService } from '../services/mockData';
+import { productLookupService } from '../services/databaseService';
+
+const ITEMS_PER_PAGE = 15;
 
 const Inventory = () => {
   const { apiClient } = useAuth();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
-  const [inventoryItems, setInventoryItems] = useState([]);
+  const [products, setProducts] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
-  const [filters, setFilters] = useState({
-    location: '',
-    status: '',
-    category: '',
-  });
-  const [showFilters, setShowFilters] = useState(false);
-  const [showAddStockModal, setShowAddStockModal] = useState(false);
+  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalItems, setTotalItems] = useState(0);
   const [error, setError] = useState(null);
   
   // Sample data for locations, categories, etc.
@@ -39,51 +38,65 @@ const Inventory = () => {
   const categories = ['All Categories', 'Smart Speakers', 'Streaming Devices', 'E-readers', 'Smart Home', 'Tablets'];
   const statuses = ['All', 'In Stock', 'Low Stock', 'Out of Stock'];
   
-  // Fetch inventory data on component mount
+  // Debounce search term
   useEffect(() => {
-    loadInventory();
-  }, []);
+    const timerId = setTimeout(() => {
+      setDebouncedSearchTerm(searchTerm);
+      setCurrentPage(1); // Reset to first page on new search
+    }, 500);
+    return () => clearTimeout(timerId);
+  }, [searchTerm]);
 
-  const loadInventory = async () => {
+  const fetchInventory = useCallback(async () => {
+    console.log("fetchInventory called. Page:", currentPage, "Search:", debouncedSearchTerm);
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      const data = await mockService.getInventory();
-      setInventoryItems(data);
-      setError(null);
+      const result = await productLookupService.getProducts({
+        page: currentPage,
+        limit: ITEMS_PER_PAGE,
+        searchQuery: debouncedSearchTerm,
+        // TODO: Add filter parameters here if/when getProducts supports them
+        // category: filters.category,
+      });
+      console.log("fetchInventory - Supabase result:", result);
+      setProducts(result.data || []);
+      setTotalItems(result.totalCount || 0);
     } catch (err) {
       console.error('Error loading inventory:', err);
       setError('Failed to load inventory data');
       toast.error('Failed to load inventory data');
+      setProducts([]);
+      setTotalItems(0);
     } finally {
       setLoading(false);
+      console.log("fetchInventory finished.");
     }
-  };
+  }, [currentPage, debouncedSearchTerm]);
 
-  // Format date for display
+  useEffect(() => {
+    fetchInventory();
+  }, [fetchInventory]);
+
   const formatDate = (dateString) => {
     if (!dateString) return 'N/A';
-    
     try {
-      const date = new Date(dateString);
-      return new Intl.DateTimeFormat('en-US', {
-        month: 'short',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: 'numeric',
-      }).format(date);
+      return new Date(dateString).toLocaleDateString(); // Simpler date format
     } catch (error) {
-      console.error('Error formatting date:', error);
-      return 'Invalid date';
+      return 'Invalid Date';
     }
+  };
+  
+  const handleSearchChange = (event) => {
+    setSearchTerm(event.target.value);
+  };
+
+  const handlePageChange = (newPage) => {
+    setCurrentPage(newPage);
   };
 
   // Reset filters
   const handleResetFilters = () => {
-    setFilters({
-      location: '',
-      status: '',
-      category: '',
-    });
     setSearchTerm('');
     toast.info('Filters have been reset');
   };
@@ -92,22 +105,20 @@ const Inventory = () => {
   const handleExport = () => {
     try {
       // Filter items if needed based on current filters/search
-      const dataToExport = getFilteredInventory();
+      const dataToExport = products;
       
       // Convert data to CSV format
-      const headers = ['Product Name', 'SKU', 'Quantity', 'Min Quantity', 'Location', 'Category', 'Status', 'Last Updated'];
+      const headers = ['Product Description', 'LPN', 'ASIN', 'Quantity', 'MSRP', 'Category'];
       
       const csvRows = [
         headers.join(','),
         ...dataToExport.map(item => [
-          `"${(item.product_name || item.name || '').replace(/"/g, '""')}"`,
-          `"${(item.sku || '').replace(/"/g, '""')}"`,
-          item.quantity || 0,
-          item.min_quantity || 0,
-          `"${(item.location || '').replace(/"/g, '""')}"`,
-          `"${(item.category || '').replace(/"/g, '""')}"`,
-          `"${getInventoryStatus(item.quantity, item.min_quantity)}"`,
-          `"${formatDate(item.updated_at || item.last_updated)}"`
+          `"${(item.Description || '').replace(/"/g, '""')}"`,
+          `"${(item['X-Z ASIN'] || '').replace(/"/g, '""')}"`,
+          `"${(item['B00 Asin'] || '').replace(/"/g, '""')}"`,
+          item.Quantity !== null && item.Quantity !== undefined ? item.Quantity.toString() : 'N/A',
+          item.MSRP !== null && item.MSRP !== undefined ? `$${item.MSRP.toFixed(2)}` : 'N/A',
+          `"${(item.Category || '').replace(/"/g, '""')}"`
         ].join(','))
       ];
       
@@ -148,62 +159,62 @@ const Inventory = () => {
       for (const newItem of newItems) {
         // First, check if the product exists in the product lookup database
         let productId = null;
-        const existingProduct = await mockService.getInventoryBySku(newItem.sku);
+        const existingProduct = await productLookupService.getProductByFnSku(newItem.FnSku);
         
         if (existingProduct) {
           productId = existingProduct.id;
         } else {
           // Create a new product lookup entry
           const productData = {
-            name: newItem.name,
-            sku: newItem.sku,
-            price: newItem.price || 0,
-            category: newItem.category || 'Uncategorized',
-            condition: newItem.condition || 'New',
+            name: newItem.Description,
+            FnSku: newItem.FnSku,
+            B00Asin: newItem['B00 Asin'],
+            category: newItem.Category || 'Uncategorized',
+            condition: 'New',
             source: 'Manual Entry',
             created_at: new Date().toISOString()
           };
           
-          const savedProduct = await mockService.addOrUpdateInventory(productData);
+          const savedProduct = await productLookupService.addOrUpdateProduct(productData);
           productId = savedProduct.id;
         }
         
         // Check if inventory item with this SKU already exists
-        const existingInventory = await mockService.getInventoryBySku(newItem.sku);
+        const existingInventory = await productLookupService.getProductByFnSku(newItem.FnSku);
         
         if (existingInventory) {
           // Update existing inventory
-          const updatedItem = await mockService.addOrUpdateInventory({
+          const updatedItem = await productLookupService.addOrUpdateProduct({
             ...existingInventory,
-            quantity: existingInventory.quantity + (newItem.quantity || 0),
+            quantity: existingInventory.quantity + (newItem.Quantity || 0),
             updated_at: new Date().toISOString(),
             last_updated_reason: 'Added stock via form'
           });
           
           addedItems.push(updatedItem);
-          toast.info(`Updated quantity for existing item: ${newItem.name}`);
+          toast.info(`Updated quantity for existing item: ${newItem.Description}`);
         } else {
           // Add new inventory item
           const inventoryData = {
             product_id: productId,
-            product_name: newItem.name,
-            sku: newItem.sku,
-            quantity: newItem.quantity || 0,
-            min_quantity: newItem.min_quantity || 10,
-            location: newItem.location,
-            category: newItem.category || 'Uncategorized',
+            product_name: newItem.Description,
+            FnSku: newItem.FnSku,
+            quantity: newItem.Quantity || 0,
+            min_quantity: 10,
+            location: 'All Locations',
+            category: newItem.Category || 'Uncategorized',
             status: 'Active',
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString()
           };
           
-          const savedItem = await mockService.addOrUpdateInventory(inventoryData);
+          const savedItem = await productLookupService.addOrUpdateProduct(inventoryData);
           addedItems.push(savedItem);
         }
       }
       
       // Refresh inventory list
-      loadInventory();
+      fetchInventory();
       
       // Show success message
       toast.success(`Added ${addedItems.length} items to inventory`);
@@ -214,68 +225,30 @@ const Inventory = () => {
   };
 
   // Handle adjust stock for a specific item
-  const handleAdjustStock = async (item) => {
-    // For this example, we'll use a prompt to get a quantity adjustment
-    // In a real app, this would be a modal with a form
-    try {
-      const quantityStr = prompt(`Adjust quantity for ${item.product_name}. Current: ${item.quantity}.\nEnter new quantity or +/- value:`);
-      
-      if (quantityStr === null) return; // User cancelled
-      
-      let newQuantity;
-      if (quantityStr.startsWith('+') || quantityStr.startsWith('-')) {
-        // It's an adjustment
-        const adjustment = parseInt(quantityStr, 10);
-        if (isNaN(adjustment)) {
-          toast.error('Please enter a valid number');
-          return;
-        }
-        newQuantity = item.quantity + adjustment;
-      } else {
-        // It's a new quantity
-        newQuantity = parseInt(quantityStr, 10);
-        if (isNaN(newQuantity)) {
-          toast.error('Please enter a valid number');
-          return;
-        }
-      }
-      
-      // Ensure quantity is not negative
-      newQuantity = Math.max(0, newQuantity);
-      
-      // Update the inventory
-      await mockService.addOrUpdateInventory({
-        ...item,
-        quantity: newQuantity,
-        updated_at: new Date().toISOString(),
-        last_updated_reason: 'Manual adjustment'
-      });
-      
-      // Refresh inventory
-      loadInventory();
-      
-      toast.success(`Updated ${item.product_name} quantity to ${newQuantity}`);
-    } catch (error) {
-      console.error('Error adjusting stock:', error);
-      toast.error('Failed to adjust stock. Please try again.');
-    }
+  const handleAdjustStock = (item) => {
+    toast.info(`Adjust stock for ${item.Description} (ID: ${item.id}) - Rework needed for Supabase.`);
+    // TODO: Implement modal and call productLookupService.saveProductLookup with updated quantity
   };
 
   // Handle viewing item details
   const handleViewDetails = (item) => {
-    navigate(`/products/${item.product_id}`);
+    if (item["X-Z ASIN"]) {
+        navigate(`/scanner?code=${item["X-Z ASIN"]}&type=lpn`); // Example redirect to scanner
+    } else {
+        toast.info('No LPN to view details with on scanner page.');
+    }
   };
 
   // Delete an inventory item
   const handleDeleteItem = async (item) => {
-    if (window.confirm(`Are you sure you want to delete "${item.product_name}" from inventory?`)) {
+    if (window.confirm(`Are you sure you want to delete "${item.Description}" from inventory?`)) {
       try {
-        await mockService.deleteInventoryItem(item.id);
+        await productLookupService.deleteProduct(item.id);
         
         // Update the local state
-        setInventoryItems(inventoryItems.filter(i => i.id !== item.id));
+        setProducts(products.filter(i => i.id !== item.id));
         
-        toast.success(`${item.product_name} has been removed from inventory`);
+        toast.success(`${item.Description} has been removed from inventory`);
       } catch (error) {
         console.error('Error deleting inventory item:', error);
         toast.error('Failed to delete inventory item. Please try again.');
@@ -292,7 +265,7 @@ const Inventory = () => {
 
   // Filter inventory based on search and filters
   const getFilteredInventory = () => {
-    return inventoryItems.filter(item => {
+    return products.filter(item => {
       // Search term filter
       if (searchTerm && !JSON.stringify(item).toLowerCase().includes(searchTerm.toLowerCase())) {
         return false;
@@ -323,65 +296,86 @@ const Inventory = () => {
   // Define table columns
   const columns = [
     {
-      header: 'Product',
-      accessor: 'product_name',
-      cell: (row) => (
-        <div>
-          <div className="font-medium">{row.product_name || row.name}</div>
-          <div className="text-sm text-gray-500">SKU: {row.sku}</div>
-        </div>
-      ),
+      header: 'Product Description',
+      accessor: 'Description',
+      cell: (props) => {
+        const rowData = props.row.original;
+        // console.log("[Inventory.jsx Cell] Product Description Data:", rowData.Description, "LPN:", rowData['X-Z ASIN']);
+        return (
+          <div>
+            <div className="font-medium truncate max-w-xs" title={rowData.Description}>{rowData.Description || 'N/A'}</div>
+            <div className="text-xs text-gray-500">LPN: {rowData['X-Z ASIN'] || 'N/A'}</div>
+            <div className="text-xs text-gray-500">FNSKU: {rowData['Fn Sku'] || 'N/A'}</div>
+            <div className="text-xs text-gray-500">ASIN: {rowData['B00 Asin'] || 'N/A'}</div>
+          </div>
+        );
+      },
     },
     {
-      header: 'Location',
-      accessor: 'location',
+      header: 'Qty',
+      accessor: 'Quantity',
+      cell: (props) => {
+        const rowData = props.row.original;
+        // console.log("[Inventory.jsx Cell] Qty Data:", rowData.Quantity);
+        return (
+          <div className="text-center">{rowData.Quantity !== null && rowData.Quantity !== undefined ? rowData.Quantity : 'N/A'}</div>
+        );
+      },
     },
     {
-      header: 'Quantity',
-      accessor: 'quantity',
-      cell: (row) => (
-        <div className="text-center">{row.quantity}</div>
-      ),
+      header: 'MSRP',
+      accessor: 'MSRP',
+      cell: (props) => {
+        const rowData = props.row.original;
+        // console.log("[Inventory.jsx Cell] MSRP Data:", rowData.MSRP);
+        return (
+          <div className="text-right">{typeof rowData.MSRP === 'number' ? `$${rowData.MSRP.toFixed(2)}` : 'N/A'}</div>
+        );
+      },
     },
     {
-      header: 'Status',
-      accessor: 'status',
-      cell: (row) => (
-        <InventoryLevelBadge 
-          status={getInventoryStatus(row.quantity, row.min_quantity)}
-        />
-      ),
-    },
-    {
-      header: 'Last Updated',
-      accessor: 'last_updated',
-      cell: (row) => (
-        <div className="text-sm">
-          {formatDate(row.updated_at || row.last_updated)}
-        </div>
-      ),
+      header: 'Category',
+      accessor: 'Category',
     },
     {
       header: 'Actions',
       accessor: 'actions',
-      cell: (row) => (
-        <div className="flex justify-end space-x-2">
-          <button
-            onClick={() => handleAdjustStock(row)}
-            className="text-blue-600 hover:text-blue-800"
-            title="Adjust Stock"
-          >
-            <AdjustmentsHorizontalIcon className="h-5 w-5" />
-          </button>
-          <button
-            onClick={() => handleViewDetails(row)}
-            className="text-indigo-600 hover:text-indigo-800"
-            title="View Details"
-          >
-            <ChevronDownIcon className="h-5 w-5" />
-          </button>
-        </div>
-      ),
+      cell: (props) => {
+        const rowData = props.row.original;
+        return (
+          <div className="flex items-center justify-end space-x-1">
+            {rowData['B00 Asin'] && (
+                <button
+                    onClick={(e) => { 
+                        e.stopPropagation(); // Prevent onRowClick if any
+                        window.open(`https://www.amazon.com/dp/${rowData['B00 Asin']}`, '_blank');
+                    }}
+                    className="p-1 text-yellow-600 hover:text-yellow-800"
+                    title="View on Amazon"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+                        <path d="M10.75 1.915H13.25V4.18H11.875V2.95833H9.97917V1.915H10.75Z" />
+                        <path fillRule="evenodd" d="M3.8075 18C3.62783 18 3.4725 17.9083 3.38083 17.765C3.28917 17.6217 0.8075 13.9867 0.8075 10.99C0.8075 8.605 1.57417 6.78667 3.1575 5.62C4.23583 4.78167 5.6075 4.375 7.18083 4.375C9.27417 4.375 10.5575 5.13167 11.4575 6.105C12.3575 7.07833 12.8075 8.45 12.8075 10.62C12.8075 10.8733 12.7908 11.1783 12.7575 11.62C12.6825 12.4367 12.4825 13.305 11.9742 14.335C11.5575 15.2033 11.0075 15.96 10.3242 16.55C9.64083 17.1483 8.8075 17.5767 7.78083 17.795C7.53583 17.8367 7.18083 17.86 6.68083 17.86C6.18083 17.86 5.77417 17.8283 5.47417 17.765C5.34917 17.7433 4.99083 17.7033 4.76583 17.63C4.19917 17.49 3.74083 17.2567 3.39083 16.915C2.89083 16.415 2.58583 15.7217 2.58583 14.785C2.58583 13.99 2.93583 13.2517 3.42417 12.785C3.9125 12.3183 4.62417 12.085 5.5575 12.085C6.32417 12.085 6.94917 12.2517 7.4075 12.585C7.87417 12.9183 8.19083 13.405 8.3575 14.04C8.3825 14.155 8.4075 14.2867 8.4075 14.4317C8.4075 14.685 8.33583 14.8967 8.19917 15.065C8.05417 15.2333 7.85417 15.3183 7.59917 15.3183C7.39917 15.3183 7.22417 15.255 7.07417 15.1233C6.91583 15.0083 6.76583 14.785 6.62417 14.4517C6.4825 14.1183 6.31583 13.8733 6.12417 13.715C5.9325 13.5567 5.7075 13.4783 5.44917 13.4783C4.9325 13.4783 4.5075 13.6533 4.17417 14.0033C3.8325 14.3533 3.66583 14.8183 3.66583 15.4C3.66583 15.9167 3.81583 16.3233 4.11583 16.62C4.41583 16.9167 4.82417 17.065 5.34083 17.065C5.7075 17.065 6.02417 16.99 6.29083 16.84C6.5575 16.69 6.79083 16.4817 6.99083 16.215C7.19083 15.9483 7.32417 15.6433 7.39083 15.295C7.4575 14.9467 7.49083 14.5733 7.49083 14.1767C7.49083 12.4717 7.07417 11.1367 6.24083 10.1733C5.4075 9.21 4.2575 8.72833 2.79083 8.72833C1.44083 8.72833 0.374167 9.15667 -0.509167 10.0133C-1.2825 10.7517 -1.67417 11.8683 -1.67417 13.3633C-1.67417 15.8717 -0.450833 18.8117 0.990833 20.015C1.11583 20.1583 1.17417 20.2817 1.17417 20.37C1.17417 20.5233 1.1075 20.6217 0.9825 20.6217L0.974167 20.62Z" clipRule="evenodd" />
+                    </svg>
+                </button>
+            )}
+            <button
+                onClick={(e) => { e.stopPropagation(); handleAdjustStock(rowData); }}
+                className="p-1 text-blue-600 hover:text-blue-800"
+                title="Adjust Stock"
+            >
+                <AdjustmentsHorizontalIcon className="h-5 w-5" />
+            </button>
+            <button
+                onClick={(e) => { e.stopPropagation(); handleViewDetails(rowData); }}
+                className="p-1 text-indigo-600 hover:text-indigo-800"
+                title="View Details"
+            >
+                <ChevronDownIcon className="h-5 w-5" />
+            </button>
+          </div>
+        );
+      },
     },
   ];
 
@@ -415,15 +409,6 @@ const Inventory = () => {
           <Button 
             variant="outline" 
             className="flex items-center"
-            onClick={() => setShowFilters(!showFilters)}
-          >
-            <FunnelIcon className="h-5 w-5 mr-2" />
-            {showFilters ? 'Hide Filters' : 'Show Filters'}
-          </Button>
-          
-          <Button 
-            variant="outline" 
-            className="flex items-center"
             onClick={handleExport}
           >
             <ArrowDownTrayIcon className="h-5 w-5 mr-2" />
@@ -442,116 +427,61 @@ const Inventory = () => {
       </div>
       
       <Card>
-        {/* Search and Filters */}
-        <div className="mb-4">
-          <div className="flex flex-col md:flex-row gap-4">
-            <div className="flex-1 relative">
-              <input
-                type="text"
-                placeholder="Search by product name or SKU..."
-                className="pl-10 pr-4 py-2 w-full border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-              />
-              <MagnifyingGlassIcon className="h-5 w-5 text-gray-400 absolute left-3 top-2.5" />
-            </div>
-            
-            <div className="flex items-center gap-2">
-              <Button 
-                variant="secondary" 
-                size="sm"
-                onClick={handleResetFilters}
-                disabled={!searchTerm && !filters.location && !filters.status && !filters.category}
-              >
-                <ArrowPathIcon className="h-4 w-4 mr-1" />
-                Reset
-              </Button>
-            </div>
+        <div className="p-4">
+          <div className="flex-1 relative mb-4">
+            <input
+              type="text"
+              placeholder="Search by LPN, FNSKU, ASIN, or Description..."
+              className="pl-10 pr-4 py-2 w-full border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+              value={searchTerm}
+              onChange={handleSearchChange}
+            />
+            <MagnifyingGlassIcon className="h-5 w-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
           </div>
-          
-          {/* Advanced Filters */}
-          {showFilters && (
-            <div className="mt-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
-              <div className="flex flex-wrap gap-4">
-                <div className="min-w-[200px]">
-                  <label htmlFor="location-filter" className="block text-sm font-medium text-gray-700 mb-1">
-                    Location
-                  </label>
-                  <select
-                    id="location-filter"
-                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-                    value={filters.location}
-                    onChange={(e) => setFilters({ ...filters, location: e.target.value })}
-                  >
-                    <option value="">All Locations</option>
-                    {locations.filter(loc => loc !== 'All Locations').map((location) => (
-                      <option key={location} value={location}>
-                        {location}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                
-                <div className="min-w-[200px]">
-                  <label htmlFor="category-filter" className="block text-sm font-medium text-gray-700 mb-1">
-                    Category
-                  </label>
-                  <select
-                    id="category-filter"
-                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-                    value={filters.category}
-                    onChange={(e) => setFilters({ ...filters, category: e.target.value })}
-                  >
-                    <option value="">All Categories</option>
-                    {categories.filter(cat => cat !== 'All Categories').map((category) => (
-                      <option key={category} value={category}>
-                        {category}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                
-                <div className="min-w-[200px]">
-                  <label htmlFor="status-filter" className="block text-sm font-medium text-gray-700 mb-1">
-                    Status
-                  </label>
-                  <select
-                    id="status-filter"
-                    className="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-                    value={filters.status}
-                    onChange={(e) => setFilters({ ...filters, status: e.target.value })}
-                  >
-                    <option value="">All</option>
-                    {statuses.filter(s => s !== 'All').map((status) => (
-                      <option key={status} value={status}>
-                        {status}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
         
-        {/* Inventory Table */}
-        <Table 
-          data={getFilteredInventory()}
-          columns={columns}
-          loading={loading}
-          pagination
-          rowsPerPage={10}
-          noDataMessage="No inventory items found. Try adjusting your search or filters."
-          onRowClick={handleViewDetails}
-        />
+        {loading && products.length === 0 ? (
+            <div className="flex items-center justify-center h-64">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+            </div>
+        ) : !loading && products.length === 0 && !error ? (
+            <div className="text-center py-8 text-gray-500">
+                No inventory items found. Try a different search.
+            </div>
+        ) : (
+            <>
+              {console.log("RENDERING TABLE: products state:", products)} 
+              {console.log("RENDERING TABLE: columns state:", columns)} 
+              <Table 
+                  data={products}
+                  columns={columns}
+                  loading={loading} 
+                  pagination={false} 
+                  noDataMessage="No inventory items found. Try a different search."
+                  onRowClick={handleViewDetails}
+              />
+            </>
+        )}
+
+        {!loading && totalItems > 0 && (
+          <div className="p-4">
+            <Pagination
+              currentPage={currentPage}
+              totalPages={Math.ceil(totalItems / ITEMS_PER_PAGE)}
+              onPageChange={handlePageChange}
+              totalItems={totalItems}
+              itemsPerPage={ITEMS_PER_PAGE}
+            />
+          </div>
+        )}
       </Card>
 
-      {/* Add Stock Modal */}
-      <AddStockModal 
+      {/* Temporarily comment out AddStockModal until its logic is refactored for Supabase */}
+      {/* <AddStockModal 
         isOpen={showAddStockModal}
         onClose={() => setShowAddStockModal(false)}
-        onAddItems={handleAddItems}
-      />
+        onAddItems={handleAddItems} 
+      /> */}
     </div>
   );
 };
