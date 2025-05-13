@@ -52,7 +52,7 @@ export const AuthProvider = ({ children }) => {
 
     const { data: authListener } = supabase.auth.onAuthStateChange(
       async (_event, newSession) => {
-        console.log('AuthProvider: onAuthStateChange event:', _event, newSession);
+        console.log('AuthProvider: onAuthStateChange event:', _event);
         setSession(newSession);
         setUser(newSession?.user ?? null);
         logAuthState('auth-state-change', { newSession });
@@ -162,7 +162,7 @@ export const AuthProvider = ({ children }) => {
     user,
     session, // Expose session if needed
     loading,
-    isAuthenticated: !!user, // More robust: !!session && !!user
+    isAuthenticated: !!user && !!session, // Let's make this dependent on session too
     signIn,
     signUp,
     signOut,

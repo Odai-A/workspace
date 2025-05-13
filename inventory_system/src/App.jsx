@@ -4,6 +4,8 @@ import { ToastContainer } from 'react-toastify';
 import { useAuth } from './contexts/AuthContext';
 import { NavigationProvider } from './contexts/NavigationContext';
 import 'react-toastify/dist/ReactToastify.css';
+import './index.css'
+import InventoryDisplay from './components/InventoryDisplay'
 
 // Pages
 import Dashboard from './pages/Dashboard';
@@ -78,6 +80,9 @@ function App() {
           </Routes>
         </NavigationProvider>
       </Router>
+
+      {/* Place InventoryDisplay here for testing */}
+      {isAuthenticated && <InventoryDisplay />}
     </>
   );
 }
