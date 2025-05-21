@@ -8,11 +8,11 @@ import {
   UserIcon,
   Cog6ToothIcon,
 } from '@heroicons/react/24/outline';
-import { useAuth } from '../../context/AuthContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { useNavigation } from '../../contexts/NavigationContext';
 
 const Header = () => {
-  const { currentUser, logout } = useAuth();
+  const { user: currentUser, signOut: logout } = useAuth();
   const { sidebarCollapsed } = useNavigation();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);

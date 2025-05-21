@@ -1,6 +1,6 @@
 import React from 'react';
+import { useAuth } from '../../contexts/AuthContext';
 import { Navigate, useLocation } from 'react-router-dom';
-import { useAuth } from '../../context/AuthContext';
 
 /**
  * Route guard component that protects routes based on authentication status

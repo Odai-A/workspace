@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useAuth } from '../../context/AuthContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
 
@@ -14,7 +14,7 @@ const Login = () => {
   const [isLogin, setIsLogin] = useState(true); // Toggle between login and register
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const { login, register } = useAuth();
+  const { signIn, signUp } = useAuth();
   const navigate = useNavigate();
 
   const togglePasswordVisibility = () => {
@@ -42,12 +42,12 @@ const Login = () => {
       let result;
       
       if (isLogin) {
-        result = await login(email, password);
+        result = await signIn(email, password);
         if (result.success) {
           navigate('/dashboard');
         }
       } else {
-        result = await register(email, password);
+        result = await signUp(email, password);
         if (result.success) {
           // Stay on login page after registration
           setIsLogin(true);

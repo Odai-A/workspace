@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../contexts/AuthContext';
 import { toast } from 'react-toastify';
 import { FiUser, FiMail, FiLogOut, FiShield } from 'react-icons/fi';
+import { UserIcon, ShieldCheckIcon, CameraIcon, EnvelopeIcon } from '@heroicons/react/24/outline';
 
 const Profile = () => {
   const { user, signOut } = useAuth();

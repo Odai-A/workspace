@@ -15,7 +15,8 @@ import {
   Cog6ToothIcon,
 } from '@heroicons/react/24/outline';
 import { useNavigation } from '../../contexts/NavigationContext';
-import { useAuth } from '../../context/AuthContext';
+import { useAuth } from '../../contexts/AuthContext';
+import ThemeToggle from './ThemeToggle';
 
 // Map for icon components
 const iconMap = {
@@ -41,7 +42,7 @@ const Sidebar = () => {
     activeRoute, 
     setCurrentRoute 
   } = useNavigation();
-  const { currentUser, hasPermission, hasRole } = useAuth();
+  const { user, hasPermission, hasRole } = useAuth();
   const location = useLocation();
 
   // Filter navigation items based on user permissions and roles
@@ -119,10 +120,10 @@ const Sidebar = () => {
           {renderNavItems()}
         </nav>
         <div className="p-3 border-t border-gray-200">
-          {!sidebarCollapsed && currentUser && (
+          {!sidebarCollapsed && user && (
             <div className="text-xs text-gray-500">
               <div className="font-medium">Logged in as:</div>
-              <div>{currentUser.username}</div>
+              <div>{user.email || 'User'}</div>
             </div>
           )}
         </div>
@@ -165,10 +166,10 @@ const Sidebar = () => {
             {renderNavItems()}
           </nav>
           <div className="p-3 border-t border-gray-200">
-            {currentUser && (
+            {user && (
               <div className="text-xs text-gray-500">
                 <div className="font-medium">Logged in as:</div>
-                <div>{currentUser.username}</div>
+                <div>{user.email || 'User'}</div>
               </div>
             )}
           </div>
