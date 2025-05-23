@@ -209,6 +209,10 @@ export const externalApiService = {
       if (scanData) {
         const asin = scanData.asin;
         
+        console.log('🚀 [DEBUG] Raw scanData from API:', scanData);
+        console.log('🚀 [DEBUG] Extracted ASIN from scanData.asin:', asin);
+        console.log('🚀 [DEBUG] ASIN truthy check:', !!asin);
+        
         // Create more descriptive product data based on what we received
         const productData = {
           fnsku: fnsku,
@@ -230,6 +234,8 @@ export const externalApiService = {
           asin_found: !!asin
         };
         
+        console.log('🚀 [DEBUG] Final productData object:', productData);
+        console.log('🚀 [DEBUG] Final productData.asin:', productData.asin);
         console.log('🎉 Successfully processed external API result:', productData);
         return productData;
       } else {
@@ -576,6 +582,8 @@ export const getProductLookup = async (code) => {
       console.log('💰 Step 2: Trying external FNSKU API (this will be charged)...');
       try {
         const externalResult = await externalApiService.lookupFnsku(code);
+        console.log('🚀 [DEBUG] externalApiService.lookupFnsku returned:', externalResult);
+        console.log('🚀 [DEBUG] externalResult.asin:', externalResult?.asin);
         
         if (externalResult) {
           console.log('✅ Found via external API - charged lookup');
@@ -603,6 +611,7 @@ export const getProductLookup = async (code) => {
           };
           
           console.log('💾 Prepared data for saving:', productToSave);
+          console.log('🚀 [DEBUG] productToSave.asin:', productToSave.asin);
           
           // STEP 3: Save external result to local database for future use
           console.log('💾 Step 3: Saving to local database for future cost savings...');
@@ -613,12 +622,17 @@ export const getProductLookup = async (code) => {
             console.warn('⚠️ Could not save to local database:', saveError);
           }
           
-          return {
+          const finalResult = {
             ...externalResult,
             source: 'external_api',
             cost_status: 'charged',
             code_type: codeInfo.type
           };
+          
+          console.log('🚀 [DEBUG] Final result from getProductLookup:', finalResult);
+          console.log('🚀 [DEBUG] Final result ASIN:', finalResult.asin);
+          
+          return finalResult;
         }
       } catch (apiError) {
         console.error('❌ External API failed:', apiError);

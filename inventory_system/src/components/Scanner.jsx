@@ -3,6 +3,7 @@ import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import BarcodeReader from './BarcodeReader';
 import MarketplaceListing from './MarketplaceListing';
+import ShopifyListing from './ShopifyListing';
 import { getProductLookup, externalApiService } from '../services/api';
 import { productLookupService as dbProductLookupService, apiCacheService } from '../services/databaseService';
 import { inventoryService } from '../config/supabaseClient';
@@ -19,6 +20,9 @@ const Scanner = () => {
   
   // Marketplace listing states
   const [showMarketplaceListing, setShowMarketplaceListing] = useState(false);
+  
+  // Shopify listing states
+  const [showShopifyListing, setShowShopifyListing] = useState(false);
   
   // File import states
   const [showFileImportModal, setShowFileImportModal] = useState(false);
@@ -133,9 +137,15 @@ const Scanner = () => {
           autoClose: 2000
         });
         
+        console.log("🚀 [DEBUG] About to call getProductLookup for:", code);
         const apiResult = await getProductLookup(code); 
+        console.log("🚀 [DEBUG] getProductLookup returned:", apiResult);
         
         if (apiResult) {
+          console.log("🚀 [DEBUG] API result ASIN:", apiResult.asin);
+          console.log("🚀 [DEBUG] API result FNSKU:", apiResult.fnsku);
+          console.log("🚀 [DEBUG] API result source:", apiResult.source);
+          
           let displayableProduct = null;
           let productForLogging = apiResult; 
           
@@ -144,6 +154,8 @@ const Scanner = () => {
             toast.success("⚡ Found via external API and saved for future use!", {
               icon: "💛"
             });
+            
+            console.log("🚀 [DEBUG] Processing external_api result with ASIN:", apiResult.asin);
           } else if (apiResult.source === 'local_database') {
             toast.success("✅ Found in local database - No API charge!", {
               icon: "💚"
@@ -158,15 +170,24 @@ const Scanner = () => {
           try {
             if (apiResult.source === 'external_api') {
               console.log('💾 Attempting to save external API result to API cache for future cost savings...');
-              console.log('🔍 API result to save:', apiResult);
+              console.log('🔍 API result to save (with ASIN):', apiResult);
+              console.log('🔍 API result ASIN specifically:', apiResult.asin);
               
               const savedToCache = await apiCacheService.saveLookup(apiResult); 
               
               if (savedToCache) {
                 console.log('✅ Successfully saved external API result to API cache:', savedToCache);
-                displayableProduct = apiCacheService.mapCacheToDisplay(savedToCache);
-                displayableProduct.source = 'api_cache';
-                displayableProduct.cost_status = 'no_charge';
+                console.log('✅ Saved cache ASIN:', savedToCache.asin);
+                
+                // Don't map from cache - keep the original external API result!
+                displayableProduct = {
+                  ...apiResult,
+                  source: 'external_api_cached', // Indicate it was saved to cache
+                  cost_status: 'charged', // But this lookup was still charged
+                  cache_saved: true // Flag that it's now cached for future
+                };
+                console.log('🚀 [DEBUG] Using original external API result with cache flag:', displayableProduct.asin);
+                
                 productForLogging = displayableProduct; 
                 toast.success("💾 API result saved to cache! Future scans of this item will be FREE! 🎉", {
                   autoClose: 4000
@@ -182,6 +203,7 @@ const Scanner = () => {
                 displayableProduct.cost_status = 'charged';
               }
             } else {
+              // For non-external API results, use as-is
               displayableProduct = apiResult;
             }
           } catch (saveError) {
@@ -194,6 +216,9 @@ const Scanner = () => {
             displayableProduct.source = 'external_api';
             displayableProduct.cost_status = 'charged';
           }
+          
+          console.log('🚀 [DEBUG] Final displayableProduct before setProductInfo:', displayableProduct);
+          console.log('🚀 [DEBUG] Final displayableProduct ASIN:', displayableProduct?.asin);
           
           setProductInfo(displayableProduct);
           
@@ -272,6 +297,31 @@ const Scanner = () => {
 
   const handleCloseListing = () => {
     setShowMarketplaceListing(false);
+  };
+
+  // Handle Shopify listing creation
+  const handleCreateShopifyListing = () => {
+    if (productInfo) {
+      setShowShopifyListing(true);
+    } else {
+      toast.error("Please scan a product first");
+    }
+  };
+
+  const handleShopifySuccess = (result) => {
+    console.log('Shopify listing creation result:', result);
+    toast.success(`🛍️ Shopify listing created! Product ID: ${result.product.id}`, {
+      autoClose: 5000
+    });
+    
+    // Open Shopify admin in new tab
+    if (result.shopifyUrl) {
+      window.open(result.shopifyUrl, '_blank');
+    }
+  };
+
+  const handleCloseShopifyListing = () => {
+    setShowShopifyListing(false);
   };
 
   // Handle search input change with debounce
@@ -903,6 +953,20 @@ const Scanner = () => {
                 </button>
               </div>
 
+              {/* Create Shopify Listing Button */}
+              <div className="mt-3">
+                <button
+                  onClick={handleCreateShopifyListing}
+                  className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded flex items-center justify-center"
+                >
+                  <ShoppingBagIcon className="w-5 h-5 mr-2" />
+                  🛍️ Create Shopify Listing
+                </button>
+                <p className="text-xs text-gray-500 mt-1 text-center">
+                  Auto-generates description with Amazon link
+                </p>
+              </div>
+
               {/* Displaying productInfo.description if it was mapped and different from name, 
                   but our current mapSupabaseProductToDisplay maps both to Supabase 'Description' column. 
                   If 'Description' is long, the h3 title is already showing it. 
@@ -1125,6 +1189,14 @@ const Scanner = () => {
         isVisible={showMarketplaceListing}
         onClose={handleCloseListing}
         onSuccess={handleListingSuccess}
+      />
+
+      {/* Shopify Listing Modal */}
+      <ShopifyListing
+        productData={productInfo}
+        isVisible={showShopifyListing}
+        onClose={handleCloseShopifyListing}
+        onSuccess={handleShopifySuccess}
       />
     </div>
   );
