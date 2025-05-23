@@ -196,6 +196,162 @@ def inventory():
 def scan_barcode():
     return render_template('scan.html')
 
+@app.route('/external-scan')
+def external_scan():
+    return render_template('external_scan.html')
+
+@app.route('/api/external-lookup', methods=['POST'])
+def external_lookup():
+    """Lookup product data from external API using FNSKU"""
+    try:
+        data = request.get_json()
+        fnsku = data.get('fnsku', '').strip()
+        
+        if not fnsku:
+            return jsonify({
+                "success": False,
+                "message": "FNSKU is required"
+            }), 400
+        
+        # FIRST: Check local database for FNSKU
+        local_product = Product.query.filter_by(fnsku=fnsku).first()
+        
+        if local_product:
+            # Found in local database - return this data without API call
+            product_data = {
+                "success": True,
+                "source": "local_database",
+                "asin": local_product.asin or '',
+                "title": local_product.title or '',
+                "price": str(local_product.msrp) if local_product.msrp else '',
+                "fnsku": fnsku,
+                "lpn": local_product.lpn,
+                "image_url": '',  # Local database doesn't have images
+                "amazon_url": f"https://www.amazon.com/dp/{local_product.asin}" if local_product.asin else '',
+                "message": "Found in local inventory database"
+            }
+            
+            return jsonify(product_data)
+        
+        # NOT FOUND LOCALLY: Proceed with external API call
+        # Using the provided fnskutoasin.com API
+        BASE_URL = "https://ato.fnskutoasin.com"
+        API_KEY = "20a98a6a-437e-497c-b64c-ec97ec2fbc19"
+        
+        # Try to get existing scan task by barcode first
+        lookup_url = f"{BASE_URL}/api/v1/ScanTask/GetByBarCode"
+        
+        headers = {
+            'apiKey': API_KEY,
+            'Content-Type': 'application/json'
+        }
+        
+        # Try to lookup existing scan for this barcode
+        params = {'BarCode': fnsku}
+        response = requests.get(lookup_url, headers=headers, params=params, timeout=30)
+        
+        scan_data = None
+        if response.status_code == 200:
+            lookup_result = response.json()
+            if lookup_result.get('succeeded') and lookup_result.get('data'):
+                scan_data = lookup_result['data']
+        
+        # If no existing scan found, create a new scan task
+        if not scan_data:
+            add_scan_url = f"{BASE_URL}/api/v1/ScanTask/AddOrGet"
+            
+            payload = {
+                "barCode": fnsku,
+                "callbackUrl": ""  # Optional callback URL
+            }
+            
+            response = requests.post(add_scan_url, headers=headers, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                add_result = response.json()
+                if add_result.get('succeeded') and add_result.get('data'):
+                    scan_data = add_result['data']
+                else:
+                    return jsonify({
+                        "success": False,
+                        "message": f"Failed to create scan task: {add_result.get('message', 'Unknown error')}"
+                    }), 400
+            else:
+                return jsonify({
+                    "success": False,
+                    "message": f"External API error: {response.status_code} - {response.text}"
+                }), response.status_code
+        
+        # Process the scan data
+        if scan_data:
+            # Extract relevant data from the API response
+            asin = scan_data.get('asin', '')
+            
+            product_data = {
+                "success": True,
+                "source": "external_api",
+                "asin": asin,
+                "title": f"Product for ASIN: {asin}" if asin else "Product information found",
+                "price": "",  # This API doesn't seem to provide price info based on the screenshots
+                "fnsku": fnsku,
+                "image_url": "",  # This API doesn't seem to provide image URLs
+                "amazon_url": f"https://www.amazon.com/dp/{asin}" if asin else '',
+                "scan_task_id": scan_data.get('id', ''),
+                "task_state": scan_data.get('taskState', ''),
+                "assignment_date": scan_data.get('assignmentDate', ''),
+                "raw_data": scan_data,  # Include raw response for debugging
+                "message": "Found via fnskutoasin.com API (charged lookup)"
+            }
+            
+            # OPTIONAL: Save external API result to local database for future use
+            # This prevents future API calls for the same FNSKU
+            try:
+                if asin:
+                    # Create a new product entry with the external data
+                    # Use a generated LPN since we don't have one from external API
+                    new_lpn = f"EXT-{fnsku}"  # Prefix to indicate external source
+                    
+                    # Check if this LPN already exists to avoid duplicates
+                    existing_product = Product.query.filter_by(lpn=new_lpn).first()
+                    if not existing_product:
+                        new_product = Product(
+                            lpn=new_lpn,
+                            asin=asin,
+                            fnsku=fnsku,
+                            title=f"Product for ASIN: {asin}",
+                            msrp=None  # No price data from this API
+                        )
+                        db.session.add(new_product)
+                        db.session.commit()
+                        product_data["saved_to_local"] = True
+            except Exception as e:
+                # Don't fail the whole request if saving fails
+                print(f"Warning: Could not save external API result to local database: {e}")
+                product_data["saved_to_local"] = False
+            
+            return jsonify(product_data)
+        else:
+            return jsonify({
+                "success": False,
+                "message": "No data returned from external API"
+            }), 404
+            
+    except requests.exceptions.Timeout:
+        return jsonify({
+            "success": False,
+            "message": "External API request timed out"
+        }), 408
+    except requests.exceptions.RequestException as e:
+        return jsonify({
+            "success": False,
+            "message": f"External API request failed: {str(e)}"
+        }), 500
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"Error performing external lookup: {str(e)}"
+        }), 500
+
 @app.route('/dashboard')
 def dashboard():
     total_products = Product.query.count()

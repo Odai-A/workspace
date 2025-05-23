@@ -99,6 +99,11 @@
                             </a>
                         </li>
                         <li class="nav-item">
+                            <a class="nav-link {% if request.endpoint == 'external_scan' %}active{% endif %}" href="{{ url_for('external_scan') }}">
+                                External Scan
+                            </a>
+                        </li>
+                        <li class="nav-item">
                             <a class="nav-link {% if request.endpoint == 'scan_history_list' %}active{% endif %}" href="{{ url_for('scan_history_list') }}">
                                 Scan History
                             </a>
