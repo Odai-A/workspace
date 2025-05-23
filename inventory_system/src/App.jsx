@@ -12,7 +12,7 @@ import Dashboard from './pages/Dashboard';
 import Inventory from './pages/Inventory';
 import Reports from './pages/Reports';
 // import Scanner from './pages/Scanner'; // Commenting out the old Page-based scanner
-import Scanner from './components/Scanner'; // Corrected path
+import Scanner from './components/Scanner'; // This is the advanced scanner with external API
 import Settings from './pages/Settings';
 import Profile from './pages/Profile';
 import Login from './pages/Login';

@@ -11,9 +11,24 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:Od_pugilist5243@db.jjtdvdbfbsdcoyehubmx.supabase.co:5432/postgres'
+
+# Try to use Supabase, but fall back to local SQLite for testing
+try:
+    # Check if we can resolve the Supabase hostname first
+    import socket
+    socket.gethostbyname('db.jjtdvdbfbsdcoyehubmx.supabase.co')
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:Od_pugilist5243@db.jjtdvdbfbsdcoyehubmx.supabase.co:5432/postgres'
+    print("✅ Using Supabase database")
+except (socket.gaierror, Exception) as e:
+    # Fall back to local SQLite for testing
+    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///local_inventory.db'
+    print("⚠️  Supabase unavailable, using local SQLite database for testing")
+    print(f"   Network error: {e}")
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {"pool_pre_ping": True}
+# Only use pool_pre_ping for PostgreSQL
+if 'postgresql' in app.config['SQLALCHEMY_DATABASE_URI']:
+    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {"pool_pre_ping": True}
 app.config['SECRET_KEY'] = os.urandom(24) # For flash messages
 
 # Enable CORS for all domains and routes
@@ -59,6 +74,25 @@ def create_tables_if_not_exist():
     # In a production environment, you might prefer to use migrations (e.g., Alembic).
     with app.app_context(): # Ensure we are within application context
         db.create_all()
+        
+        # Add sample data for testing if using local SQLite
+        if 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']:
+            # Check if we already have data
+            if Product.query.count() == 0:
+                print("📦 Adding sample data for testing...")
+                sample_products = [
+                    Product(lpn='TEST-001', asin='B08XYZ123', fnsku='X001-ABC-123', title='Sample Product 1', msrp=29.99),
+                    Product(lpn='TEST-002', asin='B08XYZ456', fnsku='X002-DEF-456', title='Sample Product 2', msrp=19.99),
+                    Product(lpn='TEST-003', asin='B08XYZ789', fnsku='X003-GHI-789', title='Sample Product 3', msrp=39.99),
+                ]
+                for product in sample_products:
+                    db.session.add(product)
+                try:
+                    db.session.commit()
+                    print("✅ Sample data added successfully")
+                except Exception as e:
+                    db.session.rollback()
+                    print(f"❌ Error adding sample data: {e}")
 
 @app.route('/')
 def index():

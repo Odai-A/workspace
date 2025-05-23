@@ -1,9 +1,10 @@
 import { supabase } from '../config/supabaseClient';
 
-// The name of your Supabase table
+// The name of your Supabase tables
 const PRODUCT_TABLE = 'manifest_data';
+const API_CACHE_TABLE = 'api_lookup_cache'; // New table for external API cache
 
-// Streamlined Column mapping for essential fields
+// Streamlined Column mapping for essential fields (original table)
 const columnMap = {
   id: 'id',                 // Keep for Supabase internal ID
   lpn: 'X-Z ASIN',        // Your LPN
@@ -17,6 +18,133 @@ const columnMap = {
   upc: 'UPC',             // Product UPC
   quantity: 'Quantity',     // Product Quantity
   // Removed other non-essential mappings like sub_category, ext_msrp, pallet_id etc. for now
+};
+
+// API Cache service for external lookup caching
+export const apiCacheService = {
+  /**
+   * Gets a product from the API cache by FNSKU
+   * @param {string} fnsku - The FNSKU to search for
+   * @returns {Promise<Object|null>} - The cached API result or null if not found
+   */
+  async getCachedLookup(fnsku) {
+    try {
+      const { data, error } = await supabase
+        .from(API_CACHE_TABLE)
+        .select('*')
+        .eq('fnsku', fnsku)
+        .single();
+
+      if (error) {
+        if (error.code === 'PGRST116') {
+          // No rows found - this is expected for new lookups
+          return null;
+        }
+        console.error('Error fetching from API cache:', error);
+        return null;
+      }
+
+      console.log('✅ Found in API cache:', data);
+      return data;
+    } catch (error) {
+      console.error('Exception in getCachedLookup:', error);
+      return null;
+    }
+  },
+
+  /**
+   * Saves an external API result to the cache
+   * @param {Object} apiResult - The result from external API
+   * @returns {Promise<Object|null>} - The saved cache entry or null on error
+   */
+  async saveLookup(apiResult) {
+    try {
+      const cacheData = {
+        fnsku: apiResult.fnsku,
+        asin: apiResult.asin || null,
+        product_name: apiResult.name || apiResult.description || `Product ${apiResult.fnsku}`,
+        description: apiResult.description || apiResult.name || '',
+        price: apiResult.price || 0,
+        category: apiResult.category || 'External API',
+        upc: apiResult.upc || null,
+        source: apiResult.source || 'fnskutoasin.com',
+        scan_task_id: apiResult.scan_task_id || null,
+        task_state: apiResult.task_state || null,
+        asin_found: !!apiResult.asin,
+        original_lookup_code: apiResult.original_lookup_code || apiResult.fnsku,
+      };
+
+      console.log('💾 Saving to API cache:', cacheData);
+
+      // First check if it already exists
+      const existing = await this.getCachedLookup(apiResult.fnsku);
+      
+      if (existing) {
+        // Update existing cache entry
+        const { data, error } = await supabase
+          .from(API_CACHE_TABLE)
+          .update({
+            ...cacheData,
+            lookup_count: (existing.lookup_count || 0) + 1,
+            last_accessed: new Date().toISOString()
+          })
+          .eq('fnsku', apiResult.fnsku)
+          .select()
+          .single();
+
+        if (error) {
+          console.error('Error updating API cache:', error);
+          return null;
+        }
+        
+        console.log('✅ Updated API cache entry:', data);
+        return data;
+      } else {
+        // Insert new cache entry
+        const { data, error } = await supabase
+          .from(API_CACHE_TABLE)
+          .insert(cacheData)
+          .select()
+          .single();
+
+        if (error) {
+          console.error('Error inserting to API cache:', error);
+          return null;
+        }
+        
+        console.log('✅ Created new API cache entry:', data);
+        return data;
+      }
+    } catch (error) {
+      console.error('Exception in saveLookup:', error);
+      return null;
+    }
+  },
+
+  /**
+   * Maps API cache data to display format
+   * @param {Object} cacheData - Data from API cache table
+   * @returns {Object} - Mapped display data
+   */
+  mapCacheToDisplay(cacheData) {
+    return {
+      id: cacheData.id,
+      fnsku: cacheData.fnsku,
+      asin: cacheData.asin,
+      name: cacheData.product_name,
+      description: cacheData.description,
+      price: cacheData.price,
+      category: cacheData.category,
+      upc: cacheData.upc,
+      sku: cacheData.fnsku, // Use FNSKU as SKU
+      lpn: '', // API cache doesn't have LPN
+      quantity: 0, // API cache doesn't track quantity
+      source: 'api_cache',
+      cost_status: 'no_charge',
+      // Keep raw cache data for reference
+      rawCache: cacheData,
+    };
+  }
 };
 
 export const productLookupService = {
@@ -64,26 +192,87 @@ export const productLookupService = {
   },
 
   /**
-   * Gets a product by its FNSKU.
-   * @param {string} fnskuValue - The FNSKU to search for.
+   * Gets a product by its FNSKU or ASIN from both API cache and manifest data tables
+   * Priority: API cache first (faster, no RLS issues), then manifest data
+   * @param {string} code - The FNSKU or ASIN to search for.
    * @returns {Promise<Object|null>} - A promise that resolves to the product or null if not found.
    */
-  async getProductByFnsku(fnskuValue) {
-    const fnskuColumn = columnMap['fnsku'];
-    if (!fnskuColumn) {
-      console.error('getProductByFnsku: FNSKU column name is not mapped correctly.');
+  async getProductByFnsku(code) {
+    try {
+      console.log(`🔍 Searching for code: ${code} in both tables...`);
+      
+      // STEP 1: Check API cache first (supports both FNSKU and ASIN)
+      console.log('📱 Step 1: Checking API cache table...');
+      
+      // Try by FNSKU first
+      let cachedResult = await apiCacheService.getCachedLookup(code);
+      
+      // If not found by FNSKU, try by ASIN in cache
+      if (!cachedResult) {
+        try {
+          const { data, error } = await supabase
+            .from(API_CACHE_TABLE)
+            .select('*')
+            .eq('asin', code)
+            .single();
+
+          if (!error && data) {
+            console.log('✅ Found by ASIN in API cache');
+            cachedResult = data;
+          }
+        } catch (error) {
+          // Continue to next step
+        }
+      }
+      
+      if (cachedResult) {
+        console.log('✅ Found in API cache - no charge!');
+        return apiCacheService.mapCacheToDisplay(cachedResult);
+      }
+      
+      // STEP 2: Check original manifest data table (by FNSKU and ASIN)
+      console.log('📦 Step 2: Checking manifest_data table...');
+      
+      // Try by FNSKU first
+      let { data, error } = await supabase
+        .from('manifest_data')
+        .select('*')
+        .eq('Fn Sku', code)
+        .limit(1);
+
+      // If not found by FNSKU, try by ASIN
+      if ((!data || data.length === 0) && !error) {
+        const asinResult = await supabase
+          .from('manifest_data')
+          .select('*')
+          .eq('B00 Asin', code)
+          .limit(1);
+          
+        data = asinResult.data;
+        error = asinResult.error;
+        
+        if (data && data.length > 0) {
+          console.log('✅ Found by ASIN in manifest_data table');
+        }
+      }
+
+      if (error) {
+        console.error('Error fetching product from manifest_data:', error);
+        return null;
+      }
+
+      // Return the first item from the array, or null if no results
+      if (data && data.length > 0) {
+        console.log('✅ Found in manifest_data table');
+        return data[0];
+      }
+      
+      console.log('❌ Not found in either table');
+      return null;
+    } catch (error) {
+      console.error('Error in getProductByFnsku:', error);
       return null;
     }
-    const { data, error } = await supabase
-      .from(PRODUCT_TABLE)
-      .select('*')
-      .eq(fnskuColumn, fnskuValue)
-      .maybeSingle();
-    if (error) {
-      console.error('Error fetching product by FNSKU from Supabase:', error);
-      return null;
-    }
-    return data;
   },
 
   async getProductByLpn(lpnValue) {
@@ -145,20 +334,50 @@ export const productLookupService = {
         return null; 
     }
 
-    console.log(`Attempting to save/update with conflict on: ${conflictColumnSupabase}`, mappedData);
+    console.log(`Attempting to save external API result to database:`, mappedData);
 
-    const { data, error } = await supabase
-      .from(PRODUCT_TABLE)
-      .upsert(mappedData, { onConflict: conflictColumnSupabase })
-      .select()
-      .single();
+    try {
+      // First check if this FNSKU already exists
+      const existingProduct = await this.getProductByFnsku(mappedData[conflictColumnSupabase]);
+      
+      if (existingProduct) {
+        console.log(`Product with FNSKU ${mappedData[conflictColumnSupabase]} already exists, updating...`);
+        // Update existing product
+        const { data, error } = await supabase
+          .from(PRODUCT_TABLE)
+          .update(mappedData)
+          .eq(conflictColumnSupabase, mappedData[conflictColumnSupabase])
+          .select()
+          .single();
+        
+        if (error) {
+          console.error('Error updating existing product in Supabase:', error);
+          console.error('Attempted to update:', mappedData);
+          return null;
+        }
+        console.log('✅ Successfully updated existing product:', data);
+        return data;
+      } else {
+        console.log(`Product with FNSKU ${mappedData[conflictColumnSupabase]} is new, inserting...`);
+        // Insert new product
+        const { data, error } = await supabase
+          .from(PRODUCT_TABLE)
+          .insert(mappedData)
+          .select()
+          .single();
 
-    if (error) {
-      console.error('Error saving product lookup to Supabase:', error);
-      console.error('Attempted to save:', mappedData);
+        if (error) {
+          console.error('Error inserting new product to Supabase:', error);
+          console.error('Attempted to insert:', mappedData);
+          return null;
+        }
+        console.log('✅ Successfully inserted new product:', data);
+        return data;
+      }
+    } catch (error) {
+      console.error('Exception in saveProductLookup:', error);
       return null;
     }
-    return data;
   },
   
   /**
@@ -283,14 +502,39 @@ export const productLookupService = {
   async logScanEvent(scannedCode, productDetails = null) {
     if (!scannedCode) return null;
     try {
+      // Handle different data sources properly
+      let manifestDataId = null;
+      let productDescription = null;
+      
+      if (productDetails) {
+        // If this came from API cache, don't try to link to manifest_data
+        if (productDetails.source === 'api_cache' || productDetails.rawCache) {
+          manifestDataId = null; // Don't link to manifest_data for API cache entries
+          productDescription = productDetails.name || productDetails.description;
+        } else if (productDetails.rawSupabase && productDetails.rawSupabase.id) {
+          // This came from manifest_data table, safe to reference
+          manifestDataId = productDetails.rawSupabase.id;
+          productDescription = productDetails.name;
+        } else if (productDetails.id && productDetails.source === 'local_database') {
+          // This came from manifest_data table via mapping
+          manifestDataId = productDetails.id;
+          productDescription = productDetails.name;
+        } else {
+          // External API or other sources - no manifest_data reference
+          manifestDataId = null;
+          productDescription = productDetails.name || productDetails.description;
+        }
+      }
+      
       const eventData = {
         scanned_code: scannedCode,
         scanned_at: new Date().toISOString(),
-        // Assuming productDetails contains an 'id' field from manifest_data after mapping
-        manifest_data_id: productDetails ? productDetails.id : null, 
-        // productDetails.name is already the mapped Description
-        product_description: productDetails ? productDetails.name : null, 
+        manifest_data_id: manifestDataId, // Only set if from manifest_data table
+        product_description: productDescription,
       };
+      
+      console.log('🔍 Attempting to log scan event:', eventData);
+      
       const { data, error } = await supabase
         .from('scan_history') 
         .insert(eventData)
@@ -301,7 +545,7 @@ export const productLookupService = {
         return null;
       }
       // Supabase insert().select() by default returns an array, even for single insert
-      console.log('Scan event logged:', data ? data[0] : 'No data returned from insert');
+      console.log('✅ Scan event logged successfully:', data ? data[0] : 'No data returned from insert');
       return data ? data[0] : null;
     } catch (error) {
       console.error('Exception logging scan event:', error);

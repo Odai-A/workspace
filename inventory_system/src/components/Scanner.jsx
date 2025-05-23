@@ -3,10 +3,10 @@ import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import BarcodeReader from './BarcodeReader';
 import MarketplaceListing from './MarketplaceListing';
-import { getProductLookup } from '../services/api';
-import { productLookupService as dbProductLookupService } from '../services/databaseService';
+import { getProductLookup, externalApiService } from '../services/api';
+import { productLookupService as dbProductLookupService, apiCacheService } from '../services/databaseService';
 import { inventoryService } from '../config/supabaseClient';
-import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, CheckCircleIcon, CurrencyDollarIcon } from '@heroicons/react/24/outline';
 import { mockService } from '../services/mockData';
 
 /**
@@ -64,6 +64,9 @@ const Scanner = () => {
       category: supabaseProduct['Category'],
       upc: supabaseProduct['UPC'],
       quantity: supabaseProduct['Quantity'],
+      // Set source info for original manifest data
+      source: 'local_database',
+      cost_status: 'no_charge',
       // You can add image_url here if it exists in your supabaseProduct object and you want to display it
       // image_url: supabaseProduct['image_url_column_name'], 
       rawSupabase: supabaseProduct, // Keep the raw object if needed for other operations
@@ -76,24 +79,30 @@ const Scanner = () => {
       console.warn("handleCodeDetected called with no code:", detectedData);
       return;
     }
-    console.log("Detected code via Camera:", code);
+    
+    // Clean the code by removing whitespace and tab characters
+    const cleanedCode = code.trim().replace(/\s+/g, '');
+    console.log("Detected code via Camera:", cleanedCode);
     setIsCameraActive(false);
     
     setScannedCodes(prev => {
       const newHistory = [
-        { code, timestamp: new Date().toISOString(), type: 'camera' },
-        ...prev.filter(item => item.code !== code)
+        { code: cleanedCode, timestamp: new Date().toISOString(), type: 'camera' },
+        ...prev.filter(item => item.code !== cleanedCode)
       ].slice(0, 10);
       return newHistory;
     });
     
-    lookupProductByCode(code);
+    lookupProductByCode(cleanedCode);
   }
 
   async function lookupProductByCode(code) {
     setLoading(true);
     setProductInfo(null); // Clear previous product info
     try {
+      console.log(`🔍 Looking up product by code: ${code}`);
+      
+      // First try the local database (Supabase)
       let productFromDb = await dbProductLookupService.getProductByFnsku(code);
 
       if (!productFromDb) {
@@ -102,50 +111,110 @@ const Scanner = () => {
       }
 
       if (productFromDb) {
+        // Found in local database
         const displayProduct = mapSupabaseProductToDisplay(productFromDb);
+        displayProduct.source = 'local_database';
+        displayProduct.cost_status = 'no_charge';
+        
         setProductInfo(displayProduct);
-        toast.success("Product found in database");
+        toast.success("✅ Found in local database - No API charge!", {
+          icon: "💚"
+        });
+        
         if (displayProduct) {
           console.log("[Scanner.jsx] Attempting to log scan event (from DB). Code:", code, "Product Details:", displayProduct);
           const logResult = await dbProductLookupService.logScanEvent(code, displayProduct);
           console.log("[Scanner.jsx] Scan event log result (from DB):", logResult);
         }
       } else {
-        console.log(`Product not found in DB by FNSKU or LPN (${code}), trying external API...`);
+        // Not found locally - try external API
+        console.log(`Product not found in local DB by FNSKU or LPN (${code}), trying external API...`);
+        toast.info("💰 Checking external API (this will be charged)...", {
+          autoClose: 2000
+        });
+        
         const apiResult = await getProductLookup(code); 
         
         if (apiResult) {
           let displayableProduct = null;
           let productForLogging = apiResult; 
+          
+          // Check if it came from external API or was already saved
+          if (apiResult.source === 'external_api') {
+            toast.success("⚡ Found via external API and saved for future use!", {
+              icon: "💛"
+            });
+          } else if (apiResult.source === 'local_database') {
+            toast.success("✅ Found in local database - No API charge!", {
+              icon: "💚"
+            });
+          } else {
+            toast.info("📝 Using mock data for testing", {
+              icon: "🔵"
+            });
+          }
+          
+          // Save to API cache if it's from external API
           try {
-            const savedProduct = await dbProductLookupService.saveProductLookup(apiResult); 
-            
-            if (savedProduct) {
-              toast.success("Product found via API and saved to database");
-              displayableProduct = mapSupabaseProductToDisplay(savedProduct);
-              productForLogging = displayableProduct; 
+            if (apiResult.source === 'external_api') {
+              console.log('💾 Attempting to save external API result to API cache for future cost savings...');
+              console.log('🔍 API result to save:', apiResult);
+              
+              const savedToCache = await apiCacheService.saveLookup(apiResult); 
+              
+              if (savedToCache) {
+                console.log('✅ Successfully saved external API result to API cache:', savedToCache);
+                displayableProduct = apiCacheService.mapCacheToDisplay(savedToCache);
+                displayableProduct.source = 'api_cache';
+                displayableProduct.cost_status = 'no_charge';
+                productForLogging = displayableProduct; 
+                toast.success("💾 API result saved to cache! Future scans of this item will be FREE! 🎉", {
+                  autoClose: 4000
+                });
+              } else {
+                console.error('❌ Failed to save external API result to cache');
+                toast.warn("⚠️ Product found via API, but failed to save to cache. Next scan will be charged again.", {
+                  autoClose: 5000
+                });
+                // Still display the product even if save failed
+                displayableProduct = apiResult;
+                displayableProduct.source = 'external_api';
+                displayableProduct.cost_status = 'charged';
+              }
             } else {
-              toast.warn("Product found via API, but failed to save to our database.");
-              displayableProduct = mapSupabaseProductToDisplay(apiResult); 
+              displayableProduct = apiResult;
             }
           } catch (saveError) {
-            console.error("Error saving API result to Supabase:", saveError);
-            toast.error("Product found via API, but error saving to our database.");
-            displayableProduct = mapSupabaseProductToDisplay(apiResult);
+            console.error("❌ Exception saving API result to cache:", saveError);
+            toast.error("⚠️ Product found via API, but error saving to cache. Next scan will be charged again.", {
+              autoClose: 5000
+            });
+            // Still display the product even if save failed
+            displayableProduct = apiResult;
+            displayableProduct.source = 'external_api';
+            displayableProduct.cost_status = 'charged';
           }
+          
           setProductInfo(displayableProduct);
+          
           if (displayableProduct) {
             console.log("[Scanner.jsx] Attempting to log scan event (from API). Code:", code, "Product Details:", productForLogging);
             const logResult = await dbProductLookupService.logScanEvent(code, productForLogging);
             console.log("[Scanner.jsx] Scan event log result (from API):", logResult);
           }
         } else {
-          toast.error("Product not found by scanned code in database or via API.");
+          toast.error("❌ Product not found in database or via external API.", {
+            icon: "❌"
+          });
         }
       }
     } catch (error) {
       console.error("Error looking up product by code:", error);
-      toast.error("Error looking up product by code");
+      if (error.message?.includes('External API')) {
+        toast.error("❌ External API lookup failed. Please try again.");
+      } else {
+        toast.error("❌ Error looking up product by code");
+      }
     } finally {
       setLoading(false);
     }
@@ -156,6 +225,11 @@ const Scanner = () => {
       toast.error("Please enter a barcode to scan.");
       return;
     }
+    
+    // Clean the input by removing extra whitespace and tab characters
+    const cleanedBarcode = barcodeToScan.trim().replace(/\s+/g, '');
+    console.log("Manual scan - original:", barcodeToScan, "cleaned:", cleanedBarcode);
+    
     setIsManualScanning(true);
     setManualScanError(null);
     setManualScanResult(null);
@@ -163,13 +237,13 @@ const Scanner = () => {
     
     setScannedCodes(prev => {
       const newHistory = [
-        { code: barcodeToScan, timestamp: new Date().toISOString(), type: 'manual' },
-        ...prev.filter(item => item.code !== barcodeToScan)
+        { code: cleanedBarcode, timestamp: new Date().toISOString(), type: 'manual' },
+        ...prev.filter(item => item.code !== cleanedBarcode)
       ].slice(0, 10);
       return newHistory;
     });
 
-    await lookupProductByCode(barcodeToScan);
+    await lookupProductByCode(cleanedBarcode);
     setIsManualScanning(false);
   };
 
@@ -725,6 +799,59 @@ const Scanner = () => {
           {/* Product Info Display */}
           {!loading && productInfo && (
             <div className="border p-4 rounded-lg space-y-2">
+              {/* Cost Status Indicator */}
+              {productInfo.source && (
+                <div className={`mb-3 p-2 rounded-lg flex items-center ${
+                  productInfo.source === 'local_database' || productInfo.source === 'api_cache'
+                    ? 'bg-green-100 text-green-800' 
+                    : productInfo.source === 'asin_direct'
+                    ? 'bg-blue-100 text-blue-800'
+                    : productInfo.source === 'external_api'
+                    ? 'bg-yellow-100 text-yellow-800'
+                    : 'bg-blue-100 text-blue-800'
+                }`}>
+                  {productInfo.source === 'local_database' ? (
+                    <>
+                      <CheckCircleIcon className="h-5 w-5 mr-2" />
+                      <span className="font-medium">Found in local database - No API charge</span>
+                    </>
+                  ) : productInfo.source === 'api_cache' ? (
+                    <>
+                      <CheckCircleIcon className="h-5 w-5 mr-2" />
+                      <span className="font-medium">Found in API cache - No API charge (previously saved)</span>
+                    </>
+                  ) : productInfo.source === 'asin_direct' ? (
+                    <>
+                      <CheckCircleIcon className="h-5 w-5 mr-2" />
+                      <span className="font-medium">Direct ASIN lookup - No API charge</span>
+                    </>
+                  ) : productInfo.source === 'external_api' ? (
+                    <>
+                      <CurrencyDollarIcon className="h-5 w-5 mr-2" />
+                      <span className="font-medium">Retrieved from fnskutoasin.com API - Charged lookup</span>
+                    </>
+                  ) : (
+                    <>
+                      <ExclamationTriangleIcon className="h-5 w-5 mr-2" />
+                      <span className="font-medium">Mock data - No charge</span>
+                    </>
+                  )}
+                </div>
+              )}
+              
+              {/* Code Type Indicator */}
+              {productInfo.code_type && (
+                <div className="mb-3 p-2 bg-gray-100 rounded-lg">
+                  <span className="text-sm font-medium text-gray-700">
+                    Code Type: <span className="text-blue-600">{productInfo.code_type}</span>
+                    {productInfo.code_type === 'ASIN' && ' (Amazon Standard Identification Number)'}
+                    {productInfo.code_type === 'FNSKU' && ' (Fulfillment Network Stock Keeping Unit)'}
+                    {productInfo.code_type === 'UPC' && ' (Universal Product Code)'}
+                    {productInfo.code_type === 'EAN' && ' (European Article Number)'}
+                  </span>
+                </div>
+              )}
+              
               <h3 className="text-lg font-bold truncate" title={productInfo.name}>{productInfo.name}</h3>
               
               <p className="text-sm text-gray-700">
