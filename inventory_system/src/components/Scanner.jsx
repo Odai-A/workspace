@@ -2,10 +2,11 @@ import React, { useState, useEffect, useRef } from 'react';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import BarcodeReader from './BarcodeReader';
+import MarketplaceListing from './MarketplaceListing';
 import { getProductLookup } from '../services/api';
 import { productLookupService as dbProductLookupService } from '../services/databaseService';
 import { inventoryService } from '../config/supabaseClient';
-import { XMarkIcon, ArrowUpTrayIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon } from '@heroicons/react/24/outline';
 import { mockService } from '../services/mockData';
 
 /**
@@ -15,6 +16,9 @@ const Scanner = () => {
   const [scannedCodes, setScannedCodes] = useState([]);
   const [productInfo, setProductInfo] = useState(null);
   const [loading, setLoading] = useState(false);
+  
+  // Marketplace listing states
+  const [showMarketplaceListing, setShowMarketplaceListing] = useState(false);
   
   // File import states
   const [showFileImportModal, setShowFileImportModal] = useState(false);
@@ -174,6 +178,26 @@ const Scanner = () => {
       // Implement product detail view navigation here
       toast.info("View details functionality will be implemented soon");
     }
+  };
+
+  // Handle marketplace listing creation
+  const handleCreateListing = () => {
+    if (productInfo) {
+      setShowMarketplaceListing(true);
+    } else {
+      toast.error("Please scan a product first");
+    }
+  };
+
+  const handleListingSuccess = (results) => {
+    console.log('Listing creation results:', results);
+    toast.success('Listings created successfully!');
+    // You could add logic here to update the product info with marketplace URLs
+    // or refresh the product data if needed
+  };
+
+  const handleCloseListing = () => {
+    setShowMarketplaceListing(false);
   };
 
   // Handle search input change with debounce
@@ -741,7 +765,17 @@ const Scanner = () => {
                 </div>
               )}
 
-              
+              {/* Create Marketplace Listings Button */}
+              <div className="mt-4">
+                <button
+                  onClick={handleCreateListing}
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded flex items-center justify-center"
+                >
+                  <ShoppingBagIcon className="w-5 h-5 mr-2" />
+                  Create eBay & Shopify Listings
+                </button>
+              </div>
+
               {/* Displaying productInfo.description if it was mapped and different from name, 
                   but our current mapSupabaseProductToDisplay maps both to Supabase 'Description' column. 
                   If 'Description' is long, the h3 title is already showing it. 
@@ -957,6 +991,14 @@ const Scanner = () => {
           </div>
         </div>
       )}
+
+      {/* Marketplace Listing Modal */}
+      <MarketplaceListing
+        productData={productInfo}
+        isVisible={showMarketplaceListing}
+        onClose={handleCloseListing}
+        onSuccess={handleListingSuccess}
+      />
     </div>
   );
 };
