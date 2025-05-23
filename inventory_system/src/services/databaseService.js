@@ -2,7 +2,7 @@ import { supabase } from '../config/supabaseClient';
 
 // The name of your Supabase tables
 const PRODUCT_TABLE = 'manifest_data';
-const API_CACHE_TABLE = 'api_lookup_cache'; // New table for external API cache
+const FNSKU_CACHE_TABLE = 'fnsku_cache'; // New optimized table name
 
 // Streamlined Column mapping for essential fields (original table)
 const columnMap = {
@@ -30,7 +30,7 @@ export const apiCacheService = {
   async getCachedLookup(fnsku) {
     try {
       const { data, error } = await supabase
-        .from(API_CACHE_TABLE)
+        .from(FNSKU_CACHE_TABLE)
         .select('*')
         .eq('fnsku', fnsku)
         .single();
@@ -59,22 +59,20 @@ export const apiCacheService = {
    */
   async saveLookup(apiResult) {
     try {
+      // Simplified cache data structure for new table
       const cacheData = {
         fnsku: apiResult.fnsku,
         asin: apiResult.asin || null,
         product_name: apiResult.name || apiResult.description || `Product ${apiResult.fnsku}`,
         description: apiResult.description || apiResult.name || '',
         price: apiResult.price || 0,
-        category: apiResult.category || 'External API',
-        upc: apiResult.upc || null,
-        source: apiResult.source || 'fnskutoasin.com',
-        scan_task_id: apiResult.scan_task_id || null,
-        task_state: apiResult.task_state || null,
         asin_found: !!apiResult.asin,
-        original_lookup_code: apiResult.original_lookup_code || apiResult.fnsku,
+        is_processing: !apiResult.asin, // If no ASIN, it's still processing
+        api_source: apiResult.source || 'fnskutoasin.com',
+        scan_task_id: apiResult.scan_task_id || null,
       };
 
-      console.log('💾 Saving to API cache:', cacheData);
+      console.log('💾 Saving to FNSKU cache:', cacheData);
 
       // First check if it already exists
       const existing = await this.getCachedLookup(apiResult.fnsku);
@@ -82,37 +80,36 @@ export const apiCacheService = {
       if (existing) {
         // Update existing cache entry
         const { data, error } = await supabase
-          .from(API_CACHE_TABLE)
+          .from(FNSKU_CACHE_TABLE)
           .update({
             ...cacheData,
-            lookup_count: (existing.lookup_count || 0) + 1,
-            last_accessed: new Date().toISOString()
+            last_check_time: new Date().toISOString()
           })
           .eq('fnsku', apiResult.fnsku)
           .select()
           .single();
 
         if (error) {
-          console.error('Error updating API cache:', error);
+          console.error('Error updating FNSKU cache:', error);
           return null;
         }
         
-        console.log('✅ Updated API cache entry:', data);
+        console.log('✅ Updated FNSKU cache entry:', data);
         return data;
       } else {
         // Insert new cache entry
         const { data, error } = await supabase
-          .from(API_CACHE_TABLE)
+          .from(FNSKU_CACHE_TABLE)
           .insert(cacheData)
           .select()
           .single();
 
         if (error) {
-          console.error('Error inserting to API cache:', error);
+          console.error('Error inserting to FNSKU cache:', error);
           return null;
         }
         
-        console.log('✅ Created new API cache entry:', data);
+        console.log('✅ Created new FNSKU cache entry:', data);
         return data;
       }
     } catch (error) {
@@ -122,8 +119,8 @@ export const apiCacheService = {
   },
 
   /**
-   * Maps API cache data to display format
-   * @param {Object} cacheData - Data from API cache table
+   * Maps FNSKU cache data to display format
+   * @param {Object} cacheData - Data from fnsku_cache table
    * @returns {Object} - Mapped display data
    */
   mapCacheToDisplay(cacheData) {
@@ -134,12 +131,12 @@ export const apiCacheService = {
       name: cacheData.product_name,
       description: cacheData.description,
       price: cacheData.price,
-      category: cacheData.category,
-      upc: cacheData.upc,
+      category: 'External API',
+      upc: '', // New table doesn't store UPC
       sku: cacheData.fnsku, // Use FNSKU as SKU
-      lpn: '', // API cache doesn't have LPN
-      quantity: 0, // API cache doesn't track quantity
-      source: 'api_cache',
+      lpn: '', // Cache doesn't have LPN
+      quantity: 0, // Cache doesn't track quantity
+      source: 'fnsku_cache',
       cost_status: 'no_charge',
       // Keep raw cache data for reference
       rawCache: cacheData,
@@ -202,7 +199,7 @@ export const productLookupService = {
       console.log(`🔍 Searching for code: ${code} in both tables...`);
       
       // STEP 1: Check API cache first (supports both FNSKU and ASIN)
-      console.log('📱 Step 1: Checking API cache table...');
+      console.log('📱 Step 1: Checking FNSKU cache table...');
       
       // Try by FNSKU first
       let cachedResult = await apiCacheService.getCachedLookup(code);
@@ -211,13 +208,13 @@ export const productLookupService = {
       if (!cachedResult) {
         try {
           const { data, error } = await supabase
-            .from(API_CACHE_TABLE)
+            .from(FNSKU_CACHE_TABLE)
             .select('*')
             .eq('asin', code)
             .single();
 
           if (!error && data) {
-            console.log('✅ Found by ASIN in API cache');
+            console.log('✅ Found by ASIN in FNSKU cache');
             cachedResult = data;
           }
         } catch (error) {
@@ -226,7 +223,7 @@ export const productLookupService = {
       }
       
       if (cachedResult) {
-        console.log('✅ Found in API cache - no charge!');
+        console.log('✅ Found in FNSKU cache - no charge!');
         return apiCacheService.mapCacheToDisplay(cachedResult);
       }
       

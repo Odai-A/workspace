@@ -160,7 +160,7 @@ export const externalApiService = {
         }
       }
       
-      // Step 2: Create new scan task
+      // Step 2: Create new scan task if no existing scan found
       console.log('📝 Creating new scan task...');
       const addScanUrl = `${BASE_URL}/api/v1/ScanTask/AddOrGet`;
       const payload = { barCode: fnsku, callbackUrl: "" };
@@ -187,17 +187,19 @@ export const externalApiService = {
         throw new Error(`Failed to create scan task: ${response.data?.message || 'Unknown error'}`);
       }
       
-      // Step 3: Poll for results with proper timing
-      console.log('⏳ Polling for ASIN results...');
-      const maxAttempts = 8; // Increased attempts
-      const baseDelay = 2000; // Start with 2 seconds
+      // Step 3: Poll for results with fast timing (user wants speed!)
+      console.log('⏳ Quick polling for ASIN results...');
+      const maxAttempts = 2; // Only 2 attempts for fast scanning
+      const baseDelay = 1500; // 1.5 seconds delay
       
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        console.log(`🔄 Polling attempt ${attempt}/${maxAttempts}...`);
+        console.log(`🔄 Quick attempt ${attempt}/${maxAttempts}...`);
         
-        // Progressive delay: 2s, 3s, 4s, 5s, 6s, 7s, 8s, 10s
-        const delay = attempt <= 6 ? baseDelay + (attempt - 1) * 1000 : 10000;
-        await new Promise(resolve => setTimeout(resolve, delay));
+        // Short delays: 1.5s, then 3s (total ~4.5 seconds max)
+        if (attempt > 1) {
+          const delay = baseDelay * attempt;
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
         
         try {
           response = await axios.get(lookupUrl, { 
@@ -220,13 +222,20 @@ export const externalApiService = {
             console.log(`🎯 Attempt ${attempt}: Got scan data:`, scanData);
             
             if (scanData.asin) {
-              console.log(`✅ Success! Found ASIN: ${scanData.asin} on attempt ${attempt}`);
-              return this.processApiResponse(fnsku, scanData);
+              console.log(`✅ SUCCESS! Found ASIN: ${scanData.asin} on quick attempt ${attempt}`);
+              
+              // Verify the data before processing
+              if (scanData.asin && scanData.asin.length >= 10) {
+                console.log(`✅ ASIN verified: ${scanData.asin} (length: ${scanData.asin.length})`);
+                return this.processApiResponse(fnsku, scanData);
+              } else {
+                console.log(`⚠️ ASIN found but seems invalid: ${scanData.asin}`);
+              }
             } else {
-              console.log(`⏳ Attempt ${attempt}: Scan data exists but no ASIN yet`);
+              console.log(`⏳ Attempt ${attempt}: Scan data exists but no ASIN yet - will use Check for Updates`);
             }
           } else {
-            console.log(`⏳ Attempt ${attempt}: No scan data yet`);
+            console.log(`⏳ Attempt ${attempt}: No scan data yet - will use Check for Updates`);
           }
           
         } catch (pollError) {
@@ -249,7 +258,11 @@ export const externalApiService = {
               
               if (!isHtmlResponse(response.data) && response.data?.succeeded && response.data?.data?.asin) {
                 console.log(`✅ Success with alt headers! ASIN: ${response.data.data.asin}`);
-                return this.processApiResponse(fnsku, response.data.data);
+                // Verify before processing
+                const asin = response.data.data.asin;
+                if (asin && asin.length >= 10) {
+                  return this.processApiResponse(fnsku, response.data.data);
+                }
               }
             } catch (altError) {
               console.log(`⚠️ Alternative headers also failed:`, altError.response?.status);
@@ -258,20 +271,20 @@ export const externalApiService = {
         }
       }
       
-      // If we get here, polling timed out
-      console.log('⏰ Polling timed out - no ASIN found within time limit');
+      // If we get here, quick polling didn't find ASIN - return processing status
+      console.log('⚡ Quick polling complete - no ASIN found yet (use Check for Updates button)');
       
-      // Return a partial result even without ASIN
+      // Return a processing result (not an error - just needs more time)
       return {
         fnsku: fnsku,
-        asin: '', // No ASIN found
+        asin: '', // No ASIN found in quick scan
         name: `FNSKU: ${fnsku} (Processing...)`,
-        description: `API is still processing FNSKU: ${fnsku}. ASIN may be available later.`,
+        description: `Quick scan complete. API is still processing FNSKU: ${fnsku}. Use 'Check for Updates' button in 2-3 minutes.`,
         price: 0,
         category: 'External API',
         condition: 'New',
         source: 'fnskutoasin.com',
-        processing_status: 'timeout',
+        processing_status: 'quick_timeout', // Indicates quick scan finished, not failed
         amazon_url: '',
         raw_data: null,
         image_url: '',
