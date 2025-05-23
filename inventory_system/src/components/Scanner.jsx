@@ -47,6 +47,25 @@ const Scanner = () => {
   // State for BarcodeReader component
   const [isCameraActive, setIsCameraActive] = useState(false);
 
+  // State for auto-refresh when API is processing
+  const [isAutoRefreshing, setIsAutoRefreshing] = useState(false);
+  const [autoRefreshCountdown, setAutoRefreshCountdown] = useState(0);
+  const [autoRefreshCode, setAutoRefreshCode] = useState(null);
+  const autoRefreshIntervalRef = useRef(null);
+  const countdownIntervalRef = useRef(null);
+
+  // Cleanup intervals on unmount
+  useEffect(() => {
+    return () => {
+      if (autoRefreshIntervalRef.current) {
+        clearInterval(autoRefreshIntervalRef.current);
+      }
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+      }
+    };
+  }, []);
+
   // Helper function to map Supabase data to the structure expected by productInfo JSX
   const mapSupabaseProductToDisplay = (supabaseProduct) => {
     if (!supabaseProduct) return null;
@@ -97,11 +116,17 @@ const Scanner = () => {
   }
 
   async function lookupProductByCode(code) {
+    console.log(`🔍 Looking up product by code: ${code}`);
     setLoading(true);
-    setProductInfo(null); // Clear previous product info
+    setProductInfo(null);
+    
+    // Stop any ongoing auto-refresh when starting a new lookup
+    if (isAutoRefreshing) {
+      console.log('⏹️ Stopping auto-refresh due to new manual scan');
+      stopAutoRefresh();
+    }
+    
     try {
-      console.log(`🔍 Looking up product by code: ${code}`);
-      
       // First try the local database (Supabase)
       let productFromDb = await dbProductLookupService.getProductByFnsku(code);
 
@@ -154,30 +179,51 @@ const Scanner = () => {
             });
           }
           
-          // Save to API cache if it's from external API
+          // Save to API cache if it's from external API AND has a real ASIN
           try {
             if (apiResult.source === 'external_api') {
-              console.log('💾 Attempting to save external API result to API cache for future cost savings...');
-              console.log('🔍 API result to save:', apiResult);
-              
-              const savedToCache = await apiCacheService.saveLookup(apiResult); 
-              
-              if (savedToCache) {
-                console.log('✅ Successfully saved external API result to API cache:', savedToCache);
-                displayableProduct = apiCacheService.mapCacheToDisplay(savedToCache);
-                displayableProduct.source = 'api_cache';
-                displayableProduct.cost_status = 'no_charge';
-                productForLogging = displayableProduct; 
-                toast.success("💾 API result saved to cache! Future scans of this item will be FREE! 🎉", {
-                  autoClose: 4000
-                });
+              // ONLY SAVE TO CACHE IF WE HAVE A REAL ASIN!
+              if (apiResult.asin && apiResult.asin.trim() !== '') {
+                console.log('💾 Attempting to save external API result to API cache for future cost savings...');
+                console.log('🔍 API result to save:', apiResult);
+                
+                const savedToCache = await apiCacheService.saveLookup(apiResult); 
+                
+                if (savedToCache) {
+                  console.log('✅ Successfully saved external API result to API cache:', savedToCache);
+                  displayableProduct = apiCacheService.mapCacheToDisplay(savedToCache);
+                  displayableProduct.source = 'api_cache';
+                  displayableProduct.cost_status = 'no_charge';
+                  productForLogging = displayableProduct; 
+                  toast.success("💾 API result saved to cache! Future scans of this item will be FREE! 🎉", {
+                    autoClose: 4000
+                  });
+                } else {
+                  console.error('❌ Failed to save external API result to cache');
+                  toast.warn("⚠️ Product found via API, but failed to save to cache. Next scan will be charged again.", {
+                    autoClose: 5000
+                  });
+                  // Still display the product even if save failed
+                  displayableProduct = apiResult;
+                  displayableProduct.source = 'external_api';
+                  displayableProduct.cost_status = 'charged';
+                }
               } else {
-                console.error('❌ Failed to save external API result to cache');
-                toast.warn("⚠️ Product found via API, but failed to save to cache. Next scan will be charged again.", {
-                  autoClose: 5000
-                });
-                // Still display the product even if save failed
-                displayableProduct = apiResult;
+                // ASIN is NULL or EMPTY - this means the API is still processing
+                console.log('⏳ API returned null/empty ASIN - Starting auto-refresh ONLY IF NEEDED');
+                
+                // Check if auto-refresh is ALREADY active for this code
+                if (!isAutoRefreshing || autoRefreshCode !== code) {
+                  console.log('🔄 Starting auto-refresh as ASIN is not yet available.');
+                  startAutoRefresh(code);
+                  toast.info("⏳ API processing. Auto-refreshing for ASIN every 45s.", {
+                    autoClose: 6000
+                  });
+                } else {
+                  console.log('🔄 Auto-refresh is already active for this code. No new toast.');
+                }
+                
+                displayableProduct = apiResult; // Show current (null ASIN) state
                 displayableProduct.source = 'external_api';
                 displayableProduct.cost_status = 'charged';
               }
@@ -627,6 +673,80 @@ const Scanner = () => {
     setImportFile(null);
   };
 
+  // Auto-refresh functions
+  const startAutoRefresh = (code) => {
+    console.log('🔄 Starting auto-refresh for code:', code);
+    setIsAutoRefreshing(true);
+    setAutoRefreshCode(code);
+    setAutoRefreshCountdown(45); // 45 seconds countdown
+    
+    // Start countdown timer
+    countdownIntervalRef.current = setInterval(() => {
+      setAutoRefreshCountdown(prev => {
+        if (prev <= 1) {
+          return 45; // Reset to 45 seconds after each attempt
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    
+    // Start auto-refresh timer (every 45 seconds)
+    autoRefreshIntervalRef.current = setInterval(async () => {
+      console.log('🔄 Auto-refresh attempt for code:', code);
+      try {
+        // Retry the API lookup
+        const result = await getProductLookup(code);
+        
+        if (result && result.asin && result.asin.trim() !== '') {
+          console.log('✅ Auto-refresh found ASIN!', result.asin);
+          stopAutoRefresh();
+          
+          // Update the UI with the successful result
+          setProductInfo({
+            ...result,
+            source: 'external_api',
+            cost_status: 'charged'
+          });
+          
+          // Save to cache
+          try {
+            await apiCacheService.saveLookup(result);
+            console.log('✅ Auto-refresh result saved to cache');
+            toast.success(`🎉 ASIN found automatically: ${result.asin}`, {
+              autoClose: 4000
+            });
+          } catch (saveError) {
+            console.warn('⚠️ Could not save auto-refresh result to cache:', saveError);
+            toast.success(`🎉 ASIN found: ${result.asin} (but couldn't save to cache)`, {
+              autoClose: 4000
+            });
+          }
+        } else {
+          console.log('⏳ Auto-refresh attempt - ASIN still not ready');
+        }
+      } catch (error) {
+        console.error('❌ Auto-refresh error:', error);
+      }
+    }, 45000); // Every 45 seconds
+  };
+  
+  const stopAutoRefresh = () => {
+    console.log('⏹️ Stopping auto-refresh');
+    setIsAutoRefreshing(false);
+    setAutoRefreshCode(null);
+    setAutoRefreshCountdown(0);
+    
+    if (autoRefreshIntervalRef.current) {
+      clearInterval(autoRefreshIntervalRef.current);
+      autoRefreshIntervalRef.current = null;
+    }
+    
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+  };
+
   return (
     <div className="container mx-auto p-4">
       <ToastContainer position="top-right" autoClose={3000} />
@@ -793,6 +913,29 @@ const Scanner = () => {
           {loading && (
             <div className="flex justify-center items-center h-64">
               <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+            </div>
+          )}
+          
+          {/* Auto-Refresh Status */}
+          {isAutoRefreshing && (
+            <div className="mb-4 p-4 bg-blue-50 border-l-4 border-blue-500 text-blue-800 rounded">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center">
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600 mr-3"></div>
+                  <div>
+                    <p className="font-medium">🔄 Auto-Refreshing: {autoRefreshCode}</p>
+                    <p className="text-sm">
+                      Checking for ASIN every 45 seconds. Next check in: {autoRefreshCountdown}s
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={stopAutoRefresh}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm"
+                >
+                  Stop Auto-Refresh
+                </button>
+              </div>
             </div>
           )}
           

@@ -200,6 +200,60 @@ export const externalApiService = {
         if (response.data?.succeeded && response.data?.data) {
           scanData = response.data.data;
           console.log('✅ Created new scan task:', scanData);
+          
+          // 🚀 EFFICIENCY FIX: Check if ASIN is ALREADY available in AddOrGet response!
+          if (scanData.asin && scanData.asin.trim() !== '') {
+            console.log('🎉 ASIN found immediately in AddOrGet response!', scanData.asin);
+            console.log('⚡ No polling needed - ASIN ready instantly!');
+            // Skip polling entirely - we have the ASIN!
+          } else {
+            console.log('⏳ ASIN not ready yet, starting immediate polling...');
+            
+            // NO WAITING - Start polling immediately like a refresh would do
+            const maxPollingAttempts = 8; // More attempts since we're not waiting initially
+            for (let attempt = 1; attempt <= maxPollingAttempts; attempt++) {
+              console.log(`🔄 Immediate poll attempt ${attempt}/${maxPollingAttempts} - checking if ASIN is ready...`);
+              
+              try {
+                // Call the SAME GetByBarCode endpoint to check if the scan task now has an ASIN
+                const pollResponse = await axios.get(lookupUrl, { 
+                  headers, 
+                  params, 
+                  timeout: 30000 
+                });
+                
+                console.log(`📊 Polling response status: ${pollResponse.status}`);
+                
+                // Check if we got proper JSON response with the updated scan task
+                if (pollResponse.data && typeof pollResponse.data === 'object' && pollResponse.data.succeeded) {
+                  if (pollResponse.data.data && pollResponse.data.data.asin && pollResponse.data.data.asin.trim() !== '') {
+                    console.log('🎉 ASIN found in immediate polling! The API finished processing:', pollResponse.data.data.asin);
+                    scanData = pollResponse.data.data; // Update scanData with the processed result
+                    break; // Exit polling loop - we got the ASIN!
+                  } else {
+                    console.log(`⏳ Attempt ${attempt}: Scan task exists but ASIN still processing...`);
+                  }
+                } else {
+                  console.log(`⏳ Attempt ${attempt}: Still returning HTML/non-JSON, API still processing...`);
+                }
+              } catch (pollError) {
+                console.log(`⚠️ Polling attempt ${attempt} failed:`, pollError.message);
+              }
+              
+              // Short, consistent delays: 2s between each attempt
+              if (attempt < maxPollingAttempts) {
+                const delay = 2000; // Fixed 2 second delay between attempts
+                console.log(`⏳ Waiting ${delay/1000} seconds before next polling attempt...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+              }
+            }
+            
+            if (!scanData || !scanData.asin) {
+              console.log('⏰ Immediate polling completed but ASIN not ready yet. The API may need more time.');
+            } else {
+              console.log('✅ Successfully retrieved processed ASIN via immediate polling!');
+            }
+          }
         } else {
           throw new Error(`Failed to create scan task: ${response.data?.message || 'Unknown error'}`);
         }

@@ -144,7 +144,56 @@ export const apiCacheService = {
       // Keep raw cache data for reference
       rawCache: cacheData,
     };
-  }
+  },
+
+  /**
+   * Updates an existing cache entry with fresh API data (when ASIN becomes available)
+   * @param {string} fnsku - The FNSKU to update
+   * @param {Object} freshApiData - Fresh data from the API
+   * @returns {Promise<Object|null>} - Updated cache entry or null on error
+   */
+  async updateCacheWithFreshData(fnsku, freshApiData) {
+    try {
+      console.log('🔄 Updating cache entry with fresh API data:', fnsku);
+      
+      // First get the current lookup_count
+      const { data: existingData } = await supabase
+        .from(API_CACHE_TABLE)
+        .select('lookup_count')
+        .eq('fnsku', fnsku)
+        .single();
+      
+      const currentCount = existingData?.lookup_count || 0;
+      
+      const { data, error } = await supabase
+        .from(API_CACHE_TABLE)
+        .update({
+          asin: freshApiData.asin,
+          product_name: freshApiData.name || freshApiData.product_name,
+          description: freshApiData.description,
+          asin_found: !!freshApiData.asin,
+          task_state: freshApiData.task_state || 'completed',
+          scan_task_id: freshApiData.scan_task_id,
+          lookup_count: currentCount + 1,
+          last_accessed: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq('fnsku', fnsku)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Error updating cache entry:', error);
+        return null;
+      }
+      
+      console.log('✅ Cache entry updated successfully');
+      return data;
+    } catch (error) {
+      console.error('Exception updating cache entry:', error);
+      return null;
+    }
+  },
 };
 
 export const productLookupService = {
@@ -226,8 +275,13 @@ export const productLookupService = {
       }
       
       if (cachedResult) {
-        console.log('✅ Found in API cache - no charge!');
-        return apiCacheService.mapCacheToDisplay(cachedResult);
+        // Add a flag to indicate if this cached result should be retried (ASIN is null)
+        const shouldRetryApi = !cachedResult.asin || cachedResult.asin === '';
+        console.log('✅ Found in API cache - ASIN:', cachedResult.asin || 'null');
+        
+        const mappedResult = apiCacheService.mapCacheToDisplay(cachedResult);
+        mappedResult.shouldRetryApi = shouldRetryApi; // Flag for main API function
+        return mappedResult;
       }
       
       // STEP 2: Check original manifest data table (by FNSKU and ASIN)
