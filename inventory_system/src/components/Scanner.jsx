@@ -2,10 +2,12 @@ import React, { useState, useEffect, useRef } from 'react';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import BarcodeReader from './BarcodeReader';
-import { getProductLookup } from '../services/api';
-import { productLookupService as dbProductLookupService } from '../services/databaseService';
+import MarketplaceListing from './MarketplaceListing';
+import ShopifyListing from './ShopifyListing';
+import { getProductLookup, externalApiService } from '../services/api';
+import { productLookupService as dbProductLookupService, apiCacheService } from '../services/databaseService';
 import { inventoryService } from '../config/supabaseClient';
-import { XMarkIcon, ArrowUpTrayIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, CheckCircleIcon, CurrencyDollarIcon } from '@heroicons/react/24/outline';
 import { mockService } from '../services/mockData';
 
 /**
@@ -15,6 +17,12 @@ const Scanner = () => {
   const [scannedCodes, setScannedCodes] = useState([]);
   const [productInfo, setProductInfo] = useState(null);
   const [loading, setLoading] = useState(false);
+  
+  // Marketplace listing states
+  const [showMarketplaceListing, setShowMarketplaceListing] = useState(false);
+  
+  // Shopify listing states
+  const [showShopifyListing, setShowShopifyListing] = useState(false);
   
   // File import states
   const [showFileImportModal, setShowFileImportModal] = useState(false);
@@ -42,6 +50,31 @@ const Scanner = () => {
   
   // State for BarcodeReader component
   const [isCameraActive, setIsCameraActive] = useState(false);
+  
+  // Add states for manual database check and processing status
+  const [isCheckingDatabase, setIsCheckingDatabase] = useState(false);
+  const [lastScannedCode, setLastScannedCode] = useState('');
+  const [isApiProcessing, setIsApiProcessing] = useState(false);
+  const [processingStartTime, setProcessingStartTime] = useState(null);
+
+  // State for auto-refresh when API is processing
+  const [isAutoRefreshing, setIsAutoRefreshing] = useState(false);
+  const [autoRefreshCountdown, setAutoRefreshCountdown] = useState(0);
+  const [autoRefreshCode, setAutoRefreshCode] = useState(null);
+  const autoRefreshIntervalRef = useRef(null);
+  const countdownIntervalRef = useRef(null);
+
+  // Cleanup intervals on unmount
+  useEffect(() => {
+    return () => {
+      if (autoRefreshIntervalRef.current) {
+        clearInterval(autoRefreshIntervalRef.current);
+      }
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+      }
+    };
+  }, []);
 
   // Helper function to map Supabase data to the structure expected by productInfo JSX
   const mapSupabaseProductToDisplay = (supabaseProduct) => {
@@ -60,6 +93,9 @@ const Scanner = () => {
       category: supabaseProduct['Category'],
       upc: supabaseProduct['UPC'],
       quantity: supabaseProduct['Quantity'],
+      // Set source info for original manifest data
+      source: 'local_database',
+      cost_status: 'no_charge',
       // You can add image_url here if it exists in your supabaseProduct object and you want to display it
       // image_url: supabaseProduct['image_url_column_name'], 
       rawSupabase: supabaseProduct, // Keep the raw object if needed for other operations
@@ -72,24 +108,42 @@ const Scanner = () => {
       console.warn("handleCodeDetected called with no code:", detectedData);
       return;
     }
-    console.log("Detected code via Camera:", code);
+    
+    // Clean the code by removing whitespace and tab characters
+    const cleanedCode = code.trim().replace(/\s+/g, '');
+    console.log("Detected code via Camera:", cleanedCode);
     setIsCameraActive(false);
     
     setScannedCodes(prev => {
       const newHistory = [
-        { code, timestamp: new Date().toISOString(), type: 'camera' },
-        ...prev.filter(item => item.code !== code)
+        { code: cleanedCode, timestamp: new Date().toISOString(), type: 'camera' },
+        ...prev.filter(item => item.code !== cleanedCode)
       ].slice(0, 10);
       return newHistory;
     });
     
-    lookupProductByCode(code);
+    lookupProductByCode(cleanedCode);
   }
 
   async function lookupProductByCode(code) {
+    console.log(`🔍 Looking up product by code: ${code}`);
     setLoading(true);
+<<<<<<< HEAD
+    setProductInfo(null);
+    
+    // Stop any ongoing auto-refresh when starting a new lookup
+    if (isAutoRefreshing) {
+      console.log('⏹️ Stopping auto-refresh due to new manual scan');
+      stopAutoRefresh();
+    }
+=======
     setProductInfo(null); // Clear previous product info
+    setIsApiProcessing(false); // Reset processing state
+    setLastScannedCode(code); // Track the last scanned code
+>>>>>>> f074657d851a673766a4cd9987a0c3d2f11c89c3
+    
     try {
+      // First try the local database (Supabase)
       let productFromDb = await dbProductLookupService.getProductByFnsku(code);
 
       if (!productFromDb) {
@@ -98,50 +152,200 @@ const Scanner = () => {
       }
 
       if (productFromDb) {
+        // Found in local database
         const displayProduct = mapSupabaseProductToDisplay(productFromDb);
+        displayProduct.source = 'local_database';
+        displayProduct.cost_status = 'no_charge';
+        
         setProductInfo(displayProduct);
-        toast.success("Product found in database");
+        toast.success("✅ Found in local database - No API charge!", {
+          icon: "💚"
+        });
+        
         if (displayProduct) {
           console.log("[Scanner.jsx] Attempting to log scan event (from DB). Code:", code, "Product Details:", displayProduct);
           const logResult = await dbProductLookupService.logScanEvent(code, displayProduct);
           console.log("[Scanner.jsx] Scan event log result (from DB):", logResult);
         }
       } else {
-        console.log(`Product not found in DB by FNSKU or LPN (${code}), trying external API...`);
+        // Not found locally - try external API
+        console.log(`Product not found in local DB by FNSKU or LPN (${code}), trying external API...`);
+        toast.info("💰 Checking external API (this will be charged)...", {
+          autoClose: 2000
+        });
+        
+        console.log("🚀 [DEBUG] About to call getProductLookup for:", code);
         const apiResult = await getProductLookup(code); 
+        console.log("🚀 [DEBUG] getProductLookup returned:", apiResult);
         
         if (apiResult) {
+          console.log("🚀 [DEBUG] API result ASIN:", apiResult.asin);
+          console.log("🚀 [DEBUG] API result FNSKU:", apiResult.fnsku);
+          console.log("🚀 [DEBUG] API result source:", apiResult.source);
+          
           let displayableProduct = null;
           let productForLogging = apiResult; 
-          try {
-            const savedProduct = await dbProductLookupService.saveProductLookup(apiResult); 
+          
+          // Check if ASIN was found or if API is still processing
+          if (!apiResult.asin && (apiResult.processing_status === 'timeout' || apiResult.processing_status === 'quick_timeout')) {
+            // API is still processing - show processing state
+            setIsApiProcessing(true);
+            setProcessingStartTime(new Date());
             
-            if (savedProduct) {
-              toast.success("Product found via API and saved to database");
-              displayableProduct = mapSupabaseProductToDisplay(savedProduct);
-              productForLogging = displayableProduct; 
+            if (apiResult.processing_status === 'quick_timeout') {
+              toast.warn("⚡ Quick scan complete - no ASIN yet. Click 'Check for Updates' in 2-3 minutes.", {
+                autoClose: 6000
+              });
             } else {
-              toast.warn("Product found via API, but failed to save to our database.");
-              displayableProduct = mapSupabaseProductToDisplay(apiResult); 
+              toast.warn("⏳ API is still processing this FNSKU. Click 'Check for Updates' in a few minutes.", {
+                autoClose: 6000
+              });
+            }
+          }
+          
+          // Check if it came from external API or was already saved
+          if (apiResult.source === 'external_api') {
+            toast.success("⚡ Found via external API and saved for future use!", {
+              icon: "💛"
+            });
+            
+            console.log("🚀 [DEBUG] Processing external_api result with ASIN:", apiResult.asin);
+          } else if (apiResult.source === 'local_database') {
+            toast.success("✅ Found in local database - No API charge!", {
+              icon: "💚"
+            });
+          } else {
+            toast.info("📝 Using mock data for testing", {
+              icon: "🔵"
+            });
+          }
+          
+          // Save to API cache if it's from external API AND has a real ASIN
+          try {
+            if (apiResult.source === 'external_api') {
+<<<<<<< HEAD
+              // ONLY SAVE TO CACHE IF WE HAVE A REAL ASIN!
+              if (apiResult.asin && apiResult.asin.trim() !== '') {
+                console.log('💾 Attempting to save external API result to API cache for future cost savings...');
+                console.log('🔍 API result to save:', apiResult);
+                
+                const savedToCache = await apiCacheService.saveLookup(apiResult); 
+                
+                if (savedToCache) {
+                  console.log('✅ Successfully saved external API result to API cache:', savedToCache);
+                  displayableProduct = apiCacheService.mapCacheToDisplay(savedToCache);
+                  displayableProduct.source = 'api_cache';
+                  displayableProduct.cost_status = 'no_charge';
+                  productForLogging = displayableProduct; 
+                  toast.success("💾 API result saved to cache! Future scans of this item will be FREE! 🎉", {
+                    autoClose: 4000
+                  });
+                } else {
+                  console.error('❌ Failed to save external API result to cache');
+                  toast.warn("⚠️ Product found via API, but failed to save to cache. Next scan will be charged again.", {
+                    autoClose: 5000
+                  });
+                  // Still display the product even if save failed
+                  displayableProduct = apiResult;
+                  displayableProduct.source = 'external_api';
+                  displayableProduct.cost_status = 'charged';
+                }
+              } else {
+                // ASIN is NULL or EMPTY - this means the API is still processing
+                console.log('⏳ API returned null/empty ASIN - Starting auto-refresh ONLY IF NEEDED');
+                
+                // Check if auto-refresh is ALREADY active for this code
+                if (!isAutoRefreshing || autoRefreshCode !== code) {
+                  console.log('🔄 Starting auto-refresh as ASIN is not yet available.');
+                  startAutoRefresh(code);
+                  toast.info("⏳ API processing. Auto-refreshing for ASIN every 45s.", {
+                    autoClose: 6000
+                  });
+                } else {
+                  console.log('🔄 Auto-refresh is already active for this code. No new toast.');
+                }
+                
+                displayableProduct = apiResult; // Show current (null ASIN) state
+=======
+              console.log('💾 Attempting to save external API result to FNSKU cache for future cost savings...');
+              console.log('🔍 API result to save (with ASIN):', apiResult);
+              console.log('🔍 API result ASIN specifically:', apiResult.asin);
+              
+              const savedToCache = await apiCacheService.saveLookup(apiResult); 
+              
+              if (savedToCache) {
+                console.log('✅ Successfully saved external API result to FNSKU cache:', savedToCache);
+                console.log('✅ Saved cache ASIN:', savedToCache.asin);
+                
+                // Don't map from cache - keep the original external API result!
+                displayableProduct = {
+                  ...apiResult,
+                  source: 'external_api_cached', // Indicate it was saved to cache
+                  cost_status: 'charged', // But this lookup was still charged
+                  cache_saved: true // Flag that it's now cached for future
+                };
+                console.log('🚀 [DEBUG] Using original external API result with cache flag:', displayableProduct.asin);
+                
+                productForLogging = displayableProduct; 
+                
+                if (apiResult.asin) {
+                  toast.success("💾 ASIN saved to cache! Future scans of this item will be FREE! 🎉", {
+                    autoClose: 4000
+                  });
+                } else {
+                  toast.info("💾 Processing status saved to cache. Check for updates in a few minutes.", {
+                    autoClose: 4000
+                  });
+                }
+              } else {
+                console.error('❌ Failed to save external API result to FNSKU cache');
+                toast.warn("⚠️ Product found via API, but failed to save to cache. Next scan will be charged again.", {
+                  autoClose: 5000
+                });
+                // Still display the product even if save failed
+                displayableProduct = apiResult;
+>>>>>>> f074657d851a673766a4cd9987a0c3d2f11c89c3
+                displayableProduct.source = 'external_api';
+                displayableProduct.cost_status = 'charged';
+              }
+            } else {
+              // For non-external API results, use as-is
+              displayableProduct = apiResult;
             }
           } catch (saveError) {
-            console.error("Error saving API result to Supabase:", saveError);
-            toast.error("Product found via API, but error saving to our database.");
-            displayableProduct = mapSupabaseProductToDisplay(apiResult);
+            console.error("❌ Exception saving API result to cache:", saveError);
+            toast.error("⚠️ Product found via API, but error saving to cache. Next scan will be charged again.", {
+              autoClose: 5000
+            });
+            // Still display the product even if save failed
+            displayableProduct = apiResult;
+            displayableProduct.source = 'external_api';
+            displayableProduct.cost_status = 'charged';
           }
+          
+          console.log('🚀 [DEBUG] Final displayableProduct before setProductInfo:', displayableProduct);
+          console.log('🚀 [DEBUG] Final displayableProduct ASIN:', displayableProduct?.asin);
+          
           setProductInfo(displayableProduct);
+          
           if (displayableProduct) {
             console.log("[Scanner.jsx] Attempting to log scan event (from API). Code:", code, "Product Details:", productForLogging);
             const logResult = await dbProductLookupService.logScanEvent(code, productForLogging);
             console.log("[Scanner.jsx] Scan event log result (from API):", logResult);
           }
         } else {
-          toast.error("Product not found by scanned code in database or via API.");
+          toast.error("❌ Product not found in database or via external API.", {
+            icon: "❌"
+          });
         }
       }
     } catch (error) {
       console.error("Error looking up product by code:", error);
-      toast.error("Error looking up product by code");
+      if (error.message?.includes('External API')) {
+        toast.error("❌ External API lookup failed. Please try again.");
+      } else {
+        toast.error("❌ Error looking up product by code");
+      }
     } finally {
       setLoading(false);
     }
@@ -152,6 +356,11 @@ const Scanner = () => {
       toast.error("Please enter a barcode to scan.");
       return;
     }
+    
+    // Clean the input by removing extra whitespace and tab characters
+    const cleanedBarcode = barcodeToScan.trim().replace(/\s+/g, '');
+    console.log("Manual scan - original:", barcodeToScan, "cleaned:", cleanedBarcode);
+    
     setIsManualScanning(true);
     setManualScanError(null);
     setManualScanResult(null);
@@ -159,13 +368,13 @@ const Scanner = () => {
     
     setScannedCodes(prev => {
       const newHistory = [
-        { code: barcodeToScan, timestamp: new Date().toISOString(), type: 'manual' },
-        ...prev.filter(item => item.code !== barcodeToScan)
+        { code: cleanedBarcode, timestamp: new Date().toISOString(), type: 'manual' },
+        ...prev.filter(item => item.code !== cleanedBarcode)
       ].slice(0, 10);
       return newHistory;
     });
 
-    await lookupProductByCode(barcodeToScan);
+    await lookupProductByCode(cleanedBarcode);
     setIsManualScanning(false);
   };
 
@@ -174,6 +383,51 @@ const Scanner = () => {
       // Implement product detail view navigation here
       toast.info("View details functionality will be implemented soon");
     }
+  };
+
+  // Handle marketplace listing creation
+  const handleCreateListing = () => {
+    if (productInfo) {
+      setShowMarketplaceListing(true);
+    } else {
+      toast.error("Please scan a product first");
+    }
+  };
+
+  const handleListingSuccess = (results) => {
+    console.log('Listing creation results:', results);
+    toast.success('Listings created successfully!');
+    // You could add logic here to update the product info with marketplace URLs
+    // or refresh the product data if needed
+  };
+
+  const handleCloseListing = () => {
+    setShowMarketplaceListing(false);
+  };
+
+  // Handle Shopify listing creation
+  const handleCreateShopifyListing = () => {
+    if (productInfo) {
+      setShowShopifyListing(true);
+    } else {
+      toast.error("Please scan a product first");
+    }
+  };
+
+  const handleShopifySuccess = (result) => {
+    console.log('Shopify listing creation result:', result);
+    toast.success(`🛍️ Shopify listing created! Product ID: ${result.product.id}`, {
+      autoClose: 5000
+    });
+    
+    // Open Shopify admin in new tab
+    if (result.shopifyUrl) {
+      window.open(result.shopifyUrl, '_blank');
+    }
+  };
+
+  const handleCloseShopifyListing = () => {
+    setShowShopifyListing(false);
   };
 
   // Handle search input change with debounce
@@ -529,6 +783,102 @@ const Scanner = () => {
     setImportFile(null);
   };
 
+<<<<<<< HEAD
+  // Auto-refresh functions
+  const startAutoRefresh = (code) => {
+    console.log('🔄 Starting auto-refresh for code:', code);
+    setIsAutoRefreshing(true);
+    setAutoRefreshCode(code);
+    setAutoRefreshCountdown(45); // 45 seconds countdown
+    
+    // Start countdown timer
+    countdownIntervalRef.current = setInterval(() => {
+      setAutoRefreshCountdown(prev => {
+        if (prev <= 1) {
+          return 45; // Reset to 45 seconds after each attempt
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    
+    // Start auto-refresh timer (every 45 seconds)
+    autoRefreshIntervalRef.current = setInterval(async () => {
+      console.log('🔄 Auto-refresh attempt for code:', code);
+      try {
+        // Retry the API lookup
+        const result = await getProductLookup(code);
+        
+        if (result && result.asin && result.asin.trim() !== '') {
+          console.log('✅ Auto-refresh found ASIN!', result.asin);
+          stopAutoRefresh();
+          
+          // Update the UI with the successful result
+          setProductInfo({
+            ...result,
+            source: 'external_api',
+            cost_status: 'charged'
+          });
+          
+          // Save to cache
+          try {
+            await apiCacheService.saveLookup(result);
+            console.log('✅ Auto-refresh result saved to cache');
+            toast.success(`🎉 ASIN found automatically: ${result.asin}`, {
+              autoClose: 4000
+            });
+          } catch (saveError) {
+            console.warn('⚠️ Could not save auto-refresh result to cache:', saveError);
+            toast.success(`🎉 ASIN found: ${result.asin} (but couldn't save to cache)`, {
+              autoClose: 4000
+            });
+          }
+        } else {
+          console.log('⏳ Auto-refresh attempt - ASIN still not ready');
+        }
+      } catch (error) {
+        console.error('❌ Auto-refresh error:', error);
+      }
+    }, 45000); // Every 45 seconds
+  };
+  
+  const stopAutoRefresh = () => {
+    console.log('⏹️ Stopping auto-refresh');
+    setIsAutoRefreshing(false);
+    setAutoRefreshCode(null);
+    setAutoRefreshCountdown(0);
+    
+    if (autoRefreshIntervalRef.current) {
+      clearInterval(autoRefreshIntervalRef.current);
+      autoRefreshIntervalRef.current = null;
+    }
+    
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+=======
+  // Add manual check function
+  const handleCheckForUpdates = async () => {
+    if (!lastScannedCode) {
+      toast.error("No recent scan to check for updates");
+      return;
+    }
+    
+    setIsCheckingDatabase(true);
+    toast.info("🔍 Checking for ASIN updates...");
+    
+    try {
+      // Re-run the lookup to see if ASIN is now available
+      await lookupProductByCode(lastScannedCode);
+      setIsApiProcessing(false); // Reset processing state after manual check
+    } catch (error) {
+      console.error("Error checking for updates:", error);
+      toast.error("❌ Error checking for updates");
+    } finally {
+      setIsCheckingDatabase(false);
+>>>>>>> f074657d851a673766a4cd9987a0c3d2f11c89c3
+    }
+  };
+
   return (
     <div className="container mx-auto p-4">
       <ToastContainer position="top-right" autoClose={3000} />
@@ -681,14 +1031,40 @@ const Scanner = () => {
               Reset
             </button>
             
-            {productInfo && (
-              <button
-                onClick={handleViewDetails}
-                className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded"
-              >
-                View Details
-              </button>
-            )}
+            <div className="flex gap-2">
+              {/* Check for Updates Button */}
+              {(isApiProcessing || (productInfo && !productInfo.asin && lastScannedCode)) && (
+                <button
+                  onClick={handleCheckForUpdates}
+                  className={`px-4 py-2 rounded text-white font-medium ${
+                    isCheckingDatabase 
+                      ? 'bg-gray-400 cursor-not-allowed' 
+                      : 'bg-orange-500 hover:bg-orange-600'
+                  }`}
+                  disabled={isCheckingDatabase || loading}
+                >
+                  {isCheckingDatabase ? (
+                    <>
+                      <div className="inline-block animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                      Checking...
+                    </>
+                  ) : (
+                    <>
+                      🔄 Check for Updates
+                    </>
+                  )}
+                </button>
+              )}
+              
+              {productInfo && (
+                <button
+                  onClick={handleViewDetails}
+                  className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded"
+                >
+                  View Details
+                </button>
+              )}
+            </div>
           </div>
           
           {/* Loading Indicator */}
@@ -698,9 +1074,113 @@ const Scanner = () => {
             </div>
           )}
           
+          {/* Auto-Refresh Status */}
+          {isAutoRefreshing && (
+            <div className="mb-4 p-4 bg-blue-50 border-l-4 border-blue-500 text-blue-800 rounded">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center">
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600 mr-3"></div>
+                  <div>
+                    <p className="font-medium">🔄 Auto-Refreshing: {autoRefreshCode}</p>
+                    <p className="text-sm">
+                      Checking for ASIN every 45 seconds. Next check in: {autoRefreshCountdown}s
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={stopAutoRefresh}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm"
+                >
+                  Stop Auto-Refresh
+                </button>
+              </div>
+            </div>
+          )}
+          
           {/* Product Info Display */}
           {!loading && productInfo && (
             <div className="border p-4 rounded-lg space-y-2">
+              {/* Processing Status Alert */}
+              {isApiProcessing && (
+                <div className="mb-3 p-3 bg-amber-100 border-l-4 border-amber-500 text-amber-800 rounded">
+                  <div className="flex items-center">
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-amber-600 mr-3"></div>
+                    <div>
+                      <p className="font-medium">⚡ Quick Scan Complete - API Still Processing</p>
+                      <p className="text-sm">
+                        Fast scan finished in ~5 seconds. The external API is still working on finding the ASIN for this FNSKU. 
+                        This typically takes 2-3 minutes. Click "Check for Updates" when ready.
+                      </p>
+                      {processingStartTime && (
+                        <p className="text-xs mt-1">
+                          Quick scan completed: {processingStartTime.toLocaleTimeString()}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              {/* Cost Status Indicator */}
+              {productInfo.source && (
+                <div className={`mb-3 p-2 rounded-lg flex items-center ${
+                  productInfo.source === 'local_database' || productInfo.source === 'api_cache'
+                    ? 'bg-green-100 text-green-800' 
+                    : productInfo.source === 'fnsku_cache'
+                    ? 'bg-green-100 text-green-800'
+                    : productInfo.source === 'asin_direct'
+                    ? 'bg-blue-100 text-blue-800'
+                    : productInfo.source === 'external_api'
+                    ? 'bg-yellow-100 text-yellow-800'
+                    : 'bg-blue-100 text-blue-800'
+                }`}>
+                  {productInfo.source === 'local_database' ? (
+                    <>
+                      <CheckCircleIcon className="h-5 w-5 mr-2" />
+                      <span className="font-medium">Found in local database - No API charge</span>
+                    </>
+                  ) : productInfo.source === 'api_cache' ? (
+                    <>
+                      <CheckCircleIcon className="h-5 w-5 mr-2" />
+                      <span className="font-medium">Found in FNSKU cache - No API charge (previously saved)</span>
+                    </>
+                  ) : productInfo.source === 'fnsku_cache' ? (
+                    <>
+                      <CheckCircleIcon className="h-5 w-5 mr-2" />
+                      <span className="font-medium">Found in FNSKU cache - No API charge (previously saved)</span>
+                    </>
+                  ) : productInfo.source === 'asin_direct' ? (
+                    <>
+                      <CheckCircleIcon className="h-5 w-5 mr-2" />
+                      <span className="font-medium">Direct ASIN lookup - No API charge</span>
+                    </>
+                  ) : productInfo.source === 'external_api' ? (
+                    <>
+                      <CurrencyDollarIcon className="h-5 w-5 mr-2" />
+                      <span className="font-medium">Retrieved from fnskutoasin.com API - Charged lookup</span>
+                    </>
+                  ) : (
+                    <>
+                      <ExclamationTriangleIcon className="h-5 w-5 mr-2" />
+                      <span className="font-medium">Mock data - No charge</span>
+                    </>
+                  )}
+                </div>
+              )}
+              
+              {/* Code Type Indicator */}
+              {productInfo.code_type && (
+                <div className="mb-3 p-2 bg-gray-100 rounded-lg">
+                  <span className="text-sm font-medium text-gray-700">
+                    Code Type: <span className="text-blue-600">{productInfo.code_type}</span>
+                    {productInfo.code_type === 'ASIN' && ' (Amazon Standard Identification Number)'}
+                    {productInfo.code_type === 'FNSKU' && ' (Fulfillment Network Stock Keeping Unit)'}
+                    {productInfo.code_type === 'UPC' && ' (Universal Product Code)'}
+                    {productInfo.code_type === 'EAN' && ' (European Article Number)'}
+                  </span>
+                </div>
+              )}
+              
               <h3 className="text-lg font-bold truncate" title={productInfo.name}>{productInfo.name}</h3>
               
               <p className="text-sm text-gray-700">
@@ -741,7 +1221,31 @@ const Scanner = () => {
                 </div>
               )}
 
-              
+              {/* Create Marketplace Listings Button */}
+              <div className="mt-4">
+                <button
+                  onClick={handleCreateListing}
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded flex items-center justify-center"
+                >
+                  <ShoppingBagIcon className="w-5 h-5 mr-2" />
+                  Create eBay & Shopify Listings
+                </button>
+              </div>
+
+              {/* Create Shopify Listing Button */}
+              <div className="mt-3">
+                <button
+                  onClick={handleCreateShopifyListing}
+                  className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded flex items-center justify-center"
+                >
+                  <ShoppingBagIcon className="w-5 h-5 mr-2" />
+                  🛍️ Create Shopify Listing
+                </button>
+                <p className="text-xs text-gray-500 mt-1 text-center">
+                  Auto-generates description with Amazon link
+                </p>
+              </div>
+
               {/* Displaying productInfo.description if it was mapped and different from name, 
                   but our current mapSupabaseProductToDisplay maps both to Supabase 'Description' column. 
                   If 'Description' is long, the h3 title is already showing it. 
@@ -957,6 +1461,22 @@ const Scanner = () => {
           </div>
         </div>
       )}
+
+      {/* Marketplace Listing Modal */}
+      <MarketplaceListing
+        productData={productInfo}
+        isVisible={showMarketplaceListing}
+        onClose={handleCloseListing}
+        onSuccess={handleListingSuccess}
+      />
+
+      {/* Shopify Listing Modal */}
+      <ShopifyListing
+        productData={productInfo}
+        isVisible={showShopifyListing}
+        onClose={handleCloseShopifyListing}
+        onSuccess={handleShopifySuccess}
+      />
     </div>
   );
 };

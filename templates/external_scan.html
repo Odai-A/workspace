@@ -1,0 +1,313 @@
+{% extends "base.html" %}
+
+{% block title %}External Scanner - Product App{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1 class="mb-4">External Product Scanner</h1>
+    <p class="text-muted">Scan an FNSKU to lookup product information from external database</p>
+
+    <!-- Scanner Section -->
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5 class="mb-0">FNSKU Scanner</h5>
+        </div>
+        <div class="card-body">
+            <div class="form-group">
+                <label for="camera-select">Select Camera:</label>
+                <select id="camera-select" class="form-control" style="max-width: 500px; margin-bottom: 10px;"></select>
+            </div>
+
+            <div id="reader" style="width: 100%; max-width: 500px; margin: auto;"></div>
+            <div id="scan-result" class="mt-3 text-center"></div>
+            
+            <div class="text-center mt-3">
+                <button id="start-scan-btn" class="btn btn-primary mr-2">Start Scan</button>
+                <button id="stop-scan-btn" class="btn btn-danger mr-2" style="display: none;">Stop Scan</button>
+                <button id="manual-input-btn" class="btn btn-secondary">Manual Input</button>
+            </div>
+
+            <div class="alert alert-info mt-3" role="alert">
+                <i class="fas fa-info-circle"></i>
+                Point your device's camera at an FNSKU barcode to lookup product information from external database.
+            </div>
+        </div>
+    </div>
+
+    <!-- Manual Input Section -->
+    <div class="card mb-4" id="manual-input-section" style="display: none;">
+        <div class="card-header">
+            <h5 class="mb-0">Manual FNSKU Input</h5>
+        </div>
+        <div class="card-body">
+            <div class="form-group">
+                <label for="manual-fnsku">Enter FNSKU:</label>
+                <div class="input-group">
+                    <input type="text" id="manual-fnsku" class="form-control" placeholder="Enter FNSKU here">
+                    <div class="input-group-append">
+                        <button id="lookup-btn" class="btn btn-primary">Lookup</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Results Section -->
+    <div class="card" id="results-section" style="display: none;">
+        <div class="card-header">
+            <h5 class="mb-0">Product Information</h5>
+        </div>
+        <div class="card-body" id="product-details">
+            <!-- Results will be populated here -->
+        </div>
+    </div>
+
+    <!-- Loading Spinner -->
+    <div class="text-center" id="loading-spinner" style="display: none;">
+        <div class="spinner-border text-primary" role="status">
+            <span class="sr-only">Loading...</span>
+        </div>
+        <p class="mt-2">Looking up product information...</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', (event) => {
+    const html5QrCode = new Html5Qrcode("reader");
+    const cameraSelect = document.getElementById('camera-select');
+    const startScanButton = document.getElementById('start-scan-btn');
+    const stopScanButton = document.getElementById('stop-scan-btn');
+    const manualInputBtn = document.getElementById('manual-input-btn');
+    const manualInputSection = document.getElementById('manual-input-section');
+    const manualFnskuInput = document.getElementById('manual-fnsku');
+    const lookupBtn = document.getElementById('lookup-btn');
+    const scanResultDiv = document.getElementById('scan-result');
+    const resultsSection = document.getElementById('results-section');
+    const productDetails = document.getElementById('product-details');
+    const loadingSpinner = document.getElementById('loading-spinner');
+    let currentCameraId = null;
+    let availableCameras = [];
+
+    const qrCodeSuccessCallback = (decodedText, decodedResult) => {
+        console.log(`Scan result: ${decodedText}`, decodedResult);
+        scanResultDiv.innerHTML = `<p class="text-success">FNSKU scanned: ${decodedText}</p>`;
+        
+        // Stop scanning
+        html5QrCode.stop().then(ignore => {
+            startScanButton.style.display = 'inline-block';
+            stopScanButton.style.display = 'none';
+            cameraSelect.disabled = false;
+            
+            // Perform external lookup
+            performExternalLookup(decodedText);
+        }).catch(err => {
+            console.error("Failed to stop scanning.", err);
+            // Still perform lookup even if stop fails
+            performExternalLookup(decodedText);
+        });
+    };
+
+    const qrCodeErrorCallback = (errorMessage) => {
+        // Silently ignore scanning errors to avoid spam
+    };
+
+    const config = {
+        fps: 10,
+        qrbox: { width: 250, height: 250 },
+        rememberLastUsedCamera: false,
+        supportedScanTypes: [Html5QrcodeScanType.SCAN_TYPE_CAMERA]
+    };
+
+    function startScan(cameraId) {
+        html5QrCode.start(
+            cameraId,
+            config,
+            qrCodeSuccessCallback,
+            qrCodeErrorCallback
+        ).then(() => {
+            scanResultDiv.innerHTML = '<p class="text-info">Scanning for FNSKU...</p>';
+            startScanButton.style.display = 'none';
+            stopScanButton.style.display = 'inline-block';
+            cameraSelect.disabled = true;
+        }).catch(err => {
+            scanResultDiv.innerHTML = `<p class="text-danger">Error starting camera: ${err}</p>`;
+            console.error("Error starting camera: ", err);
+            cameraSelect.disabled = false;
+        });
+    }
+
+    function performExternalLookup(fnsku) {
+        loadingSpinner.style.display = 'block';
+        resultsSection.style.display = 'none';
+        
+        fetch('/api/external-lookup', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ fnsku: fnsku })
+        })
+        .then(response => response.json())
+        .then(data => {
+            loadingSpinner.style.display = 'none';
+            
+            if (data.success) {
+                displayProductInfo(data);
+            } else {
+                displayError(data.message || 'Failed to lookup product information');
+            }
+        })
+        .catch(error => {
+            loadingSpinner.style.display = 'none';
+            console.error('Error:', error);
+            displayError('Network error occurred while looking up product information');
+        });
+    }
+
+    function displayProductInfo(data) {
+        const sourceMessage = data.source === 'local_database' 
+            ? '<div class="alert alert-success"><i class="fas fa-database"></i> Found in local database - no API charge</div>'
+            : '<div class="alert alert-warning"><i class="fas fa-cloud"></i> Retrieved from fnskutoasin.com API - charged lookup</div>';
+        
+        const html = `
+            ${sourceMessage}
+            <div class="row">
+                <div class="col-md-3">
+                    ${data.image_url ? `<img src="${data.image_url}" class="img-fluid rounded" alt="Product Image">` : '<div class="bg-light p-4 text-center rounded"><i class="fas fa-image fa-3x text-muted"></i><br>No Image</div>'}
+                </div>
+                <div class="col-md-9">
+                    <h5>${data.title || 'No title available'}</h5>
+                    <table class="table table-borderless">
+                        <tr>
+                            <td><strong>FNSKU:</strong></td>
+                            <td>${data.fnsku}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>ASIN:</strong></td>
+                            <td>${data.asin || 'Not available'}</td>
+                        </tr>
+                        ${data.lpn ? `<tr><td><strong>LPN:</strong></td><td>${data.lpn}</td></tr>` : ''}
+                        ${data.price ? `<tr><td><strong>Price:</strong></td><td>$${data.price}</td></tr>` : ''}
+                        <tr>
+                            <td><strong>Source:</strong></td>
+                            <td>${data.source === 'local_database' ? 'Local Inventory Database' : 'fnskutoasin.com API'}</td>
+                        </tr>
+                        ${data.scan_task_id ? `<tr><td><strong>Scan Task ID:</strong></td><td>${data.scan_task_id}</td></tr>` : ''}
+                        ${data.task_state ? `<tr><td><strong>Task State:</strong></td><td><span class="badge badge-info">${data.task_state}</span></td></tr>` : ''}
+                        ${data.assignment_date ? `<tr><td><strong>Assignment Date:</strong></td><td>${new Date(data.assignment_date).toLocaleString()}</td></tr>` : ''}
+                    </table>
+                    <div class="mt-3">
+                        ${data.amazon_url ? `<a href="${data.amazon_url}" target="_blank" class="btn btn-warning mr-2"><i class="fab fa-amazon"></i> View on Amazon</a>` : ''}
+                        ${data.source === 'external_api' && data.saved_to_local ? '<span class="badge badge-success">Saved to local database</span>' : ''}
+                    </div>
+                </div>
+            </div>
+        `;
+        
+        productDetails.innerHTML = html;
+        resultsSection.style.display = 'block';
+    }
+
+    function displayError(message) {
+        const html = `
+            <div class="alert alert-danger" role="alert">
+                <i class="fas fa-exclamation-triangle"></i>
+                ${message}
+            </div>
+        `;
+        productDetails.innerHTML = html;
+        resultsSection.style.display = 'block';
+    }
+
+    // Populate camera select dropdown
+    Html5Qrcode.getCameras().then(cameras => {
+        if (cameras && cameras.length) {
+            availableCameras = cameras;
+            cameras.forEach(camera => {
+                const option = document.createElement('option');
+                option.value = camera.id;
+                option.text = camera.label || `Camera ${cameraSelect.options.length + 1}`;
+                cameraSelect.appendChild(option);
+            });
+            if(cameras.length > 0) {
+                cameraSelect.value = cameras[cameras.length - 1].id;
+            }
+        } else {
+            scanResultDiv.innerHTML = '<p class="text-danger">No cameras found.</p>';
+            console.error("No cameras found.");
+            startScanButton.disabled = true;
+            cameraSelect.disabled = true;
+        }
+    }).catch(err => {
+        scanResultDiv.innerHTML = `<p class="text-danger">Error getting cameras: ${err}</p>`;
+        console.error("Error getting cameras: ", err);
+        startScanButton.disabled = true;
+        cameraSelect.disabled = true;
+    });
+
+    // Event listeners
+    startScanButton.addEventListener('click', () => {
+        currentCameraId = cameraSelect.value;
+        if (!currentCameraId) {
+            scanResultDiv.innerHTML = '<p class="text-warning">Please select a camera.</p>';
+            return;
+        }
+        scanResultDiv.innerHTML = '<p>Starting camera...</p>';
+        startScan(currentCameraId);
+    });
+
+    stopScanButton.addEventListener('click', () => {
+        html5QrCode.stop().then(ignore => {
+            scanResultDiv.innerHTML = '<p>Scanner stopped.</p>';
+            startScanButton.style.display = 'inline-block';
+            stopScanButton.style.display = 'none';
+            cameraSelect.disabled = false;
+        }).catch(err => {
+            scanResultDiv.innerHTML = `<p class="text-danger">Error stopping scanner: ${err}</p>`;
+            console.error("Error stopping scanner: ", err);
+        });
+    });
+
+    manualInputBtn.addEventListener('click', () => {
+        if (manualInputSection.style.display === 'none') {
+            manualInputSection.style.display = 'block';
+            manualInputBtn.textContent = 'Hide Manual Input';
+        } else {
+            manualInputSection.style.display = 'none';
+            manualInputBtn.textContent = 'Manual Input';
+        }
+    });
+
+    lookupBtn.addEventListener('click', () => {
+        const fnsku = manualFnskuInput.value.trim();
+        if (fnsku) {
+            performExternalLookup(fnsku);
+        } else {
+            alert('Please enter an FNSKU');
+        }
+    });
+
+    manualFnskuInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            lookupBtn.click();
+        }
+    });
+
+    cameraSelect.addEventListener('change', () => {
+        if (stopScanButton.style.display !== 'none') {
+            html5QrCode.stop().then(() => {
+                currentCameraId = cameraSelect.value;
+                startScan(currentCameraId);
+            }).catch(err => {
+                console.error("Error stopping/restarting camera on select: ", err);
+                scanResultDiv.innerHTML = `<p class="text-danger">Error changing camera: ${err}</p>`;
+            });
+        }
+    });
+});
+</script>
+{% endblock %} 

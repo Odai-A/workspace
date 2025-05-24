@@ -22,6 +22,393 @@ apiClient.interceptors.response.use(
 const FNSKU_TO_ASIN_API_KEY = '20a98a6a-437e-497c-b64c-ec97ec2fbc19'; // TEMPORARY - Move to .env file in production
 const FNSKU_API_ENDPOINT = 'https://ato.fnskutoasin.com/api/v1/ScanTask/GetMyByBarCode';
 
+// External fnskutoasin.com API service
+export const externalApiService = {
+  /**
+   * Test the API connection with a simple request
+   * @returns {Promise<boolean>} - True if API is accessible, false otherwise
+   */
+  async testConnection() {
+    try {
+      const BASE_URL = 'https://ato.fnskutoasin.com';
+      const API_KEY = '20a98a6a-437e-497c-b64c-ec97ec2fbc19';
+      
+      console.log('🧪 Testing API connection...');
+      
+      // Try with api-key header first
+      const headers1 = {
+        'api-key': API_KEY,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      };
+      
+      try {
+        const response = await axios.get(`${BASE_URL}/api/v1/ScanTask/GetByBarCode`, {
+          params: { BarCode: 'TEST123' },
+          headers: headers1,
+          timeout: 10000
+        });
+        console.log('✅ API test successful with api-key header');
+        return true;
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 Testing with Authorization header...');
+          
+          // Try with Authorization header
+          const headers2 = {
+            'Authorization': `Bearer ${API_KEY}`,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          };
+          
+          try {
+            const response = await axios.get(`${BASE_URL}/api/v1/ScanTask/GetByBarCode`, {
+              params: { BarCode: 'TEST123' },
+              headers: headers2,
+              timeout: 10000
+            });
+            console.log('✅ API test successful with Authorization header');
+            return true;
+          } catch (error2) {
+            console.log('❌ Both header formats failed:', error2.response?.status, error2.response?.data);
+            return false;
+          }
+        } else {
+          console.log('❌ API test failed:', error.response?.status, error.response?.data);
+          return false;
+        }
+      }
+    } catch (error) {
+      console.log('❌ API test error:', error.message);
+      return false;
+    }
+  },
+
+  /**
+   * Lookup FNSKU using the fnskutoasin.com API
+   * @param {string} fnsku - The FNSKU to lookup
+   * @returns {Promise<Object|null>} - Product data with ASIN or null if not found
+   */
+  async lookupFnsku(fnsku) {
+    try {
+      if (!fnsku) {
+        throw new Error('FNSKU is required');
+      }
+
+      console.log(`🔍 Looking up FNSKU: ${fnsku} using fnskutoasin.com API`);
+      
+      // Base URL and API key from user's requirements
+      const BASE_URL = 'https://ato.fnskutoasin.com';
+      const API_KEY = '20a98a6a-437e-497c-b64c-ec97ec2fbc19';
+      
+      console.log(`🔑 Using API Key: ${API_KEY.substring(0, 8)}...`);
+      console.log(`🌐 Using Base URL: ${BASE_URL}`);
+      
+      const headers = {
+        'api-key': API_KEY,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      };
+      
+      // Helper function to check if response is HTML instead of JSON
+      const isHtmlResponse = (data) => {
+        return typeof data === 'string' && data.trim().startsWith('<!DOCTYPE html>');
+      };
+      
+      // Step 1: Try to get existing scan task
+      console.log(`📡 Step 1: Checking for existing scan task...`);
+      const lookupUrl = `${BASE_URL}/api/v1/ScanTask/GetByBarCode`;
+      
+      let response;
+      try {
+        response = await axios.get(lookupUrl, { 
+          headers, 
+          params: { BarCode: fnsku }, 
+          timeout: 30000 
+        });
+        
+        // Check if we got HTML instead of JSON (API not ready)
+        if (isHtmlResponse(response.data)) {
+          console.log('⚠️ API returned HTML instead of JSON - scan task not ready yet');
+        } else if (response.data?.succeeded && response.data?.data?.asin) {
+          console.log('✅ Found existing scan with ASIN:', response.data.data.asin);
+          return this.processApiResponse(fnsku, response.data.data);
+        }
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 Trying alternative header format...');
+          const altHeaders = {
+            'Authorization': `Bearer ${API_KEY}`,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          };
+          
+          try {
+            response = await axios.get(lookupUrl, { 
+              headers: altHeaders, 
+              params: { BarCode: fnsku }, 
+              timeout: 30000 
+            });
+            
+            if (!isHtmlResponse(response.data) && response.data?.succeeded && response.data?.data?.asin) {
+              console.log('✅ Found existing scan with ASIN (alt headers):', response.data.data.asin);
+              return this.processApiResponse(fnsku, response.data.data);
+            }
+          } catch (error2) {
+            console.log('❌ Both header formats failed for GET:', error2.response?.status);
+          }
+        }
+      }
+      
+      // Step 2: Create new scan task if no existing scan found
+      console.log('📝 Creating new scan task...');
+      const addScanUrl = `${BASE_URL}/api/v1/ScanTask/AddOrGet`;
+      const payload = { barCode: fnsku, callbackUrl: "" };
+      
+      try {
+        response = await axios.post(addScanUrl, payload, { headers, timeout: 30000 });
+      } catch (error) {
+        if (error.response?.status === 401) {
+          console.log('🔄 POST failed with 401, trying alternative header format...');
+          const altHeaders = {
+            'Authorization': `Bearer ${API_KEY}`,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          };
+          response = await axios.post(addScanUrl, payload, { headers: altHeaders, timeout: 30000 });
+        } else {
+          throw error;
+        }
+      }
+      
+      console.log(`✅ POST response status: ${response.status}`);
+      
+      if (!response.data?.succeeded) {
+        throw new Error(`Failed to create scan task: ${response.data?.message || 'Unknown error'}`);
+      }
+      
+      // Step 3: Poll for results with fast timing (user wants speed!)
+      console.log('⏳ Quick polling for ASIN results...');
+      const maxAttempts = 2; // Only 2 attempts for fast scanning
+      const baseDelay = 1500; // 1.5 seconds delay
+      
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        console.log(`🔄 Quick attempt ${attempt}/${maxAttempts}...`);
+        
+        // Short delays: 1.5s, then 3s (total ~4.5 seconds max)
+        if (attempt > 1) {
+          const delay = baseDelay * attempt;
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        
+        try {
+          response = await axios.get(lookupUrl, { 
+            headers, 
+            params: { BarCode: fnsku }, 
+            timeout: 30000 
+          });
+          
+          console.log(`📊 Attempt ${attempt} response type:`, typeof response.data);
+          
+          // Check if we still get HTML (API still processing)
+          if (isHtmlResponse(response.data)) {
+            console.log(`⏳ Attempt ${attempt}: API still processing (HTML response)`);
+            continue;
+          }
+          
+          // Check for successful JSON response with ASIN
+          if (response.data?.succeeded && response.data?.data) {
+            const scanData = response.data.data;
+            console.log(`🎯 Attempt ${attempt}: Got scan data:`, scanData);
+            
+            if (scanData.asin) {
+              console.log(`✅ SUCCESS! Found ASIN: ${scanData.asin} on quick attempt ${attempt}`);
+              
+              // Verify the data before processing
+              if (scanData.asin && scanData.asin.length >= 10) {
+                console.log(`✅ ASIN verified: ${scanData.asin} (length: ${scanData.asin.length})`);
+                return this.processApiResponse(fnsku, scanData);
+              } else {
+                console.log(`⚠️ ASIN found but seems invalid: ${scanData.asin}`);
+              }
+            } else {
+              console.log(`⏳ Attempt ${attempt}: Scan data exists but no ASIN yet - will use Check for Updates`);
+            }
+          } else {
+            console.log(`⏳ Attempt ${attempt}: No scan data yet - will use Check for Updates`);
+          }
+          
+        } catch (pollError) {
+          console.log(`⚠️ Attempt ${attempt} polling error:`, pollError.response?.status || pollError.message);
+          
+          // Try alternative headers on polling errors
+          if (pollError.response?.status === 401) {
+            try {
+              const altHeaders = {
+                'Authorization': `Bearer ${API_KEY}`,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+              };
+              
+              response = await axios.get(lookupUrl, { 
+                headers: altHeaders, 
+                params: { BarCode: fnsku }, 
+                timeout: 30000 
+              });
+              
+              if (!isHtmlResponse(response.data) && response.data?.succeeded && response.data?.data?.asin) {
+                console.log(`✅ Success with alt headers! ASIN: ${response.data.data.asin}`);
+                // Verify before processing
+                const asin = response.data.data.asin;
+                if (asin && asin.length >= 10) {
+                  return this.processApiResponse(fnsku, response.data.data);
+                }
+              }
+            } catch (altError) {
+              console.log(`⚠️ Alternative headers also failed:`, altError.response?.status);
+            }
+          }
+<<<<<<< HEAD
+        }
+        
+        console.log(`✅ POST response status: ${response.status}`);
+        console.log(`📄 POST response:`, response.data);
+        
+        if (response.data?.succeeded && response.data?.data) {
+          scanData = response.data.data;
+          console.log('✅ Created new scan task:', scanData);
+          
+          // 🚀 EFFICIENCY FIX: Check if ASIN is ALREADY available in AddOrGet response!
+          if (scanData.asin && scanData.asin.trim() !== '') {
+            console.log('🎉 ASIN found immediately in AddOrGet response!', scanData.asin);
+            console.log('⚡ No polling needed - ASIN ready instantly!');
+            // Skip polling entirely - we have the ASIN!
+          } else {
+            console.log('⏳ ASIN not ready yet, starting immediate polling...');
+            
+            // NO WAITING - Start polling immediately like a refresh would do
+            const maxPollingAttempts = 8; // More attempts since we're not waiting initially
+            for (let attempt = 1; attempt <= maxPollingAttempts; attempt++) {
+              console.log(`🔄 Immediate poll attempt ${attempt}/${maxPollingAttempts} - checking if ASIN is ready...`);
+              
+              try {
+                // Call the SAME GetByBarCode endpoint to check if the scan task now has an ASIN
+                const pollResponse = await axios.get(lookupUrl, { 
+                  headers, 
+                  params, 
+                  timeout: 30000 
+                });
+                
+                console.log(`📊 Polling response status: ${pollResponse.status}`);
+                
+                // Check if we got proper JSON response with the updated scan task
+                if (pollResponse.data && typeof pollResponse.data === 'object' && pollResponse.data.succeeded) {
+                  if (pollResponse.data.data && pollResponse.data.data.asin && pollResponse.data.data.asin.trim() !== '') {
+                    console.log('🎉 ASIN found in immediate polling! The API finished processing:', pollResponse.data.data.asin);
+                    scanData = pollResponse.data.data; // Update scanData with the processed result
+                    break; // Exit polling loop - we got the ASIN!
+                  } else {
+                    console.log(`⏳ Attempt ${attempt}: Scan task exists but ASIN still processing...`);
+                  }
+                } else {
+                  console.log(`⏳ Attempt ${attempt}: Still returning HTML/non-JSON, API still processing...`);
+                }
+              } catch (pollError) {
+                console.log(`⚠️ Polling attempt ${attempt} failed:`, pollError.message);
+              }
+              
+              // Short, consistent delays: 2s between each attempt
+              if (attempt < maxPollingAttempts) {
+                const delay = 2000; // Fixed 2 second delay between attempts
+                console.log(`⏳ Waiting ${delay/1000} seconds before next polling attempt...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+              }
+            }
+            
+            if (!scanData || !scanData.asin) {
+              console.log('⏰ Immediate polling completed but ASIN not ready yet. The API may need more time.');
+            } else {
+              console.log('✅ Successfully retrieved processed ASIN via immediate polling!');
+            }
+          }
+        } else {
+          throw new Error(`Failed to create scan task: ${response.data?.message || 'Unknown error'}`);
+=======
+>>>>>>> f074657d851a673766a4cd9987a0c3d2f11c89c3
+        }
+      }
+      
+      // If we get here, quick polling didn't find ASIN - return processing status
+      console.log('⚡ Quick polling complete - no ASIN found yet (use Check for Updates button)');
+      
+      // Return a processing result (not an error - just needs more time)
+      return {
+        fnsku: fnsku,
+        asin: '', // No ASIN found in quick scan
+        name: `FNSKU: ${fnsku} (Processing...)`,
+        description: `Quick scan complete. API is still processing FNSKU: ${fnsku}. Use 'Check for Updates' button in 2-3 minutes.`,
+        price: 0,
+        category: 'External API',
+        condition: 'New',
+        source: 'fnskutoasin.com',
+        processing_status: 'quick_timeout', // Indicates quick scan finished, not failed
+        amazon_url: '',
+        raw_data: null,
+        image_url: '',
+        created_at: new Date().toISOString(),
+        asin_found: false
+      };
+      
+    } catch (error) {
+      console.error('❌ Error in external API lookup:', error);
+      
+      if (error.response) {
+        console.error('API Response Error:', error.response.status, error.response.data);
+      }
+      
+      throw error;
+    }
+  },
+  
+  /**
+   * Process API response data into standardized format
+   * @param {string} fnsku - Original FNSKU
+   * @param {Object} scanData - Raw scan data from API
+   * @returns {Object} - Processed product data
+   */
+  processApiResponse(fnsku, scanData) {
+    const asin = scanData.asin;
+    
+    console.log('🚀 [DEBUG] Processing API response...');
+    console.log('🚀 [DEBUG] Raw scanData:', scanData);
+    console.log('🚀 [DEBUG] Extracted ASIN:', asin);
+    
+    const productData = {
+      fnsku: fnsku,
+      asin: asin || '',
+      name: asin ? `Amazon Product (ASIN: ${asin})` : `FNSKU: ${fnsku} (No ASIN found)`,
+      description: asin ? `External API lookup found ASIN: ${asin} for FNSKU: ${fnsku}` : `External API processed FNSKU: ${fnsku} but no ASIN was found`,
+      price: 0,
+      category: 'External API',
+      condition: 'New',
+      source: 'fnskutoasin.com',
+      scan_task_id: scanData.id || '',
+      task_state: scanData.taskState || '',
+      assignment_date: scanData.assignmentDate || '',
+      amazon_url: asin ? `https://www.amazon.com/dp/${asin}` : '',
+      raw_data: scanData,
+      image_url: '',
+      created_at: new Date().toISOString(),
+      asin_found: !!asin
+    };
+    
+    console.log('🚀 [DEBUG] Final processed product data:', productData);
+    console.log('🚀 [DEBUG] Final ASIN value:', productData.asin);
+    
+    return productData;
+  }
+};
+
 // Scan task service for managing scan tasks
 export const scanTaskService = {
   /**
@@ -297,25 +684,144 @@ export const apiProductLookupService = {
 
 /**
  * Direct API call to get product lookup information
- * @param {string} code - Barcode or FNSKU to look up
+ * Now with smart code detection for ASINs vs FNSKUs and cost-effective lookups
+ * @param {string} code - Barcode, ASIN, or FNSKU to look up
  * @returns {Promise<Object|null>} - Product data or null if not found
  */
 export const getProductLookup = async (code) => {
   try {
-    // First check if we have this in our mock data
-    const { data: localData } = await mockService.getProduct(code);
-    if (localData) {
-      return localData;
+    console.log(`🔍 Starting product lookup for code: ${code}`);
+    
+    // STEP 0: Detect what type of code this is
+    const codeInfo = detectCodeType(code);
+    console.log(`🏷️ Detected code type: ${codeInfo.type} (${codeInfo.description})`);
+    
+    // Handle ASINs directly - no need for external API
+    if (codeInfo.type === 'ASIN') {
+      console.log('📋 Code is an ASIN - creating direct product data (no API charge)');
+      const asinData = generateAsinProductData(codeInfo.code);
+      
+      // Save ASIN data to local storage for consistency
+      try {
+        await mockService.createProduct(asinData);
+        console.log('✅ ASIN data saved to local storage');
+      } catch (saveError) {
+        console.warn('⚠️ Could not save ASIN data to local storage:', saveError);
+      }
+      
+      return asinData;
     }
     
-    // If not found locally, use the fetchProductByFnsku function
-    return await fetchProductByFnsku(code);
-  } catch (error) {
-    console.error('Error in getProductLookup:', error);
-    // Always try to return something useful if environment allows mock data
-    if (import.meta.env.VITE_USE_MOCK_DATA === 'true') {
-      return generateMockProductData(code);
+    // For FNSKUs and other codes, continue with the original flow
+    console.log(`📦 Processing as ${codeInfo.type}, checking local database first...`);
+    
+    // STEP 1: Check local mock data first (simulates your local database)
+    console.log('📦 Step 1: Checking local database...');
+    const { data: localData } = await mockService.getProduct(code);
+    if (localData) {
+      console.log('✅ Found in local database - no API charge!');
+      return {
+        ...localData,
+        source: 'local_database',
+        cost_status: 'no_charge',
+        code_type: codeInfo.type
+      };
     }
+    
+    console.log('❌ Not found in local database');
+    
+    // STEP 2: For FNSKUs, try external fnskutoasin.com API (this will cost money)
+    if (codeInfo.type === 'FNSKU') {
+      console.log('💰 Step 2: Trying external FNSKU API (this will be charged)...');
+      try {
+        const externalResult = await externalApiService.lookupFnsku(code);
+        console.log('🚀 [DEBUG] externalApiService.lookupFnsku returned:', externalResult);
+        console.log('🚀 [DEBUG] externalResult.asin:', externalResult?.asin);
+        
+        if (externalResult) {
+          console.log('✅ Found via external API - charged lookup');
+          
+          // Prepare data for saving to local database
+          const productToSave = {
+            fnsku: externalResult.fnsku || code,
+            asin: externalResult.asin || '',
+            name: externalResult.name || `Product ${code}`,
+            description: externalResult.description || externalResult.name || `External lookup for ${code}`,
+            price: externalResult.price || 0,
+            category: externalResult.category || 'External API',
+            sku: externalResult.fnsku || code, // Use FNSKU as SKU for consistency
+            lpn: externalResult.lpn || '', // LPN might not be available from external API
+            upc: externalResult.upc || '',
+            quantity: externalResult.quantity || 0,
+            // Metadata
+            source: 'external_api',
+            external_lookup_date: new Date().toISOString(),
+            original_lookup_code: code,
+            scan_task_id: externalResult.scan_task_id || '',
+            task_state: externalResult.task_state || '',
+            asin_found: externalResult.asin_found || false,
+            code_type: codeInfo.type
+          };
+          
+          console.log('💾 Prepared data for saving:', productToSave);
+          console.log('🚀 [DEBUG] productToSave.asin:', productToSave.asin);
+          
+          // STEP 3: Save external result to local database for future use
+          console.log('💾 Step 3: Saving to local database for future cost savings...');
+          try {
+            await mockService.createProduct(productToSave);
+            console.log('✅ Saved to local database - future lookups will be free!');
+          } catch (saveError) {
+            console.warn('⚠️ Could not save to local database:', saveError);
+          }
+          
+          const finalResult = {
+            ...externalResult,
+            source: 'external_api',
+            cost_status: 'charged',
+            code_type: codeInfo.type
+          };
+          
+          console.log('🚀 [DEBUG] Final result from getProductLookup:', finalResult);
+          console.log('🚀 [DEBUG] Final result ASIN:', finalResult.asin);
+          
+          return finalResult;
+        }
+      } catch (apiError) {
+        console.error('❌ External API failed:', apiError);
+        console.log('🔄 Falling back to mock data generation...');
+      }
+    } else {
+      console.log(`ℹ️ Skipping external API for ${codeInfo.type} (only supports FNSKUs)`);
+    }
+    
+    // STEP 4: If external API fails and we're allowed to use mock data, generate it
+    if (import.meta.env.VITE_USE_MOCK_DATA === 'true') {
+      console.log('🎭 Step 4: Generating mock data as fallback...');
+      const mockData = generateMockProductData(code);
+      mockData.code_type = codeInfo.type;
+      
+      // Save mock data to local storage for consistency
+      try {
+        await mockService.createProduct(mockData);
+      } catch (saveError) {
+        console.warn('Could not save mock data:', saveError);
+      }
+      
+      return {
+        ...mockData,
+        source: 'mock_data',
+        cost_status: 'no_charge',
+        code_type: codeInfo.type
+      };
+    }
+    
+    // STEP 5: Nothing found
+    console.log('❌ Product not found anywhere');
+    return null;
+    
+  } catch (error) {
+    console.error('❌ Error in getProductLookup:', error);
     return null;
   }
 };
@@ -454,4 +960,66 @@ const generateMockProductData = (fnsku) => {
 // Export the mock service as our API service
 export const api = mockService;
 
-export default api; 
+export default api;
+
+// Helper function to detect what type of code was scanned
+const detectCodeType = (code) => {
+  const cleanCode = code.trim().toUpperCase();
+  
+  // ASIN patterns: Usually start with B0 and are 10 characters total
+  // Examples: B08PNDD2XR, B0CHBJXG7G, B07ABC123D
+  if (/^B0[0-9A-Z]{8}$/.test(cleanCode) || /^B[0-9]{2}[0-9A-Z]{7}$/.test(cleanCode)) {
+    return {
+      type: 'ASIN',
+      code: cleanCode,
+      description: 'Amazon Standard Identification Number'
+    };
+  }
+  
+  // UPC patterns: Usually 12 digits
+  if (/^\d{12}$/.test(cleanCode)) {
+    return {
+      type: 'UPC',
+      code: cleanCode,
+      description: 'Universal Product Code'
+    };
+  }
+  
+  // EAN patterns: Usually 13 digits
+  if (/^\d{13}$/.test(cleanCode)) {
+    return {
+      type: 'EAN',
+      code: cleanCode,
+      description: 'European Article Number'
+    };
+  }
+  
+  // Everything else is treated as FNSKU
+  // FNSKUs are more variable in format: X001ABC123DEF, etc.
+  return {
+    type: 'FNSKU',
+    code: cleanCode,
+    description: 'Fulfillment Network Stock Keeping Unit'
+  };
+};
+
+// Generate product data for ASINs without API call
+const generateAsinProductData = (asin) => {
+  return {
+    fnsku: '', // ASINs don't have FNSKUs unless mapped
+    asin: asin,
+    name: `Amazon Product (ASIN: ${asin})`,
+    description: `Direct ASIN lookup for ${asin}`,
+    price: 0, // We don't have pricing data for direct ASINs
+    category: 'Amazon Product',
+    sku: asin, // Use ASIN as SKU
+    lpn: '', // ASINs don't have LPNs
+    upc: '',
+    quantity: 0,
+    source: 'asin_direct',
+    cost_status: 'no_charge',
+    amazon_url: `https://www.amazon.com/dp/${asin}`,
+    created_at: new Date().toISOString(),
+    code_type: 'ASIN'
+  };
+}; 
