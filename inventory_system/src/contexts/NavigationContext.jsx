@@ -56,6 +56,12 @@ export const NavigationProvider = ({ children }) => {
       permission: 'view_reports'
     },
     {
+      name: 'Pricing',
+      path: '/pricing',
+      icon: 'CurrencyDollarIcon',
+      permission: null
+    },
+    {
       name: 'Users',
       path: '/users',
       icon: 'UsersIcon',

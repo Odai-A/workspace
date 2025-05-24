@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { toast } from 'react-toastify';
-import { FiSave, FiPlusCircle, FiEdit, FiTrash2, FiKey, FiBell, FiSun, FiMoon } from 'react-icons/fi';
+import { FiSave, FiPlusCircle, FiEdit, FiTrash2, FiKey, FiBell, FiSun, FiMoon, FiCreditCard, FiArrowRight } from 'react-icons/fi';
 import { useAuth } from '../contexts/AuthContext';
+import { Link } from 'react-router-dom';
 
 // Toggle switch component
 const Toggle = ({ enabled, onChange, label }) => {
@@ -135,6 +136,30 @@ const Settings = () => {
     <div className="container mx-auto px-4 py-8">
       <div className="max-w-4xl mx-auto">
         <h1 className="text-2xl font-bold mb-6 text-gray-900 dark:text-white">Settings</h1>
+        
+        {/* Subscription Management - NEW SECTION */}
+        <div className="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden mb-6">
+          <div className="p-6">
+            <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4 flex items-center">
+              <FiCreditCard className="mr-2" /> 
+              Subscription Management
+            </h2>
+            
+            <div className="flex flex-col space-y-4">
+              <p className="text-gray-600 dark:text-gray-300">
+                Manage your subscription, view billing history, and update payment methods.
+              </p>
+              
+              <Link 
+                to="/settings/subscription"
+                className="inline-flex items-center text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 group w-fit"
+              >
+                Manage Subscription
+                <FiArrowRight className="ml-2 group-hover:translate-x-1 transition-transform" />
+              </Link>
+            </div>
+          </div>
+        </div>
         
         {/* App Preferences */}
         <div className="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden mb-6">
