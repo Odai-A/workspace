@@ -3,9 +3,9 @@ import axios from 'axios';
 // Shopify API configuration
 // TODO: Move these to environment variables in production
 const SHOPIFY_CONFIG = {
-  store: process.env.REACT_APP_SHOPIFY_STORE || 'your-store-name', // e.g., 'mystore' for mystore.myshopify.com
-  apiKey: process.env.REACT_APP_SHOPIFY_API_KEY || 'your-api-key',
-  password: process.env.REACT_APP_SHOPIFY_PASSWORD || 'your-password', // API password/access token
+  store: import.meta.env.VITE_SHOPIFY_STORE || 'your-store-name', // e.g., 'mystore' for mystore.myshopify.com
+  apiKey: import.meta.env.VITE_SHOPIFY_API_KEY || 'your-api-key',
+  password: import.meta.env.VITE_SHOPIFY_PASSWORD || 'your-password', // API password/access token
   apiVersion: '2023-10' // Current Shopify API version
 };
 

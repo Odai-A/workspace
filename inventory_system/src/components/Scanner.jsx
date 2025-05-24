@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useContext } from 'react';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import BarcodeReader from './BarcodeReader';
@@ -7,13 +7,16 @@ import ShopifyListing from './ShopifyListing';
 import { getProductLookup, externalApiService } from '../services/api';
 import { productLookupService as dbProductLookupService, apiCacheService } from '../services/databaseService';
 import { inventoryService } from '../config/supabaseClient';
-import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, CheckCircleIcon, CurrencyDollarIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, CheckCircleIcon, CurrencyDollarIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/outline';
 import { mockService } from '../services/mockData';
+import { useAuth } from '../contexts/AuthContext';
 
 /**
  * Scanner component for barcode scanning and product lookup
  */
 const Scanner = () => {
+  const { user } = useAuth();
+  const userId = user?.id;
   const [scannedCodes, setScannedCodes] = useState([]);
   const [productInfo, setProductInfo] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -126,61 +129,50 @@ const Scanner = () => {
   }
 
   async function lookupProductByCode(code) {
-    console.log(`🔍 Looking up product by code: ${code}`);
+    console.log(`🔍 Looking up product by code: ${code}, UserID: ${userId || 'N/A'}`);
     setLoading(true);
-<<<<<<< HEAD
-    setProductInfo(null);
-    
+    setProductInfo(null); // Clear previous product info
+    setIsApiProcessing(false); // Reset processing state
+    setLastScannedCode(code); // Track the last scanned code
+
     // Stop any ongoing auto-refresh when starting a new lookup
     if (isAutoRefreshing) {
       console.log('⏹️ Stopping auto-refresh due to new manual scan');
       stopAutoRefresh();
     }
-=======
-    setProductInfo(null); // Clear previous product info
-    setIsApiProcessing(false); // Reset processing state
-    setLastScannedCode(code); // Track the last scanned code
->>>>>>> f074657d851a673766a4cd9987a0c3d2f11c89c3
-    
+
     try {
-<<<<<<< HEAD
-      console.log(`🔍 Looking up product by code: ${code}`);
-      
-      // First try the local database (Supabase) which includes API cache check
-      let productData = await dbProductLookupService.getProductByFnsku(code);
-=======
       // First try the local database (Supabase)
       let productFromDb = await dbProductLookupService.getProductByFnsku(code);
->>>>>>> 2f47bf572121f3d9f0a272d7744e207ab23b4b85
 
-      if (!productData) {
+      if (!productFromDb) {
         console.log(`Product not found by FNSKU (${code}) in DB/Cache, trying as LPN in DB...`);
         // getProductByLpn only checks manifest_data, so its result always needs mapping if found.
         const lpnData = await dbProductLookupService.getProductByLpn(code);
         if (lpnData) {
-          productData = mapSupabaseProductToDisplay(lpnData); // mapSupabaseProductToDisplay sets source to 'local_database'
+          productFromDb = mapSupabaseProductToDisplay(lpnData); // mapSupabaseProductToDisplay sets source to 'local_database'
         }
       }
 
-      if (productData) {
+      if (productFromDb) {
         let displayProduct;
-        // If productData came from getProductByFnsku, it might already be mapped from api_cache or be raw from manifest_data
-        if (productData.source === 'api_cache' || productData.source === 'fnsku_cache') {
-          console.log('✅ Using directly from API Cache source:', productData);
-          displayProduct = productData; // Already mapped by apiCacheService.mapCacheToDisplay
+        // If productFromDb came from getProductByFnsku, it might already be mapped from api_cache or be raw from manifest_data
+        if (productFromDb.source === 'api_cache' || productFromDb.source === 'fnsku_cache') {
+          console.log('✅ Using directly from API Cache source:', productFromDb);
+          displayProduct = productFromDb; // Already mapped by apiCacheService.mapCacheToDisplay
           toast.success("✅ Found in API cache - No API charge!", {
             icon: "💚"
           });
-        } else if (productData.rawSupabase) { // It came from manifest_data via getProductByFnsku's LPN or FNSKU check, but was mapped by mapSupabaseProductToDisplay
-          console.log('✅ Mapped from local_database (manifest_data via LPN/FNSKU specific mapping pathway):', productData);
-          displayProduct = productData; // Already mapped by mapSupabaseProductToDisplay
+        } else if (productFromDb.rawSupabase) { // It came from manifest_data via getProductByFnsku's LPN or FNSKU check, but was mapped by mapSupabaseProductToDisplay
+          console.log('✅ Mapped from local_database (manifest_data via LPN/FNSKU specific mapping pathway):', productFromDb);
+          displayProduct = productFromDb; // Already mapped by mapSupabaseProductToDisplay
           toast.success("✅ Found in local database - No API charge!", {
             icon: "💚"
           });
         } else {
-          // This case implies productData is raw from manifest_data (e.g., direct return from getProductByFnsku before mapping)
-          console.log('📦 Mapping raw data from manifest_data:', productData);
-          displayProduct = mapSupabaseProductToDisplay(productData);
+          // This case implies productFromDb is raw from manifest_data (e.g., direct return from getProductByFnsku before mapping)
+          console.log('📦 Mapping raw data from manifest_data:', productFromDb);
+          displayProduct = mapSupabaseProductToDisplay(productFromDb);
           // mapSupabaseProductToDisplay sets source to 'local_database' and cost_status to 'no_charge'
           toast.success("✅ Found in local database - No API charge!", {
             icon: "💚"
@@ -189,11 +181,12 @@ const Scanner = () => {
         
         setProductInfo(displayProduct);
         
-        if (displayProduct) {
-          console.log("[Scanner.jsx] Attempting to log scan event (from DB/Cache). Code:", code, "Product Details:", displayProduct);
-          const logResult = await dbProductLookupService.logScanEvent(code, displayProduct);
-          console.log("[Scanner.jsx] Scan event log result (from DB/Cache):", logResult);
-        }
+        // Removed scan history logging to avoid database issues  
+        // if (displayProduct) {
+        //   console.log("[Scanner.jsx] Attempting to log scan event (from DB/Cache). Code:", code, "Product Details:", displayProduct);
+        //   const logResult = await dbProductLookupService.logScanEvent(code, displayProduct);
+        //   console.log("[Scanner.jsx] Scan event log result (from DB/Cache):", logResult);
+        // }
       } else {
         // Not found locally - try external API
         console.log(`Product not found in local DB/Cache by FNSKU or LPN (${code}), trying external API...`);
@@ -202,40 +195,10 @@ const Scanner = () => {
         });
         
         console.log("🚀 [DEBUG] About to call getProductLookup for:", code);
-        const apiResult = await getProductLookup(code); 
+        const apiResult = await getProductLookup(code, userId);
         console.log("🚀 [DEBUG] getProductLookup returned:", apiResult);
         
         if (apiResult) {
-<<<<<<< HEAD
-          let displayableProduct = apiResult; // Initialize with apiResult
-          let productForLogging = apiResult; // Initialize with apiResult
-          
-          if (apiResult.source === 'external_api') {
-            // Only attempt to save to cache if an ASIN was actually found by the external API
-            if (apiResult.asin && apiResult.asin_found) {
-              toast.info("⚡ ASIN found via external API. Attempting to save to cache...", { icon: "💛" });
-              try {
-                console.log('💾 Attempting to save external API result (with ASIN) to API cache...');
-                const savedToCache = await apiCacheService.saveLookup(apiResult); 
-                if (savedToCache) {
-                  console.log('✅ Successfully saved external API result to API cache:', savedToCache);
-                  displayableProduct = apiCacheService.mapCacheToDisplay(savedToCache);
-                  displayableProduct.source = 'api_cache'; 
-                  displayableProduct.cost_status = 'no_charge';
-                  productForLogging = displayableProduct;
-                  toast.success("💾 API result saved to cache! Future scans will be FREE! 🎉", { autoClose: 4000 });
-                } else {
-                  console.error('❌ Failed to save external API result to cache (ASIN was present).');
-                  toast.warn("⚠️ Product found via API, but failed to save to cache. Next scan might be charged again.", { autoClose: 5000 });
-                  // Fallback to using the original apiResult for display and logging
-                  displayableProduct.source = 'external_api'; // Keep source as external
-                  displayableProduct.cost_status = 'charged';
-                  productForLogging = displayableProduct;
-                }
-              } catch (saveError) {
-                console.error("❌ Exception saving API result to cache:", saveError);
-                toast.error("⚠️ Product found via API, but error saving to cache. Next scan might be charged again.", { autoClose: 5000 });
-=======
           console.log("🚀 [DEBUG] API result ASIN:", apiResult.asin);
           console.log("🚀 [DEBUG] API result FNSKU:", apiResult.fnsku);
           console.log("🚀 [DEBUG] API result source:", apiResult.source);
@@ -280,7 +243,6 @@ const Scanner = () => {
           // Save to API cache if it's from external API AND has a real ASIN
           try {
             if (apiResult.source === 'external_api') {
-<<<<<<< HEAD
               // ONLY SAVE TO CACHE IF WE HAVE A REAL ASIN!
               if (apiResult.asin && apiResult.asin.trim() !== '') {
                 console.log('💾 Attempting to save external API result to API cache for future cost savings...');
@@ -306,6 +268,7 @@ const Scanner = () => {
                   displayableProduct = apiResult;
                   displayableProduct.source = 'external_api';
                   displayableProduct.cost_status = 'charged';
+                  productForLogging = displayableProduct; 
                 }
               } else {
                 // ASIN is NULL or EMPTY - this means the API is still processing
@@ -323,72 +286,58 @@ const Scanner = () => {
                 }
                 
                 displayableProduct = apiResult; // Show current (null ASIN) state
-=======
-              console.log('💾 Attempting to save external API result to FNSKU cache for future cost savings...');
-              console.log('🔍 API result to save (with ASIN):', apiResult);
-              console.log('🔍 API result ASIN specifically:', apiResult.asin);
-              
-              const savedToCache = await apiCacheService.saveLookup(apiResult); 
-              
-              if (savedToCache) {
-                console.log('✅ Successfully saved external API result to FNSKU cache:', savedToCache);
-                console.log('✅ Saved cache ASIN:', savedToCache.asin);
-                
-                // Don't map from cache - keep the original external API result!
-                displayableProduct = {
-                  ...apiResult,
-                  source: 'external_api_cached', // Indicate it was saved to cache
-                  cost_status: 'charged', // But this lookup was still charged
-                  cache_saved: true // Flag that it's now cached for future
-                };
-                console.log('🚀 [DEBUG] Using original external API result with cache flag:', displayableProduct.asin);
-                
-                productForLogging = displayableProduct; 
-                
-                if (apiResult.asin) {
-                  toast.success("💾 ASIN saved to cache! Future scans of this item will be FREE! 🎉", {
-                    autoClose: 4000
-                  });
-                } else {
-                  toast.info("💾 Processing status saved to cache. Check for updates in a few minutes.", {
-                    autoClose: 4000
-                  });
-                }
-              } else {
-                console.error('❌ Failed to save external API result to FNSKU cache');
-                toast.warn("⚠️ Product found via API, but failed to save to cache. Next scan will be charged again.", {
-                  autoClose: 5000
-                });
-                // Still display the product even if save failed
-                displayableProduct = apiResult;
->>>>>>> f074657d851a673766a4cd9987a0c3d2f11c89c3
->>>>>>> 2f47bf572121f3d9f0a272d7744e207ab23b4b85
                 displayableProduct.source = 'external_api';
                 displayableProduct.cost_status = 'charged';
                 productForLogging = displayableProduct;
               }
             } else {
-<<<<<<< HEAD
-              // ASIN not found by external_api, or asin_found is false. Do not save to cache.
-              toast.warn("ℹ️ ASIN not found by external API for this new FNSKU. Not saving to cache.", { icon: "ℹ️", autoClose: 5000 });
-              // productForLogging and displayableProduct remain the original apiResult (source: 'external_api', no ASIN)
-              displayableProduct.source = 'external_api'; // Ensure source is external_api
-              displayableProduct.cost_status = 'charged'; // It was an external lookup
-              productForLogging = displayableProduct;
-=======
-              // For non-external API results, use as-is
-              displayableProduct = apiResult;
->>>>>>> 2f47bf572121f3d9f0a272d7744e207ab23b4b85
+              // For non-external API results, or if ASIN not found by external_api.
+              // Also handles cases where asin_found is false.
+              // Do not save to cache in these scenarios.
+              if (apiResult.source === 'external_api' && (!apiResult.asin || apiResult.asin.trim() === '' || !apiResult.asin_found)) {
+                 toast.warn("ℹ️ ASIN not found or not confirmed by external API for this FNSKU. Not saving to cache.", { icon: "ℹ️", autoClose: 5000 });
+              }
+              displayableProduct = apiResult; // Use the original apiResult
+              // Ensure source and cost_status are correctly set if it was an external lookup without a cache save
+              if (apiResult.source === 'external_api') {
+                displayableProduct.source = 'external_api';
+                displayableProduct.cost_status = 'charged';
+              }
+               productForLogging = displayableProduct;
             }
-          } else if (apiResult.source === 'api_cache' || apiResult.source === 'fnsku_cache') {
+          } catch (saveError) {
+                console.error("❌ Exception saving API result to cache:", saveError);
+                toast.error("⚠️ Product found via API, but error saving to cache. Next scan might be charged again.", { autoClose: 5000 });
+                // Fallback to using the original apiResult for display and logging if save fails
+                displayableProduct = apiResult;
+                if (displayableProduct) { //Ensure apiResult is not null
+                    displayableProduct.source = 'external_api'; 
+                    displayableProduct.cost_status = 'charged';
+                    productForLogging = displayableProduct;
+                }
+          }
+
+          if (apiResult.source === 'api_cache' || apiResult.source === 'fnsku_cache') {
+            // This block might be redundant if already handled by the saveToCache logic,
+            // but ensures correct state if apiResult was directly from cache.
+            displayableProduct = apiResult; // apiResult should already be mapped if from cache
             toast.success("✅ Found in API cache - No API charge!", { icon: "💚" });
-            displayableProduct.cost_status = 'no_charge';
-            productForLogging = displayableProduct; 
+            if(displayableProduct){
+                 displayableProduct.cost_status = 'no_charge';
+                 productForLogging = displayableProduct; 
+            }
           } else if (apiResult.source === 'local_database') {
+            // This case should ideally be caught by the initial productFromDb check.
+            // If somehow apiResult indicates local_database, treat as no charge.
+            displayableProduct = apiResult;
             toast.success("✅ Found in local database - No API charge!", { icon: "💚" });
-            displayableProduct.cost_status = 'no_charge';
-            productForLogging = displayableProduct;
-          } else { 
+             if(displayableProduct){
+                displayableProduct.cost_status = 'no_charge';
+                productForLogging = displayableProduct;
+             }
+          } else if (apiResult.source !== 'external_api' && apiResult.source !== 'api_cache' && apiResult.source !== 'fnsku_cache') { 
+            // Handles mock data or other non-standard sources
+            displayableProduct = apiResult;
             toast.info("📝 Using mock data or other source.", { icon: "🔵" });
             productForLogging = displayableProduct;
           }
@@ -398,11 +347,12 @@ const Scanner = () => {
           
           setProductInfo(displayableProduct);
           
-          if (productForLogging) {
-            console.log("[Scanner.jsx] Attempting to log scan event. Code:", code, "Product Details for Logging:", productForLogging);
-            const logResult = await dbProductLookupService.logScanEvent(code, productForLogging);
-            console.log("[Scanner.jsx] Scan event log result (from API path):", logResult);
-          }
+          // Removed scan history logging to avoid database issues
+          // if (productForLogging) {
+          //   console.log("[Scanner.jsx] Attempting to log scan event. Code:", code, "Product Details for Logging:", productForLogging);
+          //   const logResult = await dbProductLookupService.logScanEvent(code, productForLogging);
+          //   console.log("[Scanner.jsx] Scan event log result (from API path):", logResult);
+          // }
         } else {
           toast.error("❌ Product not found in database or via external API.", { icon: "❌" });
         }
@@ -427,7 +377,7 @@ const Scanner = () => {
     
     // Clean the input by removing extra whitespace and tab characters
     const cleanedBarcode = barcodeToScan.trim().replace(/\s+/g, '');
-    console.log("Manual scan - original:", barcodeToScan, "cleaned:", cleanedBarcode);
+    console.log("Manual scan - original:", barcodeToScan, "cleaned:", cleanedBarcode, `UserID: ${userId || 'N/A'}`);
     
     setIsManualScanning(true);
     setManualScanError(null);
@@ -450,6 +400,17 @@ const Scanner = () => {
     if (productInfo) {
       // Implement product detail view navigation here
       toast.info("View details functionality will be implemented soon");
+    }
+  };
+
+  // Handle viewing product on Amazon
+  const handleViewOnAmazon = () => {
+    if (productInfo && productInfo.asin) {
+      const amazonUrl = `https://www.amazon.com/dp/${productInfo.asin}`;
+      window.open(amazonUrl, '_blank');
+      toast.success(`🔗 Opening Amazon page for ASIN: ${productInfo.asin}`);
+    } else {
+      toast.error("No ASIN available to view on Amazon");
     }
   };
 
@@ -851,7 +812,6 @@ const Scanner = () => {
     setImportFile(null);
   };
 
-<<<<<<< HEAD
   // Auto-refresh functions
   const startAutoRefresh = (code) => {
     console.log('🔄 Starting auto-refresh for code:', code);
@@ -874,7 +834,7 @@ const Scanner = () => {
       console.log('🔄 Auto-refresh attempt for code:', code);
       try {
         // Retry the API lookup
-        const result = await getProductLookup(code);
+        const result = await getProductLookup(code, userId);
         
         if (result && result.asin && result.asin.trim() !== '') {
           console.log('✅ Auto-refresh found ASIN!', result.asin);
@@ -910,20 +870,20 @@ const Scanner = () => {
   };
   
   const stopAutoRefresh = () => {
-    console.log('⏹️ Stopping auto-refresh');
-    setIsAutoRefreshing(false);
-    setAutoRefreshCode(null);
-    setAutoRefreshCountdown(0);
-    
     if (autoRefreshIntervalRef.current) {
       clearInterval(autoRefreshIntervalRef.current);
       autoRefreshIntervalRef.current = null;
     }
-    
-    if (countdownIntervalRef.current) {
+    if (countdownIntervalRef.current) { // Clear countdown interval as well
       clearInterval(countdownIntervalRef.current);
       countdownIntervalRef.current = null;
-=======
+    }
+    setIsAutoRefreshing(false);
+    setAutoRefreshCode(null);
+    setCountdown(0); 
+    console.log('⏹️ Auto-refresh stopped.');
+  };
+
   // Add manual check function
   const handleCheckForUpdates = async () => {
     if (!lastScannedCode) {
@@ -943,608 +903,359 @@ const Scanner = () => {
       toast.error("❌ Error checking for updates");
     } finally {
       setIsCheckingDatabase(false);
->>>>>>> f074657d851a673766a4cd9987a0c3d2f11c89c3
     }
   };
 
   return (
-    <div className="container mx-auto p-4">
-      <ToastContainer position="top-right" autoClose={3000} />
-      
-      <h1 className="text-2xl font-bold mb-4">Product Scanner</h1>
-      
-      {/* Add File Import Button */}
-      <div className="mb-4 flex justify-end">
+    <div className="p-4 md:p-6 lg:p-8">
+      <ToastContainer />
+
+      {/* Top Search Bar and Import Button */}
+      <div className="mb-6 flex flex-col md:flex-row items-center justify-between gap-4">
+        <div className="flex-grow w-full md:w-auto">
+          <label htmlFor="productSearchTop" className="sr-only">Search by LPN, FNSKU, or ASIN</label>
+          <input
+            type="text"
+            name="productSearchTop"
+            id="productSearchTop"
+            className="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md p-3"
+            placeholder="Search by LPN, FNSKU, or ASIN"
+            value={searchQuery}
+            onChange={handleSearchChange} // Make sure handleSearchChange updates searchQuery state
+          />
+        </div>
+        <div className="flex items-center space-x-2 flex-shrink-0">
+          <input 
+            id="exactMatch" 
+            name="exactMatch" 
+            type="checkbox" 
+            className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+            checked={exactMatch} 
+            onChange={(e) => setExactMatch(e.target.checked)} 
+          />
+          <label htmlFor="exactMatch" className="text-sm text-gray-700">Exact Match</label>
+        </div>
         <button
+          type="button"
+          className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 whitespace-nowrap"
           onClick={() => setShowFileImportModal(true)}
-          className="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded flex items-center"
+          disabled={loading}
         >
-          <ArrowUpTrayIcon className="h-5 w-5 mr-2" />
+          <ArrowUpTrayIcon className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
           Import File
         </button>
       </div>
       
-      {/* Search Bar */}
-      <div className="mb-6 bg-white p-4 rounded-lg shadow">
-        <div className="flex items-center">
-          <div className="relative flex-1">
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={handleSearchChange}
-              placeholder="Search by LPN, FNSKU, or ASIN"
-              className="w-full p-2 border rounded-lg"
-            />
-            {searchLoading && (
-              <div className="absolute right-3 top-2">
-                <div className="animate-spin h-5 w-5 border-2 border-blue-500 rounded-full border-t-transparent"></div>
-              </div>
-            )}
-          </div>
-          <div className="ml-3 flex items-center">
-            <input
-              id="exactMatch"
-              type="checkbox"
-              checked={exactMatch}
-              onChange={() => setExactMatch(!exactMatch)}
-              className="h-4 w-4 text-blue-600"
-            />
-            <label htmlFor="exactMatch" className="ml-2 text-sm text-gray-700">
-              Exact Match
-            </label>
-          </div>
-        </div>
-        
-        {/* Search Results */}
-        {showSearchResults && searchResults.length > 0 && (
-          <div className="mt-2 max-h-60 overflow-y-auto bg-white border rounded-lg shadow-lg">
-            <ul className="divide-y divide-gray-200">
-              {searchResults.map((product) => (
-                <li
-                  key={product.id}
-                  className="p-3 hover:bg-gray-100 cursor-pointer"
-                  onClick={() => selectProduct(product)}
-                >
-                  <div className="flex justify-between">
-                    <div className="font-medium">{product.name}</div>
-                    <div className="text-sm text-gray-500">${product.price?.toFixed(2) || 'N/A'}</div>
-                  </div>
-                  <div className="text-sm text-gray-600">
-                    {product.sku || product.asin || product.fnsku}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-        
-        {showSearchResults && searchQuery.trim().length >= 2 && searchResults.length === 0 && (
-          <div className="mt-2 p-3 bg-gray-100 rounded-lg text-center text-gray-600">
-            No products found
-          </div>
-        )}
-      </div>
-      
-      {/* Scanner Interface */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div className="bg-white p-4 rounded-lg shadow">
-          <h2 className="text-xl font-bold mb-4">Barcode Scanner</h2>
-          
-          {/* Camera Scanner Section */}
-          <div className="mb-4">
-            <button
-              onClick={() => setIsCameraActive(prev => !prev)}
-              className={`w-full px-4 py-2 rounded text-white font-semibold ${isCameraActive ? 'bg-red-500 hover:bg-red-600' : 'bg-blue-500 hover:bg-blue-600'}`}
-            >
-              {isCameraActive ? 'Stop Camera Scan' : 'Start Camera Scan'}
-            </button>
-          </div>
-          {isCameraActive && (
-            <div className="border p-2 rounded-lg mb-4 bg-gray-100 min-h-[300px]">
-              <BarcodeReader
-                active={isCameraActive}
-                onDetected={handleCodeDetected}
-                onError={(err) => {
-                  console.error("BarcodeReader component error:", err);
-                  toast.error("Camera scanner error. Please ensure camera permissions are granted.");
-                  setIsCameraActive(false);
-                }}
-                showViewFinder={true}
-                className="w-full h-full"
-              />
-            </div>
-          )}
-          
-          {/* Manual Barcode Input Section */}
-          <h3 className="text-lg font-semibold mb-2 mt-6">Manual Barcode Entry</h3>
-          <div className="mb-4 flex items-center gap-2">
-            <input
-              type="text"
-              placeholder="Enter barcode manually"
-              className="border p-2 rounded flex-grow"
-              value={manualBarcode}
-              onChange={(e) => setManualBarcode(e.target.value)}
-              onKeyPress={(e) => {
-                if (e.key === 'Enter' && manualBarcode.trim()) {
-                  handleManualScan(manualBarcode);
-                }
-              }}
-              disabled={isManualScanning}
-            />
-            <button
-              onClick={() => handleManualScan(manualBarcode)}
-              className="bg-green-500 hover:bg-green-600 text-white px-4 py-2 rounded"
-              disabled={isManualScanning || !manualBarcode.trim()}
-            >
-              {isManualScanning ? 'Looking up...' : 'Lookup'}
-            </button>
-          </div>
-          
-          {/* Display area for manual scan status (optional, productInfo is primary) */}
-          {isManualScanning && <p className="text-center text-gray-600">Looking up manual barcode...</p>}
-          {/* productInfo will be displayed in the "Product Information" section */}
-
-        </div>
-      
-        <div className="bg-white p-4 rounded-lg shadow">
-          <h2 className="text-xl font-bold mb-4">Product Information</h2>
-          
-          {/* Reset Button and View Detail Button */}
-          <div className="flex justify-between mb-4">
-            <button
-              onClick={() => setProductInfo(null)}
-              className="bg-gray-300 hover:bg-gray-400 text-gray-800 px-4 py-2 rounded"
-              disabled={!productInfo || loading}
-            >
-              Reset
-            </button>
-            
-            <div className="flex gap-2">
-              {/* Check for Updates Button */}
-              {(isApiProcessing || (productInfo && !productInfo.asin && lastScannedCode)) && (
-                <button
-                  onClick={handleCheckForUpdates}
-                  className={`px-4 py-2 rounded text-white font-medium ${
-                    isCheckingDatabase 
-                      ? 'bg-gray-400 cursor-not-allowed' 
-                      : 'bg-orange-500 hover:bg-orange-600'
-                  }`}
-                  disabled={isCheckingDatabase || loading}
-                >
-                  {isCheckingDatabase ? (
-                    <>
-                      <div className="inline-block animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                      Checking...
-                    </>
-                  ) : (
-                    <>
-                      🔄 Check for Updates
-                    </>
-                  )}
-                </button>
-              )}
-              
-              {productInfo && (
-                <button
-                  onClick={handleViewDetails}
-                  className="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded"
-                >
-                  View Details
-                </button>
-              )}
-            </div>
-          </div>
-          
-          {/* Loading Indicator */}
-          {loading && (
-            <div className="flex justify-center items-center h-64">
-              <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
-            </div>
-          )}
-          
-          {/* Auto-Refresh Status */}
-          {isAutoRefreshing && (
-            <div className="mb-4 p-4 bg-blue-50 border-l-4 border-blue-500 text-blue-800 rounded">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center">
-                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-600 mr-3"></div>
-                  <div>
-                    <p className="font-medium">🔄 Auto-Refreshing: {autoRefreshCode}</p>
-                    <p className="text-sm">
-                      Checking for ASIN every 45 seconds. Next check in: {autoRefreshCountdown}s
-                    </p>
-                  </div>
-                </div>
-                <button
-                  onClick={stopAutoRefresh}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded text-sm"
-                >
-                  Stop Auto-Refresh
-                </button>
-              </div>
-            </div>
-          )}
-          
-          {/* Product Info Display */}
-          {!loading && productInfo && (
-            <div className="border p-4 rounded-lg space-y-2">
-              {/* Processing Status Alert */}
-              {isApiProcessing && (
-                <div className="mb-3 p-3 bg-amber-100 border-l-4 border-amber-500 text-amber-800 rounded">
-                  <div className="flex items-center">
-                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-amber-600 mr-3"></div>
-                    <div>
-                      <p className="font-medium">⚡ Quick Scan Complete - API Still Processing</p>
-                      <p className="text-sm">
-                        Fast scan finished in ~5 seconds. The external API is still working on finding the ASIN for this FNSKU. 
-                        This typically takes 2-3 minutes. Click "Check for Updates" when ready.
-                      </p>
-                      {processingStartTime && (
-                        <p className="text-xs mt-1">
-                          Quick scan completed: {processingStartTime.toLocaleTimeString()}
-                        </p>
-                      )}
+      {/* Search Results Dropdown (positioned relative to the search bar container) */}
+      {showSearchResults && (
+        <div className="mb-6 relative">
+            {searchResults.length > 0 ? (
+                <ul className="absolute w-full bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-y-auto z-20">
+                    {searchResults.map((product) => (
+                        <li 
+                            key={product.id || product.sku} 
+                            className="p-3 hover:bg-indigo-100 cursor-pointer text-sm"
+                            onClick={() => selectProduct(product)}
+                        >
+                            {product.name} ({product.sku || product.asin || product.fnsku})
+                        </li>
+                    ))}
+                </ul>
+            ) : (
+                searchQuery.length >=2 && !searchLoading && (
+                     <div className="absolute w-full bg-white border border-gray-300 rounded-md shadow-lg p-3 text-sm text-gray-500 z-20">
+                        No products found for "{searchQuery}".
                     </div>
-                  </div>
-                </div>
-              )}
-              
-              {/* Cost Status Indicator */}
-              {productInfo.source && (
-                <div className={`mb-3 p-2 rounded-lg flex items-center ${
-                  productInfo.source === 'local_database' || productInfo.source === 'api_cache'
-                    ? 'bg-green-100 text-green-800' 
-                    : productInfo.source === 'fnsku_cache'
-                    ? 'bg-green-100 text-green-800'
-                    : productInfo.source === 'asin_direct'
-                    ? 'bg-blue-100 text-blue-800'
-                    : productInfo.source === 'external_api'
-                    ? 'bg-yellow-100 text-yellow-800'
-                    : 'bg-blue-100 text-blue-800'
-                }`}>
-                  {productInfo.source === 'local_database' ? (
-                    <>
-                      <CheckCircleIcon className="h-5 w-5 mr-2" />
-                      <span className="font-medium">Found in local database - No API charge</span>
-                    </>
-                  ) : productInfo.source === 'api_cache' ? (
-                    <>
-                      <CheckCircleIcon className="h-5 w-5 mr-2" />
-                      <span className="font-medium">Found in FNSKU cache - No API charge (previously saved)</span>
-                    </>
-                  ) : productInfo.source === 'fnsku_cache' ? (
-                    <>
-                      <CheckCircleIcon className="h-5 w-5 mr-2" />
-                      <span className="font-medium">Found in FNSKU cache - No API charge (previously saved)</span>
-                    </>
-                  ) : productInfo.source === 'asin_direct' ? (
-                    <>
-                      <CheckCircleIcon className="h-5 w-5 mr-2" />
-                      <span className="font-medium">Direct ASIN lookup - No API charge</span>
-                    </>
-                  ) : productInfo.source === 'external_api' ? (
-                    <>
-                      <CurrencyDollarIcon className="h-5 w-5 mr-2" />
-                      <span className="font-medium">Retrieved from fnskutoasin.com API - Charged lookup</span>
-                    </>
-                  ) : (
-                    <>
-                      <ExclamationTriangleIcon className="h-5 w-5 mr-2" />
-                      <span className="font-medium">Mock data - No charge</span>
-                    </>
-                  )}
-                </div>
-              )}
-              
-              {/* Code Type Indicator */}
-              {productInfo.code_type && (
-                <div className="mb-3 p-2 bg-gray-100 rounded-lg">
-                  <span className="text-sm font-medium text-gray-700">
-                    Code Type: <span className="text-blue-600">{productInfo.code_type}</span>
-                    {productInfo.code_type === 'ASIN' && ' (Amazon Standard Identification Number)'}
-                    {productInfo.code_type === 'FNSKU' && ' (Fulfillment Network Stock Keeping Unit)'}
-                    {productInfo.code_type === 'UPC' && ' (Universal Product Code)'}
-                    {productInfo.code_type === 'EAN' && ' (European Article Number)'}
-                  </span>
-                </div>
-              )}
-              
-              <h3 className="text-lg font-bold truncate" title={productInfo.name}>{productInfo.name}</h3>
-              
-              <p className="text-sm text-gray-700">
-                <strong>LPN (X-Z ASIN):</strong> {productInfo.lpn || 'N/A'}
-              </p>
-              <p className="text-sm text-gray-700">
-                <strong>FNSKU:</strong> {productInfo.fnsku || 'N/A'}
-              </p>
-              <p className="text-sm text-gray-700">
-                <strong>ASIN (B00):</strong> {productInfo.asin || 'N/A'}
-              </p>
-              <p className="text-sm text-gray-700">
-                <strong>UPC:</strong> {productInfo.upc || 'N/A'}
-              </p>
-              <p className="text-sm text-gray-700">
-                <strong>Category:</strong> {productInfo.category || 'N/A'}
-              </p>
-              <p className="text-sm text-gray-700">
-                <strong>Quantity:</strong> {productInfo.quantity !== undefined ? productInfo.quantity : 'N/A'}
-              </p>
-              <p className="text-green-600 font-semibold text-md">
-                <strong>MSRP:</strong> ${typeof productInfo.price === 'number' ? productInfo.price.toFixed(2) : 'N/A'}
-              </p>
+                )
+            )}
+        </div>
+      )}
 
-              {/* Add View on Amazon button if ASIN is available */}
-              {productInfo.asin && (
-                <div className="mt-4">
-                  <button
-                    onClick={() => window.open(`https://www.amazon.com/dp/${productInfo.asin}`, '_blank')}
-                    className="w-full bg-yellow-500 hover:bg-yellow-600 text-black font-bold py-2 px-4 rounded flex items-center justify-center"
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Left Column: Barcode Scanner */}
+        <div className="bg-white p-6 rounded-lg shadow-md">
+          <h2 className="text-xl font-semibold mb-4 text-gray-800">Barcode Scanner</h2>
+          <button
+            type="button"
+            className="w-full mb-4 inline-flex items-center justify-center px-4 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+            onClick={() => setIsCameraActive(true)}
+            disabled={loading}
+          >
+            <ShoppingBagIcon className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
+            Start Camera Scan
+          </button>
+
+          {isCameraActive && (
+            <div className="mb-4 p-4 border rounded-md bg-gray-50">
+              <BarcodeReader onCodeDetected={handleCodeDetected} />
+              <button
+                onClick={() => setIsCameraActive(false)}
+                className="mt-3 w-full inline-flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+              >
+                Close Camera
+              </button>
+            </div>
+          )}
+
+          <div>
+            <label htmlFor="manualBarcodeEntry" className="block text-sm font-medium text-gray-700 mb-1">
+              Manual Barcode Entry
+            </label>
+            <div className="flex items-center space-x-2">
+              <input
+                type="text"
+                name="manualBarcodeEntry"
+                id="manualBarcodeEntry"
+                className="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md p-3"
+                placeholder="Enter barcode manually"
+                value={manualBarcode}
+                onChange={(e) => setManualBarcode(e.target.value)}
+                onKeyPress={(e) => { if (e.key === 'Enter') handleManualScan(manualBarcode); }}
+              />
+              <button
+                type="button"
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-500 hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 whitespace-nowrap p-3" // Ensure padding makes it look like screenshot
+                onClick={() => handleManualScan(manualBarcode)}
+                disabled={loading || isManualScanning}
+              >
+                Lookup
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Right Column: Product Information */}
+        <div className="bg-white p-6 rounded-lg shadow-md">
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-semibold text-gray-800">Product Information</h2>
+            <div>
+              <button 
+                type="button" 
+                className="mr-2 inline-flex items-center px-3 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                onClick={() => setProductInfo(null)} // Reset button
+                disabled={!productInfo || loading}
+              >
+                Reset
+              </button>
+              <button 
+                type="button" 
+                className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                onClick={handleViewDetails} // View Details button
+                disabled={!productInfo || loading}
+              >
+                View Details
+              </button>
+            </div>
+          </div>
+
+          {loading && (
+            <div className="text-center py-10">
+              <p className="text-gray-500 animate-pulse">Loading product information...</p>
+            </div>
+          )}
+
+          {!loading && !productInfo && (
+            <div className="text-center py-10 border-2 border-dashed border-gray-300 rounded-md">
+              <p className="text-gray-500">Scan a barcode, use manual lookup, or search for a product to view details.</p>
+            </div>
+          )}
+
+          {productInfo && !loading && (
+            <div>
+              {/* Auto-refreshing and API processing messages */}
+              {isAutoRefreshing && (
+                <div className="mb-3 p-3 bg-blue-50 border border-blue-200 rounded-md flex items-center justify-between">
+                    <div className="flex items-center">
+                        <CheckCircleIcon className="h-5 w-5 text-blue-500 mr-2 animate-spin" /> {/* Using CheckCircleIcon for consistency, or a spinner icon */}
+                        <p className="text-sm text-blue-700">Auto-Refreshing: {autoRefreshCode}. Next check in: {autoRefreshCountdown}s</p>
+                    </div>
+                  <button 
+                    onClick={stopAutoRefresh} 
+                    className="ml-2 px-2 py-1 text-xs font-medium text-blue-700 bg-blue-100 rounded hover:bg-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" className="w-5 h-5 mr-2" viewBox="0 0 16 16">
-                      <path d="M2.534 16c-.263 0-.44-.093-.553-.27C1.869 15.55.034 11.29.034 7.785c0-2.81.908-4.943 2.804-6.4C4.133.463 5.78-.001 7.683-.001c2.473 0 4.03.902 5.132 2.104s1.31 2.964 1.31 5.317c0 .312-.02.69-.06 1.146-.093.986-.335 2.033-.94 3.288-.513 1.073-1.18 1.986-2.004 2.727-.832.748-1.82 1.244-3.013 1.5-.3.06-.728.093-1.293.093-.613 0-1.107-.033-1.48-.093a4.59 4.59 0 0 1-.373-.066c-.68-.153-1.233-.426-1.653-.813-.6-.6-.98-1.433-.98-2.51s.413-1.913 1.026-2.486c.62-.58 1.48-.873 2.573-.873.933 0 1.68.206 2.24.62.56.413.946 1.006 1.16 1.786.04.153.06.293.06.426 0 .32-.086.58-.26.78-.173.2-.406.3-.7.3-.246 0-.466-.073-.66-.22-.193-.146-.373-.4-.54-.76-.166-.36-.36-.633-.58-.82-.22-.186-.486-.28-.793-.28-.633 0-1.173.22-1.62.66-.446.44-.67 1.013-.67 1.72 0 .613.186 1.093.56 1.44.373.346.866.52 1.48.52.446 0 .84-.086 1.18-.26.34-.173.613-.406.82-.7.206-.293.34-.646.406-1.06.066-.413.1-.866.1-1.36 0-2.006-.506-3.64-1.52-4.9-1.006-1.26-2.42-1.893-4.24-1.893-1.64 0-3.006.486-4.093 1.46-.966.86-1.45 2.233-1.45 4.112 0 3.013 1.493 6.446 2.666 7.926.12.16.18.286.18.373 0 .186-.073.28-.22.28Z"/>
-                      <path d="M12.872.62H16v2.977h-1.126V1.747h-2.002V.62Zm-1.405 0V1.747h2.002v1.85H16V.62h-4.533Z"/>
-                    </svg>
-                    View on Amazon
+                    Stop Auto-Refresh
                   </button>
                 </div>
               )}
-
-              {/* Create Marketplace Listings Button */}
-              <div className="mt-4">
-                <button
-                  onClick={handleCreateListing}
-                  className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded flex items-center justify-center"
-                >
-                  <ShoppingBagIcon className="w-5 h-5 mr-2" />
-                  Create eBay & Shopify Listings
-                </button>
-              </div>
-
-              {/* Create Shopify Listing Button */}
-              <div className="mt-3">
-                <button
-                  onClick={handleCreateShopifyListing}
-                  className="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded flex items-center justify-center"
-                >
-                  <ShoppingBagIcon className="w-5 h-5 mr-2" />
-                  🛍️ Create Shopify Listing
-                </button>
-                <p className="text-xs text-gray-500 mt-1 text-center">
-                  Auto-generates description with Amazon link
-                </p>
-              </div>
-
-              {/* Displaying productInfo.description if it was mapped and different from name, 
-                  but our current mapSupabaseProductToDisplay maps both to Supabase 'Description' column. 
-                  If 'Description' is long, the h3 title is already showing it. 
-                  You can uncomment this if you have a separate, more detailed description field. 
-              {productInfo.description && productInfo.description !== productInfo.name && (
-                <div className="mt-2">
-                  <h4 className="font-semibold text-sm">Full Description:</h4>
-                  <p className="text-gray-700 text-xs whitespace-pre-wrap">{productInfo.description}</p>
+              {isApiProcessing && !isAutoRefreshing && (
+                <div className="mb-3 p-3 bg-yellow-50 border border-yellow-300 rounded-md">
+                    <p className="text-sm text-yellow-700">API is processing FNSKU: {lastScannedCode}. Use 'Check for Updates' or wait.</p>
+                     <button
+                        onClick={handleCheckForUpdates}
+                        disabled={isCheckingDatabase}
+                        className="mt-1 inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-yellow-500 hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-400"
+                    >
+                        {isCheckingDatabase ? 'Checking...' : 'Check for Updates'}
+                    </button>
                 </div>
-              )} 
-              */}
+              )}
+               {(productInfo.source === 'fnskutoasin.com' || productInfo.cost_status === 'charged') && (
+                <div className="mb-3 p-3 bg-yellow-100 border border-yellow-400 rounded-md text-sm text-yellow-800 flex items-center">
+                  <CurrencyDollarIcon className="h-5 w-5 text-yellow-600 mr-2" />
+                  Retrieved from fnskutoasin.com API - Charged lookup
+                </div>
+              )}
+              <div className="mb-2 p-2 bg-gray-50 border border-gray-200 rounded-md">
+                  <span className="text-xs font-medium text-gray-600">Code Type: {productInfo.code_type || 'N/A'} ({productInfo.code_type === 'FNSKU' ? 'Fulfillment Network Stock Keeping Unit' : productInfo.code_type})</span>
+              </div>
+
+              <h3 className="text-lg font-bold text-gray-900 mb-1">{productInfo.name || 'N/A'}</h3>
+              <p className="text-sm text-gray-600 mb-1">FNSKU: {productInfo.fnsku || 'N/A'} {productInfo.asin_found === false && productInfo.source ==='fnskutoasin.com' ? '(No ASIN found)' : ''}</p>
               
-              {/* Placeholder for image if you map an image_url in productInfo
-              {productInfo.image_url && (
-                <div className="mt-4 flex justify-center">
-                  <img 
-                    src={productInfo.image_url} 
-                    alt={productInfo.name} 
-                    className="max-h-48 object-contain rounded"
-                  />
-                </div>
-              )} 
-              */}
-            </div>
-          )}
-          
-          {!loading && !productInfo && (
-            <div className="border p-4 rounded-lg text-center text-gray-500">
-              <p>Scan a barcode, use manual lookup, or search for a product to view details.</p>
+              <div className="text-sm space-y-0.5 text-gray-700 mb-3">
+                <p>LPN (X-Z ASIN): {productInfo.lpn || 'N/A'}</p>
+                <p>FNSKU: {productInfo.fnsku || 'N/A'}</p> {/* Repeated from above for specific layout, can be removed if redundant */}
+                <p>ASIN (B00): {productInfo.asin || 'N/A'}</p>
+                <p>UPC: {productInfo.upc || 'N/A'}</p>
+                <p>Category: {productInfo.category || 'N/A'}</p>
+                <p>Quantity: {productInfo.quantity || 'N/A'}</p>
+                <p>MSRP: <span className="font-semibold text-green-600">${productInfo.price != null ? parseFloat(productInfo.price).toFixed(2) : '0.00'}</span></p>
+              </div>
+
+              <button
+                type="button"
+                className="w-full mt-3 inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
+                onClick={handleViewOnAmazon}
+                disabled={loading || !productInfo.asin}
+              >
+                <ArrowTopRightOnSquareIcon className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
+                View on Amazon
+              </button>
             </div>
           )}
         </div>
       </div>
-      
-      {/* Scanned Codes History */}
-      <div className="mt-6 bg-white p-4 rounded-lg shadow">
-        <h2 className="text-xl font-bold mb-4">Recent Scans</h2>
-        
+
+      {/* Bottom Section: Recent Scans */}
+      <div className="mt-6 bg-white p-6 rounded-lg shadow-md">
+        <h2 className="text-xl font-semibold mb-4 text-gray-800">Recent Scans</h2>
         {scannedCodes.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Code</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Time</th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Action</th>
-                </tr>
-              </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
-                {scannedCodes.map((item, index) => (
-                  <tr key={index}>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm font-medium text-gray-900">{item.code}</div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="text-sm text-gray-500">
-                        {new Date(item.timestamp).toLocaleTimeString()}
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                      <button
-                        onClick={() => lookupProductByCode(item.code)}
-                        className="text-blue-600 hover:text-blue-900"
-                      >
-                        Lookup
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <ul className="divide-y divide-gray-200 max-h-60 overflow-y-auto">
+            {scannedCodes.map((item, index) => (
+              <li key={index} className="py-3 flex justify-between items-center text-sm">
+                <span className="font-mono text-gray-700">{item.code}</span>
+                <span className="capitalize text-gray-600">{item.type}</span>
+                <span className="text-gray-500">{new Date(item.timestamp).toLocaleString()}</span>
+              </li>
+            ))}
+          </ul>
         ) : (
-          <p className="text-gray-500 text-center">No recent scans</p>
+          <p className="text-center text-gray-500 py-4">No recent scans.</p>
         )}
       </div>
-      
-      {/* File Import Modal */}
+
+      {/* Modals are kept the same as previous version */}
+      {showMarketplaceListing && productInfo && (
+        <MarketplaceListing 
+          product={productInfo} 
+          onClose={handleCloseListing} 
+          onSuccess={handleListingSuccess} 
+        />
+      )}
+      {showShopifyListing && productInfo && (
+         <ShopifyListing
+          productData={productInfo}
+          onClose={handleCloseShopifyListing}
+          onSuccess={handleShopifySuccess}
+        />
+      )}
       {showFileImportModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg shadow-xl p-6 w-full max-w-2xl">
+        <div className="fixed inset-0 flex items-center justify-center z-50 bg-black bg-opacity-50 p-4">
+          <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-lg">
             <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-bold">Import File</h2>
-              <button 
-                className="text-gray-500 hover:text-gray-700"
-                onClick={() => setShowFileImportModal(false)}
-              >
+              <h2 className="text-xl font-semibold">Import File</h2>
+              <button onClick={() => setShowFileImportModal(false)} className="text-gray-500 hover:text-gray-700">
                 <XMarkIcon className="h-6 w-6" />
               </button>
             </div>
-            
-            {/* Import Type Selection */}
             <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">Import Type</label>
-              <div className="flex space-x-4">
-                <button
-                  className={`px-4 py-2 rounded ${fileImportType === 'products' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                  onClick={() => handleImportTypeChange('products')}
-                >
-                  Products
-                </button>
-                <button
-                  className={`px-4 py-2 rounded ${fileImportType === 'inventory' ? 'bg-blue-500 text-white' : 'bg-gray-200 text-gray-700'}`}
-                  onClick={() => handleImportTypeChange('inventory')}
-                >
-                  Inventory
-                </button>
-              </div>
-              
-              <p className="mt-2 text-sm text-gray-500">
-                {fileImportType === 'products' 
-                  ? 'Import product information from a CSV or Excel file.' 
-                  : 'Import inventory quantities and locations from a CSV or Excel file.'}
-              </p>
+              <label htmlFor="fileImportType" className="block text-sm font-medium text-gray-700 mb-1">
+                Import Type
+              </label>
+              <select
+                id="fileImportType"
+                name="fileImportType"
+                className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
+                value={fileImportType}
+                onChange={(e) => handleImportTypeChange(e.target.value)}
+              >
+                <option value="products">Products</option>
+                <option value="inventory">Inventory</option>
+              </select>
             </div>
-            
-            {/* File Input */}
             <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Select File (CSV)
+              <label htmlFor="importFile" className="block text-sm font-medium text-gray-700 mb-1">
+                Choose CSV File
               </label>
               <input
                 type="file"
-                accept=".csv"
-                className="w-full p-2 border rounded"
-                onChange={handleFileSelect}
+                id="importFile"
+                name="importFile"
+                className="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100"
                 ref={fileInputRef}
-                disabled={importLoading}
+                onChange={handleFileSelect}
+                accept=".csv"
               />
-              <p className="mt-1 text-sm text-gray-500">
-                Only CSV files are supported. For Excel files, save as CSV first.
-              </p>
             </div>
-            
-            {/* Preview */}
-            {importPreview.length > 0 && (
+            {importLoading && (
               <div className="mb-4">
-                <h3 className="font-medium mb-2">Preview (First 5 rows)</h3>
-                <div className="overflow-x-auto max-h-64 overflow-y-auto border rounded">
+                <p className="text-sm text-gray-500">Processing file: {importProgress} / {importTotal}</p>
+                <div className="w-full bg-gray-200 rounded-full h-2.5 dark:bg-gray-700 mt-1">
+                    <div className="bg-indigo-600 h-2.5 rounded-full" style={{ width: `${(importTotal > 0 ? (importProgress / importTotal) * 100 : 0)}%` }}></div>
+                </div>
+              </div>
+            )}
+            {importPreview.length > 0 && !importLoading && (
+              <div className="mb-4">
+                <h3 className="text-md font-semibold mb-2">Import Preview (First {importPreview.length} rows)</h3>
+                <div className="overflow-x-auto text-xs border rounded-md">
                   <table className="min-w-full divide-y divide-gray-200">
                     <thead className="bg-gray-50">
                       <tr>
-                        {Object.keys(importPreview[0]).map((header, index) => (
-                          <th 
-                            key={index}
-                            className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
-                          >
-                            {header}
-                          </th>
+                        {Object.keys(importPreview[0] || {}).map(header => (
+                          <th key={header} className="px-3 py-2 text-left font-medium text-gray-500 uppercase tracking-wider">{header}</th>
                         ))}
                       </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
-                      {importPreview.map((row, rowIndex) => (
-                        <tr key={rowIndex}>
-                          {Object.values(row).map((cell, cellIndex) => (
-                            <td 
-                              key={cellIndex}
-                              className="px-3 py-2 whitespace-nowrap text-sm text-gray-900"
-                            >
-                              {cell || '-'}
-                            </td>
+                      {importPreview.map((item, index) => (
+                        <tr key={index}>
+                          {Object.values(item).map((value, i) => (
+                            <td key={i} className="px-3 py-2 whitespace-nowrap">{String(value).substring(0,30)}{String(value).length > 30 ? '...' : ''}</td>
                           ))}
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 </div>
-                <p className="text-sm text-gray-500 mt-2">
-                  Total rows to import: {importTotal}
-                </p>
               </div>
             )}
-            
-            {/* Import Progress */}
-            {importLoading && importTotal > 0 && (
-              <div className="mb-4">
-                <div className="flex justify-between mb-1">
-                  <span className="text-sm font-medium text-gray-700">Progress</span>
-                  <span className="text-sm font-medium text-gray-700">
-                    {Math.round((importProgress / importTotal) * 100)}%
-                  </span>
-                </div>
-                <div className="w-full bg-gray-200 rounded-full h-2.5">
-                  <div 
-                    className="bg-blue-600 h-2.5 rounded-full" 
-                    style={{ width: `${(importProgress / importTotal) * 100}%` }}
-                  ></div>
-                </div>
-                <p className="text-sm text-gray-500 mt-1">
-                  Processed {importProgress} of {importTotal} items
-                </p>
-              </div>
-            )}
-            
-            {/* Action Buttons */}
-            <div className="flex justify-end space-x-3 mt-6">
+            <div className="flex justify-end space-x-3">
               <button
-                className="px-4 py-2 bg-gray-300 hover:bg-gray-400 rounded"
-                onClick={() => setShowFileImportModal(false)}
+                type="button"
+                className="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                onClick={() => {
+                  setShowFileImportModal(false);
+                  setImportFile(null);
+                  if(fileInputRef.current) fileInputRef.current.value = '';
+                  setImportPreview([]);
+                }}
                 disabled={importLoading}
               >
                 Cancel
               </button>
               <button
-                className="px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded disabled:bg-blue-300"
+                type="button"
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                 onClick={processFileImport}
-                disabled={!importFile || importLoading}
+                disabled={!importFile || importLoading || importPreview.length === 0}
               >
-                {importLoading ? 'Importing...' : 'Import File'}
+                {importLoading ? 'Importing...' : 'Import Selected File'}
               </button>
             </div>
           </div>
         </div>
       )}
-
-      {/* Marketplace Listing Modal */}
-      <MarketplaceListing
-        productData={productInfo}
-        isVisible={showMarketplaceListing}
-        onClose={handleCloseListing}
-        onSuccess={handleListingSuccess}
-      />
-
-      {/* Shopify Listing Modal */}
-      <ShopifyListing
-        productData={productInfo}
-        isVisible={showShopifyListing}
-        onClose={handleCloseShopifyListing}
-        onSuccess={handleShopifySuccess}
-      />
     </div>
   );
 };
