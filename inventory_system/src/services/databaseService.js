@@ -508,7 +508,7 @@ export const productLookupService = {
       
       if (productDetails) {
         // If this came from API cache, don't try to link to manifest_data
-        if (productDetails.source === 'api_cache' || productDetails.rawCache) {
+        if (productDetails.source === 'api_cache' || productDetails.source === 'fnsku_cache' || productDetails.rawCache) {
           manifestDataId = null; // Don't link to manifest_data for API cache entries
           productDescription = productDetails.name || productDetails.description;
         } else if (productDetails.rawSupabase && productDetails.rawSupabase.id) {
