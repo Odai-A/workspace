@@ -21,6 +21,10 @@ import Users from './pages/Users';
 // import ScanTasks from './pages/ScanTasks'; // REMOVED
 // import ScanTaskDetail from './pages/ScanTaskDetail'; // REMOVED
 import ProductImport from './pages/ProductImport';
+import PricingPage from './pages/PricingPage';
+import CustomerDashboardPage from './pages/CustomerDashboardPage';
+import SuccessPage from './pages/SuccessPage';
+import CancelPage from './pages/CancelPage';
 
 // Components
 import Layout from './components/layout/Layout';
@@ -57,6 +61,9 @@ function App() {
             {/* Public routes */}
             <Route path="/login" element={!isAuthenticated ? <Login /> : <Navigate to="/dashboard" replace />} />
             <Route path="/register" element={!isAuthenticated ? <Register /> : <Navigate to="/dashboard" replace />} />
+            <Route path="/pricing" element={<PricingPage />} />
+            <Route path="/checkout-success" element={<SuccessPage />} />
+            <Route path="/checkout-cancel" element={<CancelPage />} />
             
             {/* Protected routes */}
             <Route 
@@ -69,6 +76,7 @@ function App() {
               <Route path="reports" element={<Reports />} />
               <Route path="scanner" element={<Scanner />} />
               <Route path="settings" element={<Settings />} />
+              <Route path="settings/subscription" element={<CustomerDashboardPage />} />
               <Route path="profile" element={<Profile />} />
               <Route path="users" element={<Users />} />
               {/* <Route path="scan-tasks" element={<ScanTasks />} /> */}
