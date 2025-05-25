@@ -25,6 +25,7 @@ import PricingPage from './pages/PricingPage';
 import CustomerDashboardPage from './pages/CustomerDashboardPage';
 import SuccessPage from './pages/SuccessPage';
 import CancelPage from './pages/CancelPage';
+import EbayListingsPage from './pages/EbayListingsPage';
 
 // Components
 import Layout from './components/layout/Layout';
@@ -75,6 +76,7 @@ function App() {
               <Route path="inventory" element={<Inventory />} />
               <Route path="reports" element={<Reports />} />
               <Route path="scanner" element={<Scanner />} />
+              <Route path="ebay" element={<EbayListingsPage />} />
               <Route path="settings" element={<Settings />} />
               <Route path="settings/subscription" element={<CustomerDashboardPage />} />
               <Route path="profile" element={<Profile />} />

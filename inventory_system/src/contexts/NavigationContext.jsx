@@ -50,6 +50,12 @@ export const NavigationProvider = ({ children }) => {
       permission: 'import_products'
     },
     {
+      name: 'eBay',
+      path: '/ebay',
+      icon: 'TagIcon',
+      permission: null
+    },
+    {
       name: 'Reports',
       path: '/reports',
       icon: 'ChartBarIcon',

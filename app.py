@@ -1,95 +1,85 @@
 import os
 import pandas as pd
-<<<<<<< HEAD
-=======
 import requests
 import json
 import base64
->>>>>>> c50ba32bc7ce0bd4ad0a31e0ab8402b70b945444
 from flask import Flask, request, render_template, redirect, url_for, flash, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 import stripe
 from supabase import create_client, Client
 import logging # For better logging
+from decimal import Decimal
+from datetime import datetime
 
 # Very verbose debug to see what's happening
 print("Current directory:", os.getcwd())
-print("Env file exists:", os.path.exists('.env'))
-print("Loading dotenv...")
-load_dotenv(verbose=True)  # This will print debug info
-print("Loaded environment variables:")
+
+# Explicitly find and load .env from the current working directory
+dotenv_path = find_dotenv(filename='.env', raise_error_if_not_found=False, usecwd=True)
+print(f"Attempting to load .env from: {dotenv_path if dotenv_path else 'Not found by find_dotenv in CWD.'}")
+
+if dotenv_path:
+    loaded_successfully = load_dotenv(dotenv_path=dotenv_path, verbose=True, override=True)
+    print(f".env file loaded from '{dotenv_path}': {loaded_successfully}")
+else:
+    # Fallback to default search if find_dotenv with usecwd=True specifically fails
+    # This might indicate .env is not in CWD but possibly a parent dir, or another issue.
+    print("find_dotenv did not locate .env in current working directory. Attempting default load_dotenv() search.")
+    default_loaded = load_dotenv(verbose=True, override=True)
+    print(f"Default load_dotenv() result: {default_loaded}")
+
+print("Loaded environment variables (after explicit/default load attempt):")
+print("DATABASE_URL:", os.environ.get('DATABASE_URL'))
 print("SUPABASE_URL:", os.environ.get('SUPABASE_URL'))
 print("SUPABASE_KEY:", os.environ.get('SUPABASE_KEY'))
 print("SUPABASE_SERVICE_KEY:", os.environ.get('SUPABASE_SERVICE_KEY'))
+print("EBAY_CLIENT_ID:", os.environ.get('EBAY_CLIENT_ID'))
+print("EBAY_CLIENT_SECRET:", os.environ.get('EBAY_CLIENT_SECRET'))
 
 # Load environment variables from .env file
-load_dotenv()
+# load_dotenv() # Already called with verbose=True above, this one is redundant
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-<<<<<<< HEAD
 
 # Enable CORS - important for allowing the React frontend to call your API
 CORS(app, resources={r"/api/*": {"origins": "*"}})
-=======
 
-# Try to use Supabase, but fall back to local SQLite for testing
-try:
-    # Check if we can resolve the Supabase hostname first
-    import socket
-    socket.gethostbyname('db.jjtdvdbfbsdcoyehubmx.supabase.co')
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:Od_pugilist5243@db.jjtdvdbfbsdcoyehubmx.supabase.co:5432/postgres'
-    print("✅ Using Supabase database")
-except (socket.gaierror, Exception) as e:
-    # Fall back to local SQLite for testing
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///local_inventory.db'
-    print("⚠️  Supabase unavailable, using local SQLite database for testing")
-    print(f"   Network error: {e}")
+# --- Flask App Configuration ---
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24))
 
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-# Only use pool_pre_ping for PostgreSQL
-if 'postgresql' in app.config['SQLALCHEMY_DATABASE_URI']:
+# --- Database Configuration (SQLAlchemy) ---
+# This is the single, conditional initialization block for SQLAlchemy's db instance.
+DATABASE_URL = os.environ.get('DATABASE_URL')
+db = None # Initialize db as None by default
+if DATABASE_URL:
+    app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
+    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {"pool_pre_ping": True}
-app.config['SECRET_KEY'] = os.urandom(24) # For flash messages
-
-# Enable CORS for all domains and routes
-CORS(app)
+    try:
+        db = SQLAlchemy(app) # Initialize db instance here if DATABASE_URL is set
+        logger.info("SQLAlchemy initialized with DATABASE_URL.")
+    except Exception as e_sql:
+        logger.error(f"SQLAlchemy initialization failed even with DATABASE_URL set: {e_sql}")
+        db = None # Ensure db is None if initialization fails
+else:
+    logger.warning("DATABASE_URL not found in .env. SQLAlchemy (db object) will be None. SQLAlchemy features will be unavailable.")
+    # db is already None, so no action needed here other than the warning.
 
 # eBay API Configuration
 EBAY_CLIENT_ID = os.getenv('EBAY_CLIENT_ID')
 EBAY_CLIENT_SECRET = os.getenv('EBAY_CLIENT_SECRET')
 EBAY_SANDBOX = os.getenv('EBAY_SANDBOX', 'true').lower() == 'true'
-EBAY_REDIRECT_URI = os.getenv('EBAY_REDIRECT_URI')
+EBAY_REDIRECT_URI = os.environ.get('EBAY_REDIRECT_URI')
 
 # Shopify API Configuration
 SHOPIFY_SHOP_DOMAIN = os.getenv('SHOPIFY_SHOP_DOMAIN')  # e.g., 'your-shop.myshopify.com'
 SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
-
-db = SQLAlchemy(app)
->>>>>>> c50ba32bc7ce0bd4ad0a31e0ab8402b70b945444
-
-# --- Flask App Configuration ---
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24))
-
-# --- Database Configuration (SQLAlchemy - For non-tenant or legacy tables if any) ---
-# If all your data (products, scan_history, tenants) is now in Supabase and managed
-# via the Supabase client + RLS, you might not need SQLAlchemy for these specific tables.
-# Keep this section if you have other tables managed by Flask-SQLAlchemy.
-# Ensure DATABASE_URL in your .env points to your Supabase Postgres instance if using.
-DATABASE_URL = os.environ.get('DATABASE_URL')
-if DATABASE_URL:
-    app.config['SQLALCHEMY_DATABASE_URI'] = DATABASE_URL
-    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {"pool_pre_ping": True}
-    db = SQLAlchemy(app)
-else:
-    logger.warning("DATABASE_URL not found in .env, SQLAlchemy not initialized for a primary DB.")
-    db = None # Explicitly set to None if not configured
 
 # --- Stripe Configuration ---
 STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
@@ -101,37 +91,13 @@ STRIPE_STARTER_PLAN_PRICE_ID = os.environ.get('STRIPE_STARTER_PLAN_PRICE_ID')
 STRIPE_PRO_PLAN_PRICE_ID = os.environ.get('STRIPE_PRO_PLAN_PRICE_ID')
 STRIPE_ENTERPRISE_PLAN_PRICE_ID = os.environ.get('STRIPE_ENTERPRISE_PLAN_PRICE_ID')
 
-<<<<<<< HEAD
 if not STRIPE_API_KEY or not STRIPE_WEBHOOK_SECRET:
     logger.error("Stripe API Key or Webhook Secret not found in .env. Stripe integration will fail.")
-stripe.api_key = STRIPE_API_KEY
-=======
-@app.before_request
-def create_tables_if_not_exist():
-    # This will create tables based on SQLAlchemy models if they don't exist.
-    # In a production environment, you might prefer to use migrations (e.g., Alembic).
-    with app.app_context(): # Ensure we are within application context
-        db.create_all()
-        
-        # Add sample data for testing if using local SQLite
-        if 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']:
-            # Check if we already have data
-            if Product.query.count() == 0:
-                print("📦 Adding sample data for testing...")
-                sample_products = [
-                    Product(lpn='TEST-001', asin='B08XYZ123', fnsku='X001-ABC-123', title='Sample Product 1', msrp=29.99),
-                    Product(lpn='TEST-002', asin='B08XYZ456', fnsku='X002-DEF-456', title='Sample Product 2', msrp=19.99),
-                    Product(lpn='TEST-003', asin='B08XYZ789', fnsku='X003-GHI-789', title='Sample Product 3', msrp=39.99),
-                ]
-                for product in sample_products:
-                    db.session.add(product)
-                try:
-                    db.session.commit()
-                    print("✅ Sample data added successfully")
-                except Exception as e:
-                    db.session.rollback()
-                    print(f"❌ Error adding sample data: {e}")
->>>>>>> c50ba32bc7ce0bd4ad0a31e0ab8402b70b945444
+# Only set stripe.api_key if it's actually available
+if STRIPE_API_KEY:
+    stripe.api_key = STRIPE_API_KEY
+else:
+    logger.warning("STRIPE_API_KEY is not set. Stripe functionality will be disabled.")
 
 # --- Supabase Configuration ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -663,299 +629,146 @@ def inventory_list():
         logger.error(f"Error fetching inventory for tenant {tenant_id}: {e}")
         return jsonify({"error": f"Error fetching inventory: {str(e)}"}), 500
 
-# --- Other existing routes (upload_csv, search, scan_barcode, dashboard, history) ---
-# You will need to refactor these routes similar to the /inventory example:
-# 1. Call `get_ids_from_request()` to get `user_id` and `tenant_id`.
-# 2. Implement authorization checks (is user authenticated? is tenant_id present? is subscription active?).
-# 3. Use the RLS-aware `supabase` client for all data interactions with tenant-specific tables.
-#    The RLS policies on your Supabase tables will handle the data isolation.
-#
-# Example placeholder for upload:
-@app.route('/upload', methods=['GET', 'POST'])
-def upload_csv():
+# ... (rest of the code) ...
+
+@app.route('/api/barcode_scan', methods=['POST'])
+def handle_barcode_scan():
     user_id, tenant_id = get_ids_from_request()
     if not tenant_id:
-        # For GET, redirect to login/pricing. For POST, return 403.
-        if request.method == 'POST':
-            return jsonify({"error": "Access denied. Tenant not identified."}), 403
-        else: # GET request
-            # Assuming you have a frontend route for this, or redirect to login
-            return render_template('upload.html', error_message="Access Denied. Please log in.")
+        return jsonify({"error": "Unauthorized or tenant ID missing"}), 401
+    if not supabase_admin:
+        return jsonify({"error": "Supabase admin client not configured."}), 500
 
+    data = request.get_json()
+    barcode = data.get('barcode')
 
-    # TODO: Check tenant subscription status before allowing upload
-    # tenant_q = supabase_admin.table('tenants').select('subscription_status').eq('id', tenant_id).single().execute()
-    # if not tenant_q.data or tenant_q.data['subscription_status'] not in ['active', 'trialing']:
-    #     return jsonify({"error": "Access denied. Subscription is not active."}), 403
+    if not barcode:
+        return jsonify({"error": "Barcode is required"}), 400
 
-
-    if request.method == 'POST':
-        if 'csvfile' not in request.files:
-            flash('No file part', 'danger') # flash might not be visible if frontend is pure React
-            return jsonify({"error": "No file part in request"}), 400
-        
-        file = request.files['csvfile']
-        if file.filename == '':
-            flash('No selected file', 'danger')
-            return jsonify({"error": "No file selected"}), 400
-
-        if file and file.filename.endswith('.csv'):
-            try:
-                # Read CSV, for each row, add tenant_id before inserting
-                # df = pd.read_csv(file, dtype=str, encoding='utf-8') or 'latin1'
-                # items_to_insert = []
-                # for _, row in df.iterrows():
-                #    item = { ... map columns ... , "tenant_id": tenant_id }
-                #    items_to_insert.append(item)
-                # if items_to_insert:
-                #    insert_res = supabase.table('manifest_data').insert(items_to_insert).execute()
-                #    if insert_res.error: raise Exception(insert_res.error.message)
-                # flash('CSV processed and data added for your tenant.', 'success')
-                logger.info(f"CSV upload attempt by tenant {tenant_id}. Processing logic to be implemented fully.")
-                return jsonify({"message": "CSV processing logic needs full implementation with tenant_id."}), 200 # Placeholder
-            except Exception as e:
-                logger.error(f"Error processing CSV for tenant {tenant_id}: {e}")
-                # db.session.rollback() # If using SQLAlchemy transactions
-                flash(f'Error processing CSV: {str(e)}', 'danger')
-                return jsonify({"error": f"Error processing CSV: {str(e)}"}), 500
-        else:
-            flash('Invalid file type. Please upload a CSV file.', 'danger')
-            return jsonify({"error": "Invalid file type. Must be CSV."}), 400
-
-    # For GET request, render the upload form (if still using Flask templates for this)
-    # Or this endpoint might be API-only, and React handles the form.
-    return render_template('upload.html')
-
-<<<<<<< HEAD
-=======
-@app.route('/search', methods=['GET'])
-def search():
-    query = request.args.get('query', '').strip()
-    product = None
-    search_performed = bool(query) # True if query is not empty
-
-    if query:
-        # Search by LPN, ASIN, or FNSKU
-        product = Product.query.filter(
-            (Product.lpn == query) |
-            (Product.asin == query) |
-            (Product.fnsku == query)
-        ).first()
-
-        if product:
-            # Log this successful search to history
-            try:
-                history_entry = ScanHistory(product_id=product.id)
-                db.session.add(history_entry)
-                db.session.commit()
-            except Exception as e:
-                db.session.rollback()
-                print(f"Error logging scan history: {e}") # Log to server console
-    
-    return render_template('search.html', product=product, search_performed=search_performed)
-
-@app.route('/inventory')
-def inventory():
-    search_query = request.args.get('search_query', '').strip()
-    page = request.args.get('page', 1, type=int) # Get current page number, default to 1
-    per_page = 25  # Number of items per page
-
-    query = Product.query
-
-    if search_query:
-        search_term = f"%{search_query}%"
-        query = query.filter(
-            Product.lpn.ilike(search_term) |
-            Product.title.ilike(search_term) |
-            Product.asin.ilike(search_term) |
-            Product.fnsku.ilike(search_term)
-        )
-    
-    # Use paginate instead of .all()
-    pagination = query.order_by(Product.title).paginate(page=page, per_page=per_page, error_out=False)
-    products_on_page = pagination.items
-    
-    return render_template('inventory.html', 
-                           products=products_on_page, 
-                           pagination=pagination, 
-                           search_query=search_query)
-
-@app.route('/scan')
-def scan_barcode():
-    return render_template('scan.html')
-
-@app.route('/external-scan')
-def external_scan():
-    return render_template('external_scan.html')
-
-@app.route('/api/external-lookup', methods=['POST'])
-def external_lookup():
-    """Lookup product data from external API using FNSKU"""
     try:
-        data = request.get_json()
-        fnsku = data.get('fnsku', '').strip()
-        
-        if not fnsku:
-            return jsonify({
-                "success": False,
-                "message": "FNSKU is required"
-            }), 400
-        
-        # FIRST: Check local database for FNSKU
-        local_product = Product.query.filter_by(fnsku=fnsku).first()
-        
-        if local_product:
-            # Found in local database - return this data without API call
-            product_data = {
-                "success": True,
-                "source": "local_database",
-                "asin": local_product.asin or '',
-                "title": local_product.title or '',
-                "price": str(local_product.msrp) if local_product.msrp else '',
-                "fnsku": fnsku,
-                "lpn": local_product.lpn,
-                "image_url": '',  # Local database doesn't have images
-                "amazon_url": f"https://www.amazon.com/dp/{local_product.asin}" if local_product.asin else '',
-                "message": "Found in local inventory database"
-            }
-            
-            return jsonify(product_data)
-        
-        # NOT FOUND LOCALLY: Proceed with external API call
-        # Using the provided fnskutoasin.com API
-        BASE_URL = "https://ato.fnskutoasin.com"
-        API_KEY = "20a98a6a-437e-497c-b64c-ec97ec2fbc19"
-        
-        # Try to get existing scan task by barcode first
-        lookup_url = f"{BASE_URL}/api/v1/ScanTask/GetByBarCode"
-        
-        headers = {
-            'apiKey': API_KEY,
-            'Content-Type': 'application/json'
-        }
-        
-        # Try to lookup existing scan for this barcode
-        params = {'BarCode': fnsku}
-        response = requests.get(lookup_url, headers=headers, params=params, timeout=30)
-        
-        scan_data = None
-        if response.status_code == 200:
-            lookup_result = response.json()
-            if lookup_result.get('succeeded') and lookup_result.get('data'):
-                scan_data = lookup_result['data']
-        
-        # If no existing scan found, create a new scan task
-        if not scan_data:
-            add_scan_url = f"{BASE_URL}/api/v1/ScanTask/AddOrGet"
-            
-            payload = {
-                "barCode": fnsku,
-                "callbackUrl": ""  # Optional callback URL
-            }
-            
-            response = requests.post(add_scan_url, headers=headers, json=payload, timeout=30)
-            
-            if response.status_code == 200:
-                add_result = response.json()
-                if add_result.get('succeeded') and add_result.get('data'):
-                    scan_data = add_result['data']
-                else:
-                    return jsonify({
-                        "success": False,
-                        "message": f"Failed to create scan task: {add_result.get('message', 'Unknown error')}"
-                    }), 400
-            else:
-                return jsonify({
-                    "success": False,
-                    "message": f"External API error: {response.status_code} - {response.text}"
-                }), response.status_code
-        
-        # Process the scan data
-        if scan_data:
-            # Extract relevant data from the API response
-            asin = scan_data.get('asin', '')
-            
-            product_data = {
-                "success": True,
-                "source": "external_api",
-                "asin": asin,
-                "title": f"Product for ASIN: {asin}" if asin else "Product information found",
-                "price": "",  # This API doesn't seem to provide price info based on the screenshots
-                "fnsku": fnsku,
-                "image_url": "",  # This API doesn't seem to provide image URLs
-                "amazon_url": f"https://www.amazon.com/dp/{asin}" if asin else '',
-                "scan_task_id": scan_data.get('id', ''),
-                "task_state": scan_data.get('taskState', ''),
-                "assignment_date": scan_data.get('assignmentDate', ''),
-                "raw_data": scan_data,  # Include raw response for debugging
-                "message": "Found via fnskutoasin.com API (charged lookup)"
-            }
-            
-            # OPTIONAL: Save external API result to local database for future use
-            # This prevents future API calls for the same FNSKU
-            try:
-                if asin:
-                    # Create a new product entry with the external data
-                    # Use a generated LPN since we don't have one from external API
-                    new_lpn = f"EXT-{fnsku}"  # Prefix to indicate external source
-                    
-                    # Check if this LPN already exists to avoid duplicates
-                    existing_product = Product.query.filter_by(lpn=new_lpn).first()
-                    if not existing_product:
-                        new_product = Product(
-                            lpn=new_lpn,
-                            asin=asin,
-                            fnsku=fnsku,
-                            title=f"Product for ASIN: {asin}",
-                            msrp=None  # No price data from this API
-                        )
-                        db.session.add(new_product)
-                        db.session.commit()
-                        product_data["saved_to_local"] = True
-            except Exception as e:
-                # Don't fail the whole request if saving fails
-                print(f"Warning: Could not save external API result to local database: {e}")
-                product_data["saved_to_local"] = False
-            
-            return jsonify(product_data)
+        item = None
+        found_by_column = None
+
+        # Search by UPC, Fn Sku, X-Z ASIN in manifest_data
+        product_response_upc = supabase_admin.table('manifest_data').select('*').eq('tenant_id', tenant_id).eq('UPC', barcode).maybe_single().execute()
+        if product_response_upc.data:
+            item = product_response_upc.data
+            found_by_column = 'UPC'
         else:
-            return jsonify({
-                "success": False,
-                "message": "No data returned from external API"
-            }), 404
-            
-    except requests.exceptions.Timeout:
-        return jsonify({
-            "success": False,
-            "message": "External API request timed out"
-        }), 408
-    except requests.exceptions.RequestException as e:
-        return jsonify({
-            "success": False,
-            "message": f"External API request failed: {str(e)}"
-        }), 500
+            product_response_fnsku = supabase_admin.table('manifest_data').select('*').eq('tenant_id', tenant_id).eq('Fn Sku', barcode).maybe_single().execute()
+            if product_response_fnsku.data:
+                item = product_response_fnsku.data
+                found_by_column = 'Fn Sku'
+            else:
+                product_response_lpn = supabase_admin.table('manifest_data').select('*').eq('tenant_id', tenant_id).eq('X-Z ASIN', barcode).maybe_single().execute()
+                if product_response_lpn.data:
+                    item = product_response_lpn.data
+                    found_by_column = 'X-Z ASIN'
+
+        if item:
+            mapped_item = {
+                "id": item.get("id"),
+                "sku": item.get("Fn Sku"),
+                "lpn": item.get("X-Z ASIN"),
+                "asin": item.get("B00 Asin"),
+                "fnsku": item.get("Fn Sku"),
+                "name": item.get("Description"), # Assuming 'Description' is the title
+                "description": item.get("Description"),
+                "price": item.get("MSRP"),
+                "category": item.get("Category"), # This might be an internal category
+                "upc": item.get("UPC"),
+                "quantity": item.get("Quantity"),
+                "image_url": item.get("Image URL"), # Assuming 'Image URL' column exists
+                "barcode_scanned": barcode,
+                "found_by_column": found_by_column,
+                "source": "local_db"
+            }
+            logger.info(f"Barcode '{barcode}' found locally for tenant '{tenant_id}'. Product SKU: {mapped_item['sku']}")
+            return jsonify({"message": "Barcode successfully scanned", "product": mapped_item, "status": "found_in_db"}), 200
+        else:
+            # Not found locally, try eBay Catalog API
+            logger.info(f"Barcode '{barcode}' not found locally for tenant '{tenant_id}'. Querying eBay Catalog API.")
+            try:
+                ebay_token = get_ebay_token() # You have this helper
+                if not ebay_token:
+                    logger.error("Failed to get eBay token for Catalog API lookup.")
+                    # Don't expose token error directly, but indicate external lookup failed
+                    return jsonify({"error": "Product not found locally. External lookup service unavailable."}), 404 
+
+                search_url_base = "https://api.sandbox.ebay.com/commerce/catalog/v1_beta/product_summary/search" if EBAY_SANDBOX else "https://api.ebay.com/commerce/catalog/v1/product_summary/search"
+                headers = {
+                    'Authorization': f'Bearer {ebay_token}',
+                    'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US' # Assuming US marketplace
+                }
+                params = {'gtin': barcode}
+                
+                response = requests.get(search_url_base, headers=headers, params=params)
+                response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+                
+                ebay_data = response.json()
+
+                if ebay_data.get("total", 0) > 0 and ebay_data.get("productSummaries"):
+                    product_summary = ebay_data["productSummaries"][0] # Take the first match
+
+                    # Attempt to get more details including categoryId and full description using getProduct
+                    ebay_product_details = None
+                    ebay_category_id = None
+                    ebay_description = product_summary.get('title') # Fallback description
+                    
+                    if product_summary.get('epid'):
+                        product_details_url_base = "https://api.sandbox.ebay.com/commerce/catalog/v1_beta/product" if EBAY_SANDBOX else "https://api.ebay.com/commerce/catalog/v1/product"
+                        product_details_url = f"{product_details_url_base}/{product_summary.get('epid')}"
+                        try:
+                            details_response = requests.get(product_details_url, headers=headers) # Same token and headers
+                            details_response.raise_for_status()
+                            ebay_product_details_data = details_response.json()
+                            ebay_category_id = ebay_product_details_data.get('primaryCategoryId')
+                            ebay_description = ebay_product_details_data.get('description', product_summary.get('title')) # Prefer full description
+                            # Potentially extract more aspects from ebay_product_details_data.get('aspects') here
+                        except requests.exceptions.RequestException as e_details:
+                            logger.warning(f"eBay getProduct call failed for epid {product_summary.get('epid')}: {e_details}. Using summary data.")
+                            # Fallback to summary data if getProduct fails
+
+                    enriched_product = {
+                        "sku": None, # No local SKU yet, to be created by user/system
+                        "lpn": barcode, # Barcode could be LPN if it's an internal one matching X-Z ASIN pattern
+                        "asin": None, # ASIN might not be directly available, or could be an aspect
+                        "fnsku": None, # No FNSKU yet
+                        "name": product_summary.get("title"),
+                        "description": ebay_description,
+                        "price": None, # Price needs to be set by the user
+                        "category_ebay_id": ebay_category_id, # eBay's category ID
+                        "category_name_ebay": None, # Could look this up via Taxonomy API later
+                        "upc": barcode if found_by_column == 'UPC' or not found_by_column else product_summary.get("upc", [barcode])[0] if product_summary.get("upc") else barcode,
+                        "image_url": product_summary.get("image", {}).get("imageUrl"),
+                        "additional_image_urls": [img.get("imageUrl") for img in product_summary.get("additionalImages", []) if img.get("imageUrl")],
+                        "quantity": 1, # Default quantity, user can adjust
+                        "barcode_scanned": barcode,
+                        "source": "ebay_catalog_api",
+                        "ebay_epid": product_summary.get("epid"),
+                        "raw_ebay_summary": product_summary,
+                        "raw_ebay_details": ebay_product_details_data if 'ebay_product_details_data' in locals() else None
+                    }
+                    logger.info(f"Barcode '{barcode}' found on eBay Catalog API. Title: {enriched_product['name']}")
+                    return jsonify({"message": "Product found on eBay", "product": enriched_product, "status": "found_on_ebay"}), 200
+                else:
+                    logger.info(f"Barcode '{barcode}' not found on eBay Catalog API.")
+                    return jsonify({"error": "Product not found locally or on eBay.", "barcode": barcode, "status": "not_found_anywhere"}), 404
+
+            except requests.exceptions.RequestException as e_ebay:
+                logger.error(f"Error calling eBay Catalog API for barcode {barcode}: {e_ebay}")
+                # Check for specific HTTP errors if needed, e.g., 404 from eBay means not found
+                if e_ebay.response is not None and e_ebay.response.status_code == 404:
+                     return jsonify({"error": "Product not found locally or on eBay.", "barcode": barcode, "status": "not_found_anywhere"}), 404
+                return jsonify({"error": "Product not found locally. Error during external lookup."}), 503 # Service unavailable
+            except Exception as e_general_ebay: # Catch other potential errors like get_ebay_token() failure
+                logger.error(f"General error during eBay lookup for barcode {barcode}: {e_general_ebay}")
+                return jsonify({"error": "Product not found locally. Error during external lookup."}), 500
+
+
     except Exception as e:
-        return jsonify({
-            "success": False,
-            "message": f"Error performing external lookup: {str(e)}"
-        }), 500
-
-@app.route('/dashboard')
-def dashboard():
-    total_products = Product.query.count()
-    total_scans = ScanHistory.query.count()
-    # You could add more sophisticated stats here later, e.g., scans today, unique items scanned, etc.
-    return render_template('dashboard.html', 
-                           total_products=total_products, 
-                           total_scans=total_scans)
-
-@app.route('/history')
-def scan_history_list():
-    # Fetch history, ordering by most recent, joining with Product to get details
-    # Limit to a reasonable number, e.g., last 50 scans, for performance
-    history_items = ScanHistory.query.join(Product).order_by(ScanHistory.scanned_at.desc()).limit(50).all()
-    return render_template('history.html', history_items=history_items)
->>>>>>> c50ba32bc7ce0bd4ad0a31e0ab8402b70b945444
+        logger.error(f"Error during barcode scan lookup for tenant {tenant_id}, barcode {barcode}: {e}")
+        return jsonify({"error": f"Server error during barcode lookup: {str(e)}"}), 500
 
 # ===== MARKETPLACE API ENDPOINTS =====
 
@@ -991,43 +804,76 @@ def get_ebay_token():
 
 @app.route('/api/ebay/create-listing', methods=['POST'])
 def create_ebay_listing():
-    """Create a new eBay listing"""
+    """Create a new eBay listing by creating/replacing an inventory item and publishing an offer."""
+    user_id, tenant_id = get_ids_from_request() # Assuming you want to associate this with a tenant
+    if not tenant_id:
+        return jsonify({"error": "Unauthorized or tenant ID missing"}), 401
+
     try:
         data = request.get_json()
+        sku = data.get('sku')
+        if not sku:
+            return jsonify({"success": False, "message": "SKU is required"}), 400
         
+        title = data.get('title')
+        if not title:
+            return jsonify({"success": False, "message": "Title is required"}), 400
+
+        ebay_category_id = data.get('ebay_category_id') # This is the eBay leaf category ID
+        if not ebay_category_id:
+            return jsonify({"success": False, "message": "eBay Category ID is required"}), 400
+        
+        # Business Policy IDs - expecting these from the client or config
+        fulfillment_policy_id = data.get('fulfillmentPolicyId')
+        payment_policy_id = data.get('paymentPolicyId')
+        return_policy_id = data.get('returnPolicyId')
+
+        if not all([fulfillment_policy_id, payment_policy_id, return_policy_id]):
+            # Fallback to environment variables if not provided in request
+            fulfillment_policy_id = fulfillment_policy_id or os.getenv('EBAY_FULFILLMENT_POLICY_ID')
+            payment_policy_id = payment_policy_id or os.getenv('EBAY_PAYMENT_POLICY_ID')
+            return_policy_id = return_policy_id or os.getenv('EBAY_RETURN_POLICY_ID')
+            
+            if not all([fulfillment_policy_id, payment_policy_id, return_policy_id]):
+                logger.error(f"eBay business policy IDs are missing for tenant {tenant_id}, SKU {sku}.")
+                return jsonify({
+                    "success": False, 
+                    "message": "eBay business policy IDs (fulfillment, payment, return) are required either in the request or as environment variables."
+                }), 400
+
+        merchant_location_key = data.get('merchantLocationKey', os.getenv('EBAY_MERCHANT_LOCATION_KEY', 'default')) # Get from request, then env, then default
+        if not merchant_location_key:
+             logger.error(f"eBay merchant location key is missing for tenant {tenant_id}, SKU {sku}.")
+             return jsonify({"success": False, "message": "eBay merchant location key is required."}), 400
+
         # Get eBay access token
         token = get_ebay_token()
         
-        # eBay API endpoint
-        listing_url = "https://api.sandbox.ebay.com/sell/inventory/v1/inventory_item" if EBAY_SANDBOX else "https://api.ebay.com/sell/inventory/v1/inventory_item"
+        # eBay API endpoint for inventory item
+        inventory_item_url_base = "https://api.sandbox.ebay.com/sell/inventory/v1/inventory_item" if EBAY_SANDBOX else "https://api.ebay.com/sell/inventory/v1/inventory_item"
         
-        # Prepare eBay listing data
-        ebay_data = {
+        # Prepare eBay inventory item data (createOrReplaceInventoryItem)
+        # Ensure aspects are correctly formatted if provided
+        aspects_input = data.get('aspects', {})
+        ebay_aspects = {k: [v] if not isinstance(v, list) else v for k, v in aspects_input.items()} # Ensure aspect values are lists of strings
+        if not ebay_aspects.get("Brand") and data.get("brand"): # Add brand from top level if not in aspects
+            ebay_aspects["Brand"] = [data.get("brand")]
+
+        inventory_item_data = {
             "product": {
-                "title": data.get('title'),
-                "description": data.get('description', ''),
-                "aspects": {
-                    "Brand": ["Your Brand"],
-                    "Type": [data.get('category', 'Other')]
-                },
-                "imageUrls": data.get('images', [])
+                "title": title,
+                "description": data.get('description', title), # Fallback description to title
+                "aspects": ebay_aspects, # e.g., {"Brand": ["Apple"], "Color": ["Space Gray"]}
+                "imageUrls": data.get('images', []) # Array of image URLs
             },
             "condition": data.get('condition', 'NEW').upper(),
-            "packageWeightAndSize": {
-                "dimensions": {
-                    "height": 5,
-                    "length": 5,
-                    "width": 5,
-                    "unit": "INCH"
-                },
-                "weight": {
-                    "value": 1,
-                    "unit": "POUND"
-                }
-            },
+            "packageWeightAndSize": data.get('packageWeightAndSize', {
+                "dimensions": {"height": 5, "length": 5, "width": 5, "unit": "INCH"},
+                "weight": {"value": 1, "unit": "POUND"}
+            }), # Allow providing this, or use default
             "availability": {
                 "shipToLocationAvailability": {
-                    "quantity": data.get('quantity', 1)
+                    "quantity": int(data.get('quantity', 1))
                 }
             }
         }
@@ -1035,61 +881,137 @@ def create_ebay_listing():
         headers = {
             'Authorization': f'Bearer {token}',
             'Content-Type': 'application/json',
-            'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US'
+            'Accept': 'application/json',
+            'Content-Language': 'en-US', # Required for this call
+            'X-EBAY-C-MARKETPLACE-ID': os.getenv('EBAY_MARKETPLACE_ID', 'EBAY_US')
         }
         
-        # Create inventory item first
-        inventory_key = data.get('sku', f"item-{data.get('title', '').replace(' ', '-')}")
-        response = requests.put(f"{listing_url}/{inventory_key}", 
-                              headers=headers, 
-                              json=ebay_data)
+        # 1. Create or Replace Inventory Item
+        inventory_item_url_full = f"{inventory_item_url_base}/{sku}"
+        logger.info(f"Calling eBay createOrReplaceInventoryItem for SKU {sku} for tenant {tenant_id}: URL {inventory_item_url_full}")
+        inventory_response = requests.put(inventory_item_url_full, headers=headers, json=inventory_item_data)
         
-        if response.status_code in [200, 201]:
-            # Now create the actual listing/offer
-            offer_url = "https://api.sandbox.ebay.com/sell/inventory/v1/offer" if EBAY_SANDBOX else "https://api.ebay.com/sell/inventory/v1/offer"
-            
-            offer_data = {
-                "sku": inventory_key,
-                "marketplaceId": "EBAY_US",
-                "format": "FIXED_PRICE",
-                "pricingSummary": {
-                    "price": {
-                        "value": str(data.get('price', '0')),
-                        "currency": "USD"
-                    }
-                },
-                "listingDescription": data.get('description', ''),
-                "categoryId": data.get('category', ''),
-                "merchantLocationKey": "default_location",
-                "tax": {
-                    "taxType": "SALES_TAX",
-                    "shippingAndHandlingTaxed": False
-                }
-            }
-            
-            offer_response = requests.post(offer_url, headers=headers, json=offer_data)
-            
-            if offer_response.status_code in [200, 201]:
-                return jsonify({
-                    "success": True,
-                    "message": "eBay listing created successfully",
-                    "data": offer_response.json()
-                })
-            else:
-                return jsonify({
-                    "success": False,
-                    "message": f"Failed to create eBay offer: {offer_response.text}"
-                }), 400
-        else:
+        if inventory_response.status_code not in [200, 201, 204]: # 204 means success with no content (replacement)
+            logger.error(f"Failed to create/replace eBay inventory item for SKU {sku}, tenant {tenant_id}. Status: {inventory_response.status_code}, Response: {inventory_response.text}")
             return jsonify({
                 "success": False,
-                "message": f"Failed to create eBay inventory item: {response.text}"
-            }), 400
+                "message": f"Failed to create/replace eBay inventory item: {inventory_response.text}"
+            }), inventory_response.status_code
+        
+        logger.info(f"eBay inventory item for SKU {sku} created/replaced successfully for tenant {tenant_id}.")
+
+        # 2. Create and Publish Offer
+        offer_url_base = "https://api.sandbox.ebay.com/sell/inventory/v1/offer" if EBAY_SANDBOX else "https://api.ebay.com/sell/inventory/v1/offer"
+        price_value = data.get('price')
+        if price_value is None:
+             return jsonify({"success": False, "message": "Price is required to create an offer"}), 400
+
+        offer_data = {
+            "sku": sku,
+            "marketplaceId": os.getenv('EBAY_MARKETPLACE_ID', 'EBAY_US'),
+            "format": "FIXED_PRICE",
+            "availableQuantity": int(data.get('quantity', 1)),
+            "categoryId": ebay_category_id, # eBay leaf category ID
+            "listingDescription": data.get('listing_description', inventory_item_data["product"]["description"]), # Allow specific listing desc or fallback
+            "listingPolicies": {
+                "fulfillmentPolicyId": fulfillment_policy_id,
+                "paymentPolicyId": payment_policy_id,
+                "returnPolicyId": return_policy_id
+            },
+            "merchantLocationKey": merchant_location_key,
+            "pricingSummary": {
+                "price": {
+                    "value": str(price_value),
+                    "currency": data.get('currency', 'USD')
+                }
+            },
+            # Add other optional fields like tax, charity, listing duration, etc. as needed
+            # "tax": {
+            #     "taxJurisdiction": { "region": { "stateOrProvince": "CA" }, "taxJurisdictionId": "California" },
+            #     "taxType": "STATE_SALES_TAX",
+            #     "thirdPartyTaxCategory": "", # if applicable
+            #     "shippingAndHandlingTaxed": True,
+            #     "vatPercentage": null # if applicable
+            # }
+        }
+        
+        # The createOffer call should make it live if quantity > 0 and policies are good.
+        # No separate publishOffer call is strictly needed if availableQuantity is set.
+        logger.info(f"Calling eBay createOffer for SKU {sku} for tenant {tenant_id}: URL {offer_url_base}")
+        offer_response = requests.post(offer_url_base, headers=headers, json=offer_data)
+        
+        if offer_response.status_code in [200, 201]:
+            offer_response_json = offer_response.json()
+            offer_id = offer_response_json.get('offerId')
+            # Listing ID is not in createOffer response. It's in publishOffer response, or GetOffer/GetItem.
+            # For offers published by setting availableQuantity > 0, the listingId might take a moment to generate.
+            listing_id = offer_response_json.get('listingId') # This is often null from createOffer
+            
+            logger.info(f"eBay offer created successfully for SKU {sku}, Offer ID: {offer_id}, tenant {tenant_id}.")
+
+            # Step 5: Store and Track
+            if supabase_admin: # Use admin client to insert into the new table
+                try:
+                    # Attempt to get the listing URL if listingId is somehow available (unlikely from createOffer)
+                    listing_url = None
+                    if listing_id:
+                        base_ebay_url = "https://www.sandbox.ebay.com/itm/" if EBAY_SANDBOX else "https://www.ebay.com/itm/"
+                        listing_url = f"{base_ebay_url}{listing_id}"
+
+                    insert_data = {
+                        'tenant_id': tenant_id,
+                        'user_id': user_id, # The user who initiated this
+                        'internal_sku': sku,
+                        'ebay_offer_id': offer_id,
+                        'ebay_listing_id': listing_id, # May be null initially
+                        'ebay_marketplace_id': offer_data["marketplaceId"],
+                        'ebay_listing_url': listing_url,
+                        'ebay_listing_status': 'PUBLISHED', # Assuming immediate publish
+                        'product_title': inventory_item_data["product"]["title"],
+                        'price': price_value,
+                        'currency': offer_data["pricingSummary"]["price"]["currency"],
+                        'quantity': offer_data["availableQuantity"],
+                        'raw_ebay_offer_data': offer_response_json # Store the raw response
+                        # 'listed_at' and 'created_at' have defaults in DB
+                    }
+                    
+                    # Upsert logic: if listing already tracked (same tenant, sku, marketplace), update it.
+                    # Otherwise, insert new. Using the unique constraint for this.
+                    db_response = supabase_admin.table('ebay_listings').upsert(
+                        insert_data, 
+                        on_conflict='tenant_id,internal_sku,ebay_marketplace_id'
+                    ).execute()
+
+                    if db_response.data:
+                        logger.info(f"eBay listing data for SKU {sku}, Offer ID {offer_id} saved to database for tenant {tenant_id}.")
+                    elif db_response.error:
+                        logger.error(f"Failed to save eBay listing data for SKU {sku} to DB. Error: {db_response.error}")
+                        # Don't fail the whole request, but log this problem
+                except Exception as db_exc:
+                    logger.error(f"Exception saving eBay listing data for SKU {sku} to DB: {db_exc}")
+            else:
+                logger.warning("Supabase admin client not available. Skipping save of eBay listing data to DB.")
+
+            return jsonify({
+                "success": True,
+                "message": "eBay inventory item and offer created successfully. Tracking data saved.",
+                "sku": sku,
+                "offerId": offer_id,
+                "listingId": listing_id, # Still likely null here
+                "ebayMarketplaceId": offer_data["marketplaceId"]
+            }), 201
+        else:
+            logger.error(f"Failed to create eBay offer for SKU {sku}, tenant {tenant_id}. Status: {offer_response.status_code}, Response: {offer_response.text}")
+            return jsonify({
+                "success": False,
+                "message": f"Failed to create eBay offer: {offer_response.text}"
+            }), offer_response.status_code
             
     except Exception as e:
+        logger.error(f"Error in create_ebay_listing for tenant {user_id or 'UnknownTenant'}: {str(e)}") # user_id might be None here if get_ids failed early
         return jsonify({
             "success": False,
-            "message": f"Error creating eBay listing: {str(e)}"
+            "message": f"An unexpected error occurred: {str(e)}"
         }), 500
 
 @app.route('/api/ebay/categories', methods=['GET'])
@@ -1253,6 +1175,244 @@ def get_pricing_suggestions():
             "ebay": {"suggested": 0},
             "shopify": {"suggested": 0}
         }), 500
+
+@app.route('/api/scan_history', methods=['GET'])
+def get_scan_history():
+    user_id, tenant_id = get_ids_from_request()
+    if not tenant_id:
+        return jsonify({"error": "Unauthorized or tenant ID missing"}), 401
+    if not supabase_admin: # Use supabase_admin for direct table access if RLS is not set up for this or if admin view is needed
+        return jsonify({"error": "Supabase admin client not configured."}), 500
+
+    try:
+        # Fetch from 'scan_history' table, joining with 'manifest_data' if product_id is linked
+        # The 'databaseService.js' suggests 'manifest_data_id' and 'api_lookup_cache_id' in 'scan_history'
+        # And 'manifest_data(*)' or 'api_lookup_cache(*)' for joins.
+        
+        # Simpler query first, can be expanded
+        query = supabase_admin.table('scan_history').select(
+            '''
+            scanned_code, 
+            scanned_at, 
+            product_description,
+            manifest_data_id,
+            api_lookup_cache_id,
+            manifest_data (Description, "Fn Sku", "B00 Asin", UPC),
+            api_lookup_cache (product_name, asin, fnsku, image_url)
+            '''
+        ).eq('tenant_id', tenant_id).order('scanned_at', desc=True).limit(50)
+        
+        response = query.execute()
+
+        if response.data:
+            # Process data if needed to match frontend expectations
+            # For now, returning as is.
+            return jsonify(response.data), 200
+        elif response.error:
+            logger.error(f"Error fetching scan history for tenant {tenant_id}: {response.error}")
+            return jsonify({"error": str(response.error.message)}), 500
+        else:
+            return jsonify([]), 200
+            
+    except Exception as e:
+        logger.error(f"Server error fetching scan history for tenant {tenant_id}: {e}")
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
+
+@app.route('/api/ebay/listings', methods=['GET'])
+def get_ebay_listings_from_db():
+    """Fetch all tracked eBay listings from the database for the current tenant."""
+    user_id, tenant_id = get_ids_from_request()
+    if not tenant_id:
+        return jsonify({"error": "Unauthorized or tenant ID missing"}), 401
+    if not supabase_admin:
+        return jsonify({"error": "Supabase admin client not configured."}), 500
+
+    try:
+        listings_response = supabase_admin.table('ebay_listings') \
+            .select("*") \
+            .eq('tenant_id', tenant_id) \
+            .order('created_at', desc=True) \
+            .execute()
+
+        if listings_response.error:
+            logger.error(f"Error fetching eBay listings for tenant {tenant_id}: {listings_response.error}")
+            return jsonify({"error": "Failed to fetch listings", "details": str(listings_response.error)}), 500
+        
+        # Re-serialize Decimal to float for JSON if price is Decimal
+        processed_listings = []
+        for item in listings_response.data:
+            if 'price' in item and isinstance(item['price'], Decimal):
+                item['price'] = float(item['price'])
+            processed_listings.append(item)
+
+        return jsonify(processed_listings), 200
+
+    except Exception as e:
+        logger.error(f"Exception in get_ebay_listings_from_db for tenant {tenant_id}: {str(e)}")
+        return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
+
+@app.route('/api/ebay/offer/<string:ebay_offer_id>', methods=['GET'])
+def get_ebay_offer_details(ebay_offer_id):
+    user_id, tenant_id = get_ids_from_request()
+    if not tenant_id:
+        return jsonify({"error": "Unauthorized or tenant ID missing"}), 401
+    
+    token = get_ebay_token()
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Accept': 'application/json',
+        'X-EBAY-C-MARKETPLACE-ID': os.getenv('EBAY_MARKETPLACE_ID', 'EBAY_US')
+    }
+    
+    offer_api_url = f"https://api.sandbox.ebay.com/sell/inventory/v1/offer/{ebay_offer_id}" if EBAY_SANDBOX else f"https://api.ebay.com/sell/inventory/v1/offer/{ebay_offer_id}"
+    
+    try:
+        logger.info(f"Fetching eBay offer details for offer ID: {ebay_offer_id}, tenant: {tenant_id}")
+        response = requests.get(offer_api_url, headers=headers)
+        response.raise_for_status() # Raise HTTPError for bad responses (4XX or 5XX)
+        
+        offer_details = response.json()
+        
+        # Update our database with the latest info (especially listingId and status)
+        if supabase_admin:
+            update_payload = {
+                'ebay_listing_id': offer_details.get('listing', {}).get('listingId'),
+                'ebay_listing_status': offer_details.get('status'), # e.g., PUBLISHED, UNPUBLISHED
+                'quantity': offer_details.get('availableQuantity'),
+                'price': offer_details.get('pricingSummary', {}).get('price', {}).get('value'),
+                'raw_ebay_offer_data': offer_details, # Store the full latest offer data
+                'last_synced_at': datetime.utcnow().isoformat()
+            }
+            # Remove None values so they don't overwrite existing DB values if not present in API response
+            update_payload = {k: v for k, v in update_payload.items() if v is not None}
+
+            # We need the internal_sku to correctly identify the record for update based on offer_id if it is not unique across tenants
+            # Assuming ebay_offer_id IS unique enough for this update or that the RLS will scope it correctly.
+            # For robust update, better to use the primary key 'id' or a unique constraint involving tenant_id.
+            # Let's fetch our internal record first to ensure we update the right one and have its primary key.
+            
+            db_record_response = supabase_admin.table('ebay_listings') \
+                                .select('id, internal_sku') \
+                                .eq('tenant_id', tenant_id) \
+                                .eq('ebay_offer_id', ebay_offer_id) \
+                                .maybe_single() \
+                                .execute()
+
+            if db_record_response.data:
+                record_id = db_record_response.data['id']
+                # Add internal_sku to payload if it wasn't there for some reason, for on_conflict reference
+                if 'internal_sku' not in update_payload:
+                    update_payload['internal_sku'] = db_record_response.data['internal_sku']
+                if 'ebay_marketplace_id' not in update_payload: # Required for conflict resolution
+                     update_payload['ebay_marketplace_id'] = os.getenv('EBAY_MARKETPLACE_ID', 'EBAY_US') # Should fetch from DB record ideally
+               
+                # Update the specific record by its primary key id
+                # Alternatively, could use upsert on (tenant_id, internal_sku, ebay_marketplace_id) 
+                # if we ensure all those fields are in update_payload.
+                update_db_response = supabase_admin.table('ebay_listings') \
+                                        .update(update_payload) \
+                                        .eq('id', record_id) \
+                                        .execute()
+                if update_db_response.error:
+                    logger.error(f"Failed to update DB for offer {ebay_offer_id}, tenant {tenant_id}. Error: {update_db_response.error}")
+            else:
+                logger.warning(f"No existing DB record found for offer {ebay_offer_id}, tenant {tenant_id} to update.")
+
+        return jsonify(offer_details), 200
+
+    except requests.exceptions.HTTPError as http_err:
+        logger.error(f"HTTP error fetching eBay offer {ebay_offer_id}: {http_err}. Response: {http_err.response.text}")
+        return jsonify({"error": f"eBay API error: {http_err.response.status_code}", "details": http_err.response.json() if http_err.response.content else None}), http_err.response.status_code
+    except Exception as e:
+        logger.error(f"Error fetching eBay offer details for {ebay_offer_id}: {str(e)}")
+        return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
+
+@app.route('/api/ebay/listings/<string:ebay_offer_id>/end', methods=['POST'])
+def end_ebay_listing(ebay_offer_id):
+    user_id, tenant_id = get_ids_from_request()
+    if not tenant_id:
+        return jsonify({"error": "Unauthorized or tenant ID missing"}), 401
+    if not supabase_admin:
+        return jsonify({"error": "Supabase admin client not configured."}), 500
+
+    logger.info(f"Attempting to end eBay listing for offer ID: {ebay_offer_id}, tenant: {tenant_id}")
+
+    try:
+        # Verify the listing belongs to the tenant and get internal SKU if needed for other checks
+        db_listing_check = supabase_admin.table('ebay_listings') \
+            .select('id, internal_sku, ebay_listing_status') \
+            .eq('tenant_id', tenant_id) \
+            .eq('ebay_offer_id', ebay_offer_id) \
+            .maybe_single() \
+            .execute()
+
+        if not db_listing_check.data:
+            logger.warning(f"End listing: Offer ID {ebay_offer_id} not found for tenant {tenant_id}.")
+            return jsonify({"error": "Listing not found or access denied."}), 404
+        
+        if db_listing_check.data['ebay_listing_status'] == 'ENDED':
+            logger.info(f"Listing for offer ID {ebay_offer_id} is already ended for tenant {tenant_id}.")
+            return jsonify({"success": True, "message": "Listing was already ended."}), 200
+
+        token = get_ebay_token()
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/json',
+            # X-EBAY-C-MARKETPLACE-ID is not typically needed for deleteOffer but Content-Language is good practice
+            'Content-Language': 'en-US' 
+        }
+
+        delete_offer_url = f"https://api.sandbox.ebay.com/sell/inventory/v1/offer/{ebay_offer_id}" if EBAY_SANDBOX \
+            else f"https://api.ebay.com/sell/inventory/v1/offer/{ebay_offer_id}"
+
+        logger.info(f"Calling eBay deleteOffer for offer ID: {ebay_offer_id}, URL: {delete_offer_url}")
+        response = requests.delete(delete_offer_url, headers=headers)
+
+        # eBay's deleteOffer returns HTTP 204 No Content on success
+        if response.status_code == 204:
+            logger.info(f"eBay offer {ebay_offer_id} deleted successfully via API for tenant {tenant_id}.")
+            # Update local database status
+            update_payload = {
+                'ebay_listing_status': 'ENDED',
+                'ended_at': datetime.utcnow().isoformat(),
+                'last_synced_at': datetime.utcnow().isoformat()
+            }
+            # Using the primary key 'id' from our earlier check for a precise update
+            record_id_to_update = db_listing_check.data['id']
+            db_update_response = supabase_admin.table('ebay_listings') \
+                .update(update_payload) \
+                .eq('id', record_id_to_update) \
+                .execute()
+
+            if db_update_response.error:
+                logger.error(f"Failed to update local DB status to ENDED for offer {ebay_offer_id}, tenant {tenant_id}. Error: {db_update_response.error}")
+                # Even if DB update fails, the eBay action was successful. Inform client but log error.
+                return jsonify({"success": True, "message": "Listing ended on eBay, but DB update failed. Please refresh."}), 207 # Multi-Status
+            
+            logger.info(f"Local DB status updated to ENDED for offer {ebay_offer_id}, tenant {tenant_id}.")
+            return jsonify({"success": True, "message": "Listing ended successfully on eBay and database updated."}), 200
+        else:
+            # Handle eBay API errors
+            ebay_error_message = f"eBay API error when trying to end listing {ebay_offer_id}"
+            try:
+                error_details = response.json()
+                logger.error(f"{ebay_error_message}. Status: {response.status_code}, Details: {error_details}")
+                # Provide more specific error from eBay if available
+                if 'errors' in error_details and error_details['errors']:
+                    ebay_error_message = error_details['errors'][0].get('message', ebay_error_message)
+
+            except ValueError: # If response is not JSON
+                logger.error(f"{ebay_error_message}. Status: {response.status_code}, Response: {response.text}")
+                ebay_error_message = response.text if response.text else ebay_error_message
+            
+            return jsonify({"error": "Failed to end listing on eBay.", "details": ebay_error_message}), response.status_code
+
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"RequestException ending eBay listing {ebay_offer_id} for tenant {tenant_id}: {req_err}")
+        return jsonify({"error": "Network error communicating with eBay.", "details": str(req_err)}), 503
+    except Exception as e:
+        logger.error(f"Unexpected error ending eBay listing {ebay_offer_id} for tenant {tenant_id}: {str(e)}")
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("FLASK_RUN_PORT", 5000))
