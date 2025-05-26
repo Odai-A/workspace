@@ -12,6 +12,7 @@ from supabase import create_client, Client
 import logging # For better logging
 from decimal import Decimal
 from datetime import datetime
+import urllib.parse # For URL encoding the query
 
 # Very verbose debug to see what's happening
 print("Current directory:", os.getcwd())
@@ -1234,22 +1235,72 @@ def get_ebay_listings_from_db():
             .order('created_at', desc=True) \
             .execute()
 
-        if listings_response.error:
-            logger.error(f"Error fetching eBay listings for tenant {tenant_id}: {listings_response.error}")
-            return jsonify({"error": "Failed to fetch listings", "details": str(listings_response.error)}), 500
+        # Log what we received, crucial for debugging
+        logger.info(f"Tenant {tenant_id}: get_ebay_listings_from_db: type(listings_response) = {type(listings_response)}")
+        if hasattr(listings_response, 'model_dump_json'): # For Pydantic models like APIResponse
+             logger.info(f"Tenant {tenant_id}: get_ebay_listings_from_db: listings_response content = {listings_response.model_dump_json(indent=2)}")
+        elif hasattr(listings_response, '__dict__'):
+             logger.info(f"Tenant {tenant_id}: get_ebay_listings_from_db: listings_response dict = {listings_response.__dict__}")
+        else:
+             logger.info(f"Tenant {tenant_id}: get_ebay_listings_from_db: listings_response (str) = {str(listings_response)[:500]}")
+
+
+        # Standard way to check for errors in supabase-py
+        if hasattr(listings_response, 'error') and listings_response.error:
+            error_obj = listings_response.error
+            error_message = "Unknown Supabase error"
+            error_details_str = str(error_obj) # Fallback
+            
+            if hasattr(error_obj, 'message') and error_obj.message:
+                error_message = error_obj.message
+            
+            # Attempt to get more structured details
+            if hasattr(error_obj, 'details') and error_obj.details:
+                error_details_str = str(error_obj.details)
+            elif hasattr(error_obj, 'code') and error_obj.code:
+                 error_details_str = f"Code: {error_obj.code}, Message: {error_message}"
+            elif hasattr(error_obj, 'model_dump_json'): # If error_obj is a pydantic model
+                try:
+                    error_details_str = error_obj.model_dump_json(indent=2)
+                except Exception: # Fallback if model_dump_json fails
+                    pass
+
+
+            logger.error(f"Error fetching eBay listings for tenant {tenant_id} from Supabase. Message: {error_message}, Details: {error_details_str}", exc_info=True)
+            return jsonify({"error": "Failed to fetch listings from database.", "details": f"{error_message} - {error_details_str}"}), 500
         
-        # Re-serialize Decimal to float for JSON if price is Decimal
-        processed_listings = []
-        for item in listings_response.data:
-            if 'price' in item and isinstance(item['price'], Decimal):
-                item['price'] = float(item['price'])
-            processed_listings.append(item)
+        # If no error attribute, or error is None, then data should be present
+        elif hasattr(listings_response, 'data'):
+            processed_listings = []
+            for item in listings_response.data:
+                if 'price' in item and isinstance(item['price'], Decimal):
+                    item['price'] = float(item['price'])
+                processed_listings.append(item)
+            logger.info(f"Successfully fetched {len(processed_listings)} eBay listings for tenant {tenant_id}.")
+            return jsonify(processed_listings), 200
+        
+        # If neither .error nor .data, this is unexpected
+        else:
+            logger.error(f"Tenant {tenant_id}: Unexpected response structure from Supabase: {str(listings_response)[:1000]}", exc_info=True)
+            # Check if it's an httpx.Response that failed (less likely if using supabase-py client properly)
+            if hasattr(listings_response, 'status_code') and hasattr(listings_response, 'text') and hasattr(listings_response, 'is_success'):
+                if not listings_response.is_success:
+                    http_error_details = listings_response.text[:500]
+                    try:
+                        http_error_json = listings_response.json()
+                        http_error_details = json.dumps(http_error_json)
+                    except: pass # Keep text if json fails
+                    logger.error(f"Tenant {tenant_id}: Supabase call resulted in direct HTTP error: {listings_response.status_code}, Response: {http_error_details}", exc_info=True)
+                    return jsonify({"error": "Failed to communicate with database.", "details": f"Service error: {listings_response.status_code}. Response: {http_error_details}"}), 500
+            
+            return jsonify({"error": "Received an inconsistent response from database.", "details": "Could not parse database output."}), 500
 
-        return jsonify(processed_listings), 200
-
+    except AttributeError as ae:
+        logger.error(f"AttributeError in get_ebay_listings_from_db for tenant {tenant_id}: {str(ae)}", exc_info=True)
+        return jsonify({"error": "An unexpected server processing error occurred (AttributeError).", "details": str(ae)}), 500
     except Exception as e:
-        logger.error(f"Exception in get_ebay_listings_from_db for tenant {tenant_id}: {str(e)}")
-        return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
+        logger.error(f"General exception in get_ebay_listings_from_db for tenant {tenant_id}: {str(e)}", exc_info=True)
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
 
 @app.route('/api/ebay/offer/<string:ebay_offer_id>', methods=['GET'])
 def get_ebay_offer_details(ebay_offer_id):
@@ -1301,7 +1352,7 @@ def get_ebay_offer_details(ebay_offer_id):
             if db_record_response.data:
                 record_id = db_record_response.data['id']
                 # Add internal_sku to payload if it wasn't there for some reason, for on_conflict reference
-                if 'internal_sku' not in update_payload:
+                if 'internal_sku' not in update_payload and db_record_response.data.get('internal_sku'):
                     update_payload['internal_sku'] = db_record_response.data['internal_sku']
                 if 'ebay_marketplace_id' not in update_payload: # Required for conflict resolution
                      update_payload['ebay_marketplace_id'] = os.getenv('EBAY_MARKETPLACE_ID', 'EBAY_US') # Should fetch from DB record ideally
@@ -1314,17 +1365,17 @@ def get_ebay_offer_details(ebay_offer_id):
                                         .eq('id', record_id) \
                                         .execute()
                 if update_db_response.error:
-                    logger.error(f"Failed to update DB for offer {ebay_offer_id}, tenant {tenant_id}. Error: {update_db_response.error}")
+                    logger.error(f"Failed to update DB for offer {ebay_offer_id}, tenant {tenant_id}. Error: {update_db_response.error.message if hasattr(update_db_response.error, 'message') else str(update_db_response.error)}", exc_info=True)
             else:
                 logger.warning(f"No existing DB record found for offer {ebay_offer_id}, tenant {tenant_id} to update.")
 
         return jsonify(offer_details), 200
 
     except requests.exceptions.HTTPError as http_err:
-        logger.error(f"HTTP error fetching eBay offer {ebay_offer_id}: {http_err}. Response: {http_err.response.text}")
-        return jsonify({"error": f"eBay API error: {http_err.response.status_code}", "details": http_err.response.json() if http_err.response.content else None}), http_err.response.status_code
+        logger.error(f"HTTP error fetching eBay offer {ebay_offer_id}: {http_err}. Response: {http_err.response.text}", exc_info=True)
+        return jsonify({"error": f"eBay API error: {http_err.response.status_code}", "details": http_err.response.json() if http_err.response.content and 'application/json' in http_err.response.headers.get('Content-Type','') else http_err.response.text}), http_err.response.status_code
     except Exception as e:
-        logger.error(f"Error fetching eBay offer details for {ebay_offer_id}: {str(e)}")
+        logger.error(f"Error fetching eBay offer details for {ebay_offer_id}: {str(e)}", exc_info=True)
         return jsonify({"error": f"An unexpected error occurred: {str(e)}"}), 500
 
 @app.route('/api/ebay/listings/<string:ebay_offer_id>/end', methods=['POST'])
@@ -1385,7 +1436,7 @@ def end_ebay_listing(ebay_offer_id):
                 .execute()
 
             if db_update_response.error:
-                logger.error(f"Failed to update local DB status to ENDED for offer {ebay_offer_id}, tenant {tenant_id}. Error: {db_update_response.error}")
+                logger.error(f"Failed to update local DB status to ENDED for offer {ebay_offer_id}, tenant {tenant_id}. Error: {db_update_response.error.message if hasattr(db_update_response.error, 'message') else str(db_update_response.error)}", exc_info=True)
                 # Even if DB update fails, the eBay action was successful. Inform client but log error.
                 return jsonify({"success": True, "message": "Listing ended on eBay, but DB update failed. Please refresh."}), 207 # Multi-Status
             
@@ -1408,11 +1459,110 @@ def end_ebay_listing(ebay_offer_id):
             return jsonify({"error": "Failed to end listing on eBay.", "details": ebay_error_message}), response.status_code
 
     except requests.exceptions.RequestException as req_err:
-        logger.error(f"RequestException ending eBay listing {ebay_offer_id} for tenant {tenant_id}: {req_err}")
+        logger.error(f"RequestException ending eBay listing {ebay_offer_id} for tenant {tenant_id}: {req_err}", exc_info=True)
         return jsonify({"error": "Network error communicating with eBay.", "details": str(req_err)}), 503
     except Exception as e:
-        logger.error(f"Unexpected error ending eBay listing {ebay_offer_id} for tenant {tenant_id}: {str(e)}")
+        logger.error(f"Unexpected error ending eBay listing {ebay_offer_id} for tenant {tenant_id}: {str(e)}", exc_info=True)
         return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
+
+# === TEMPORARY ADMIN ROUTE (REMOVE AFTER USE) ===
+@app.route('/api/admin/temp-set-user-tenant', methods=['POST'])
+def temp_set_user_tenant():
+    target_user_id = "3227bc3f-8020-4293-82a0-1141907e45cb" # odai.alkhatib@gmail.com
+    target_tenant_id = "ce0168c4-ed27-4ba3-b670-3c02a0e78e0c"
+    
+    if not supabase_admin:
+        return jsonify({"error": "Supabase admin client not configured."}), 500
+
+    try:
+        # First, get the existing app_metadata to preserve other fields
+        user_info = supabase_admin.auth.admin.get_user_by_id(target_user_id)
+        if not user_info or not hasattr(user_info, 'user') or not user_info.user:
+            return jsonify({"error": f"User {target_user_id} not found"}), 404
+        
+        current_app_metadata = user_info.user.app_metadata or {}
+        # Update only the tenant_id, keep other app_metadata fields
+        new_app_metadata = {**current_app_metadata, "tenant_id": target_tenant_id}
+        
+        update_response = supabase_admin.auth.admin.update_user_by_id(
+            target_user_id,
+            {'app_metadata': new_app_metadata}
+        )
+        
+        if hasattr(update_response, 'user') and update_response.user:
+            logger.info(f"Successfully updated app_metadata for user {target_user_id} with tenant_id {target_tenant_id}")
+            return jsonify({"success": True, "message": "User app_metadata updated.", "user": update_response.user.model_dump_json()}), 200
+        elif hasattr(update_response, 'error') and update_response.error:
+            error_message = update_response.error.message if hasattr(update_response.error, 'message') else str(update_response.error)
+            logger.error(f"Error updating user {target_user_id} app_metadata: {error_message}", exc_info=True)
+            return jsonify({"error": f"Supabase error: {error_message}"}), 500
+        else:
+            logger.error(f"Unknown error or response from Supabase during user update for {target_user_id}", exc_info=True)
+            return jsonify({"error": "Unknown error during user update."}), 500
+            
+    except Exception as e:
+        logger.error(f"Exception in temp_set_user_tenant: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Server exception: {str(e)}"}), 500
+# === END TEMPORARY ADMIN ROUTE ===
+
+# Route to get eBay category suggestions
+@app.route('/api/ebay/suggest_categories', methods=['GET'])
+def suggest_ebay_categories():
+    user_id, tenant_id = get_ids_from_request()
+    if not tenant_id:
+        return jsonify({"error": "Unauthorized or tenant ID missing"}), 401
+
+    query_params = request.args.get('q')
+    if not query_params:
+        return jsonify({"error": "Query parameter 'q' is required"}), 400
+
+    # category_tree_id for eBay US is '0'. This should ideally be configurable.
+    # For other sites: EBAY_GB = 3, EBAY_DE = 77, EBAY_AU = 15 etc.
+    # We'll use an environment variable or a default.
+    category_tree_id = os.getenv('EBAY_CATEGORY_TREE_ID', '0') 
+    
+    ebay_token = get_ebay_token()
+    if not ebay_token:
+        logger.error(f"Failed to get eBay token for category suggestion. Tenant: {tenant_id}")
+        return jsonify({"error": "Failed to authenticate with eBay"}), 500
+
+    headers = {
+        'Authorization': f'Bearer {ebay_token}',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+    }
+    
+    # URL encode the query parameters
+    encoded_query = urllib.parse.quote(query_params)
+    
+    suggestion_url = f'https://api.ebay.com/commerce/taxonomy/v1/category_tree/{category_tree_id}/get_category_suggestions?q={encoded_query}'
+    
+    logger.info(f"Requesting eBay category suggestions for query: '{query_params}', URL: {suggestion_url}. Tenant: {tenant_id}")
+
+    try:
+        response = requests.get(suggestion_url, headers=headers)
+        response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
+        
+        suggestions_data = response.json()
+        logger.info(f"Received {len(suggestions_data.get('categorySuggestions', []))} category suggestions from eBay. Tenant: {tenant_id}")
+        
+        # We might want to simplify the response before sending to frontend
+        # For now, sending the relevant part.
+        return jsonify(suggestions_data.get('categorySuggestions', [])), 200
+
+    except requests.exceptions.HTTPError as http_err:
+        logger.error(f"HTTP error suggesting categories from eBay: {http_err}. Response: {response.text}. Tenant: {tenant_id}")
+        try:
+            error_details = response.json() # eBay often returns JSON errors
+        except ValueError:
+            error_details = {"error": "eBay API request failed", "details": response.text[:200]} # Truncate if not JSON
+        return jsonify({"error": "Failed to get category suggestions from eBay", "details": error_details}), response.status_code
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"Request exception suggesting categories from eBay: {req_err}. Tenant: {tenant_id}")
+        return jsonify({"error": "Network error while contacting eBay for category suggestions"}), 503
+    except Exception as e:
+        logger.error(f"Generic error suggesting categories: {e}. Tenant: {tenant_id}")
+        return jsonify({"error": "An unexpected error occurred while suggesting categories"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("FLASK_RUN_PORT", 5000))

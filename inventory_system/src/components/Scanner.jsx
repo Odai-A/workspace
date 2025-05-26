@@ -105,6 +105,128 @@ const Scanner = () => {
     };
   };
 
+  async function lookupProductByCode(code) {
+    console.log(`🔍 Looking up product by code: ${code}, UserID: ${userId || 'N/A'}`);
+    setLoading(true);
+    setProductInfo(null); // Clear previous product info
+    setIsApiProcessing(false); // Reset processing state
+    setLastScannedCode(code); // Track the last scanned code
+
+    if (isAutoRefreshing) {
+      console.log('⏹️ Stopping auto-refresh due to new manual scan');
+      stopAutoRefresh();
+    }
+
+    try {
+      let rawProductFromDb = null; 
+      let sourceSystem = ''; 
+
+      // Try by FNSKU or ASIN via dbProductLookupService.getProductByFnsku
+      // This service already tries FNSKU then ASIN against manifest_data
+      const fnskuAsinProductMapped = await dbProductLookupService.getProductByFnsku(code);
+
+      if (fnskuAsinProductMapped && fnskuAsinProductMapped.rawSupabase) {
+        rawProductFromDb = fnskuAsinProductMapped.rawSupabase;
+        sourceSystem = 'manifest_data (via FNSKU/ASIN lookup)';
+        console.log(`✅ Raw data found from manifest_data via FNSKU/ASIN lookup:`, rawProductFromDb);
+      } else if (fnskuAsinProductMapped) {
+        // Fallback if rawSupabase wasn't populated by getProductByFnsku for some reason, but a truthy object was returned
+        // This might happen if getProductByFnsku's mapping changes or if it directly returns raw data in some paths.
+        console.warn(`[Scanner.jsx] Product found by getProductByFnsku but rawSupabase field is missing. Attempting to use returned object as raw.`, fnskuAsinProductMapped);
+        rawProductFromDb = fnskuAsinProductMapped; // Treat the returned object itself as potentially raw.
+        sourceSystem = 'manifest_data (via FNSKU/ASIN lookup - direct object)';
+      }
+
+      // If not found by FNSKU/ASIN, try by LPN
+      if (!rawProductFromDb) {
+        console.log(`[Scanner.jsx] Not found by FNSKU/ASIN in manifest_data. Trying LPN for code: ${code}...`);
+        const lpnProductMapped = await dbProductLookupService.getProductByLpn(code);
+        if (lpnProductMapped && lpnProductMapped.rawSupabase) {
+          rawProductFromDb = lpnProductMapped.rawSupabase;
+          sourceSystem = 'manifest_data (via LPN lookup)';
+          console.log(`✅ Raw data found from manifest_data via LPN lookup:`, rawProductFromDb);
+        } else if (lpnProductMapped) {
+          // Fallback for LPN lookup
+          console.warn(`[Scanner.jsx] Product found by getProductByLpn but rawSupabase field is missing. Attempting to use returned object as raw.`, lpnProductMapped);
+          rawProductFromDb = lpnProductMapped;
+          sourceSystem = 'manifest_data (via LPN lookup - direct object)';
+        }
+      }
+
+      if (rawProductFromDb) {
+        console.log(`[Scanner.jsx] Proceeding to map raw data from ${sourceSystem}:`, rawProductFromDb);
+        const displayProduct = mapSupabaseProductToDisplay(rawProductFromDb);
+        
+        if (displayProduct) {
+            setProductInfo(displayProduct);
+            // Use a more generic success message as source is already logged
+            toast.success("✅ Found in local database!", { icon: "💚" });
+        } else {
+            console.error("[Scanner.jsx] Failed to map raw product data from manifest_data:", rawProductFromDb);
+            toast.error("❌ Error processing data from local database.");
+            setProductInfo(null); // Ensure product info is cleared on mapping failure
+        }
+      } else {
+        // Not found locally - try external API
+        console.log(`[Scanner.jsx] Product not found in local DB (manifest_data) by FNSKU, ASIN, or LPN for code: ${code}. Trying external API...`);
+        toast.info("💰 Checking external API (this will be charged)...", {
+          autoClose: 2000
+        });
+        
+        const apiResult = await getProductLookup(code, userId); // getProductLookup handles its own caching logic
+        
+        if (apiResult) {
+          // This part assumes getProductLookup returns an object that is ready for setProductInfo
+          // or indicates processing.
+          if (apiResult.source === 'api_lookup_cache') {
+             toast.success("✅ Found in API cache - No API charge!", { icon: "💚" });
+             setProductInfo(apiResult); // apiResult from cache should already be mapped by apiCacheService.mapCacheToDisplay
+          } else if (apiResult.source === 'external_api') {
+            toast.success("⚡ Found via external API and saved for future use!", { icon: "💛" });
+            setProductInfo(apiResult); // apiResult from external_api should be mapped by getProductLookup
+          } else if (apiResult.source === 'asin_direct') {
+            toast.info("ℹ️ ASIN processed directly.", { icon: "🔵" });
+            setProductInfo(apiResult);
+          } else if (apiResult.processing_status === 'timeout' || apiResult.processing_status === 'quick_timeout') {
+            setIsApiProcessing(true);
+            setProcessingStartTime(new Date());
+            const message = apiResult.processing_status === 'quick_timeout' ?
+              "⚡ Quick scan complete - no ASIN yet. Click 'Check for Updates' in 2-3 minutes." :
+              "⏳ API is still processing this FNSKU. Click 'Check for Updates' in a few minutes.";
+            toast.warn(message, { autoClose: 6000 });
+            // Set some minimal info if available from apiResult for processing state
+            setProductInfo({ name: `Processing ${code}...`, sku: code, source: 'api_processing', ...apiResult});
+
+          } else if (apiResult.source === 'local_database') { // Should ideally be caught by earlier manifest_data check
+            toast.success("✅ Found in local database (via API path)!", { icon: "💚" });
+            setProductInfo(apiResult);
+          } else if (apiResult.source === 'mock_data') {
+             toast.info("📝 Using mock data for testing", { icon: "🔵" });
+             setProductInfo(apiResult);
+          } else {
+            // Not found or error from API
+            console.log("[Scanner.jsx] Product not found via external API or error occurred:", apiResult);
+            toast.error(apiResult.error_message || "❌ Product not found via external API.", { icon: "❌" });
+            setProductInfo(null);
+          }
+        } else {
+          toast.error("❌ Product not found in database or via external API.", { icon: "❌" });
+          setProductInfo(null);
+        }
+      }
+    } catch (error) {
+      console.error("Error looking up product by code in Scanner.jsx:", error);
+      if (error.message?.includes('External API')) {
+        toast.error("❌ External API lookup failed. Please try again.");
+      } else {
+        toast.error("❌ Error looking up product by code");
+      }
+      setProductInfo(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   function handleCodeDetected(detectedData) {
     const code = detectedData.code;
     if (!code) {
@@ -126,247 +248,6 @@ const Scanner = () => {
     });
     
     lookupProductByCode(cleanedCode);
-  }
-
-  async function lookupProductByCode(code) {
-    console.log(`🔍 Looking up product by code: ${code}, UserID: ${userId || 'N/A'}`);
-    setLoading(true);
-    setProductInfo(null); // Clear previous product info
-    setIsApiProcessing(false); // Reset processing state
-    setLastScannedCode(code); // Track the last scanned code
-
-    // Stop any ongoing auto-refresh when starting a new lookup
-    if (isAutoRefreshing) {
-      console.log('⏹️ Stopping auto-refresh due to new manual scan');
-      stopAutoRefresh();
-    }
-
-    try {
-      // First try the local database (Supabase)
-      let productFromDb = await dbProductLookupService.getProductByFnsku(code);
-
-      if (!productFromDb) {
-        console.log(`Product not found by FNSKU (${code}) in DB/Cache, trying as LPN in DB...`);
-        // getProductByLpn only checks manifest_data, so its result always needs mapping if found.
-        const lpnData = await dbProductLookupService.getProductByLpn(code);
-        if (lpnData) {
-          productFromDb = mapSupabaseProductToDisplay(lpnData); // mapSupabaseProductToDisplay sets source to 'local_database'
-        }
-      }
-
-      if (productFromDb) {
-        let displayProduct;
-        // If productFromDb came from getProductByFnsku, it might already be mapped from api_cache or be raw from manifest_data
-        if (productFromDb.source === 'api_cache' || productFromDb.source === 'fnsku_cache') {
-          console.log('✅ Using directly from API Cache source:', productFromDb);
-          displayProduct = productFromDb; // Already mapped by apiCacheService.mapCacheToDisplay
-          toast.success("✅ Found in API cache - No API charge!", {
-            icon: "💚"
-          });
-        } else if (productFromDb.rawSupabase) { // It came from manifest_data via getProductByFnsku's LPN or FNSKU check, but was mapped by mapSupabaseProductToDisplay
-          console.log('✅ Mapped from local_database (manifest_data via LPN/FNSKU specific mapping pathway):', productFromDb);
-          displayProduct = productFromDb; // Already mapped by mapSupabaseProductToDisplay
-          toast.success("✅ Found in local database - No API charge!", {
-            icon: "💚"
-          });
-        } else {
-          // This case implies productFromDb is raw from manifest_data (e.g., direct return from getProductByFnsku before mapping)
-          console.log('📦 Mapping raw data from manifest_data:', productFromDb);
-          displayProduct = mapSupabaseProductToDisplay(productFromDb);
-          // mapSupabaseProductToDisplay sets source to 'local_database' and cost_status to 'no_charge'
-          toast.success("✅ Found in local database - No API charge!", {
-            icon: "💚"
-          });
-        }
-        
-        setProductInfo(displayProduct);
-        
-        // Removed scan history logging to avoid database issues  
-        // if (displayProduct) {
-        //   console.log("[Scanner.jsx] Attempting to log scan event (from DB/Cache). Code:", code, "Product Details:", displayProduct);
-        //   const logResult = await dbProductLookupService.logScanEvent(code, displayProduct);
-        //   console.log("[Scanner.jsx] Scan event log result (from DB/Cache):", logResult);
-        // }
-      } else {
-        // Not found locally - try external API
-        console.log(`Product not found in local DB/Cache by FNSKU or LPN (${code}), trying external API...`);
-        toast.info("💰 Checking external API (this will be charged)...", {
-          autoClose: 2000
-        });
-        
-        console.log("🚀 [DEBUG] About to call getProductLookup for:", code);
-        const apiResult = await getProductLookup(code, userId);
-        console.log("🚀 [DEBUG] getProductLookup returned:", apiResult);
-        
-        if (apiResult) {
-          console.log("🚀 [DEBUG] API result ASIN:", apiResult.asin);
-          console.log("🚀 [DEBUG] API result FNSKU:", apiResult.fnsku);
-          console.log("🚀 [DEBUG] API result source:", apiResult.source);
-          
-          let displayableProduct = null;
-          let productForLogging = apiResult; 
-          
-          // Check if ASIN was found or if API is still processing
-          if (!apiResult.asin && (apiResult.processing_status === 'timeout' || apiResult.processing_status === 'quick_timeout')) {
-            // API is still processing - show processing state
-            setIsApiProcessing(true);
-            setProcessingStartTime(new Date());
-            
-            if (apiResult.processing_status === 'quick_timeout') {
-              toast.warn("⚡ Quick scan complete - no ASIN yet. Click 'Check for Updates' in 2-3 minutes.", {
-                autoClose: 6000
-              });
-            } else {
-              toast.warn("⏳ API is still processing this FNSKU. Click 'Check for Updates' in a few minutes.", {
-                autoClose: 6000
-              });
-            }
-          }
-          
-          // Check if it came from external API or was already saved
-          if (apiResult.source === 'external_api') {
-            toast.success("⚡ Found via external API and saved for future use!", {
-              icon: "💛"
-            });
-            
-            console.log("🚀 [DEBUG] Processing external_api result with ASIN:", apiResult.asin);
-          } else if (apiResult.source === 'local_database') {
-            toast.success("✅ Found in local database - No API charge!", {
-              icon: "💚"
-            });
-          } else {
-            toast.info("📝 Using mock data for testing", {
-              icon: "🔵"
-            });
-          }
-          
-          // Save to API cache if it's from external API AND has a real ASIN
-          try {
-            if (apiResult.source === 'external_api') {
-              // ONLY SAVE TO CACHE IF WE HAVE A REAL ASIN!
-              if (apiResult.asin && apiResult.asin.trim() !== '') {
-                console.log('💾 Attempting to save external API result to API cache for future cost savings...');
-                console.log('🔍 API result to save:', apiResult);
-                
-                const savedToCache = await apiCacheService.saveLookup(apiResult); 
-                
-                if (savedToCache) {
-                  console.log('✅ Successfully saved external API result to API cache:', savedToCache);
-                  displayableProduct = apiCacheService.mapCacheToDisplay(savedToCache);
-                  displayableProduct.source = 'api_cache';
-                  displayableProduct.cost_status = 'no_charge';
-                  productForLogging = displayableProduct; 
-                  toast.success("💾 API result saved to cache! Future scans of this item will be FREE! 🎉", {
-                    autoClose: 4000
-                  });
-                } else {
-                  console.error('❌ Failed to save external API result to cache');
-                  toast.warn("⚠️ Product found via API, but failed to save to cache. Next scan will be charged again.", {
-                    autoClose: 5000
-                  });
-                  // Still display the product even if save failed
-                  displayableProduct = apiResult;
-                  displayableProduct.source = 'external_api';
-                  displayableProduct.cost_status = 'charged';
-                  productForLogging = displayableProduct; 
-                }
-              } else {
-                // ASIN is NULL or EMPTY - this means the API is still processing
-                console.log('⏳ API returned null/empty ASIN - Starting auto-refresh ONLY IF NEEDED');
-                
-                // Check if auto-refresh is ALREADY active for this code
-                if (!isAutoRefreshing || autoRefreshCode !== code) {
-                  console.log('🔄 Starting auto-refresh as ASIN is not yet available.');
-                  startAutoRefresh(code);
-                  toast.info("⏳ API processing. Auto-refreshing for ASIN every 45s.", {
-                    autoClose: 6000
-                  });
-                } else {
-                  console.log('🔄 Auto-refresh is already active for this code. No new toast.');
-                }
-                
-                displayableProduct = apiResult; // Show current (null ASIN) state
-                displayableProduct.source = 'external_api';
-                displayableProduct.cost_status = 'charged';
-                productForLogging = displayableProduct;
-              }
-            } else {
-              // For non-external API results, or if ASIN not found by external_api.
-              // Also handles cases where asin_found is false.
-              // Do not save to cache in these scenarios.
-              if (apiResult.source === 'external_api' && (!apiResult.asin || apiResult.asin.trim() === '' || !apiResult.asin_found)) {
-                 toast.warn("ℹ️ ASIN not found or not confirmed by external API for this FNSKU. Not saving to cache.", { icon: "ℹ️", autoClose: 5000 });
-              }
-              displayableProduct = apiResult; // Use the original apiResult
-              // Ensure source and cost_status are correctly set if it was an external lookup without a cache save
-              if (apiResult.source === 'external_api') {
-                displayableProduct.source = 'external_api';
-                displayableProduct.cost_status = 'charged';
-              }
-               productForLogging = displayableProduct;
-            }
-          } catch (saveError) {
-                console.error("❌ Exception saving API result to cache:", saveError);
-                toast.error("⚠️ Product found via API, but error saving to cache. Next scan might be charged again.", { autoClose: 5000 });
-                // Fallback to using the original apiResult for display and logging if save fails
-                displayableProduct = apiResult;
-                if (displayableProduct) { //Ensure apiResult is not null
-                    displayableProduct.source = 'external_api'; 
-                    displayableProduct.cost_status = 'charged';
-                    productForLogging = displayableProduct;
-                }
-          }
-
-          if (apiResult.source === 'api_cache' || apiResult.source === 'fnsku_cache') {
-            // This block might be redundant if already handled by the saveToCache logic,
-            // but ensures correct state if apiResult was directly from cache.
-            displayableProduct = apiResult; // apiResult should already be mapped if from cache
-            toast.success("✅ Found in API cache - No API charge!", { icon: "💚" });
-            if(displayableProduct){
-                 displayableProduct.cost_status = 'no_charge';
-                 productForLogging = displayableProduct; 
-            }
-          } else if (apiResult.source === 'local_database') {
-            // This case should ideally be caught by the initial productFromDb check.
-            // If somehow apiResult indicates local_database, treat as no charge.
-            displayableProduct = apiResult;
-            toast.success("✅ Found in local database - No API charge!", { icon: "💚" });
-             if(displayableProduct){
-                displayableProduct.cost_status = 'no_charge';
-                productForLogging = displayableProduct;
-             }
-          } else if (apiResult.source !== 'external_api' && apiResult.source !== 'api_cache' && apiResult.source !== 'fnsku_cache') { 
-            // Handles mock data or other non-standard sources
-            displayableProduct = apiResult;
-            toast.info("📝 Using mock data or other source.", { icon: "🔵" });
-            productForLogging = displayableProduct;
-          }
-          
-          console.log('🚀 [DEBUG] Final displayableProduct before setProductInfo:', displayableProduct);
-          console.log('🚀 [DEBUG] Final displayableProduct ASIN:', displayableProduct?.asin);
-          
-          setProductInfo(displayableProduct);
-          
-          // Removed scan history logging to avoid database issues
-          // if (productForLogging) {
-          //   console.log("[Scanner.jsx] Attempting to log scan event. Code:", code, "Product Details for Logging:", productForLogging);
-          //   const logResult = await dbProductLookupService.logScanEvent(code, productForLogging);
-          //   console.log("[Scanner.jsx] Scan event log result (from API path):", logResult);
-          // }
-        } else {
-          toast.error("❌ Product not found in database or via external API.", { icon: "❌" });
-        }
-      }
-    } catch (error) {
-      console.error("Error looking up product by code:", error);
-      if (error.message?.includes('External API')) {
-        toast.error("❌ External API lookup failed. Please try again.");
-      } else {
-        toast.error("❌ Error looking up product by code");
-      }
-    } finally {
-      setLoading(false);
-    }
   }
 
   const handleManualScan = async (barcodeToScan) => {
