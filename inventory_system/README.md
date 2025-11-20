@@ -20,8 +20,10 @@ The application uses the following environment variables:
 - `VITE_SUPABASE_URL`: Your Supabase project URL
 - `VITE_SUPABASE_ANON_KEY`: Your Supabase anonymous key
 - `VITE_F2A_BARCODE_API_KEY`: API key for the barcode lookup service
+- `VITE_FNSKU_API_KEY`: (Optional) FNSKU to ASIN API key. If not set, a default key will be used. Get your key from [fnskutoasin.com](https://ato.fnskutoasin.com/).
 - `VITE_API_URL`: Base URL for API calls
 - `VITE_USE_MOCK_DATA`: Set to "true" to use mock data when API calls fail
+- `VITE_RAINFOREST_API_KEY`: (Optional) Rainforest API key for enhanced product data and images. Get your key from [Rainforest API](https://www.rainforestapi.com/). If not set, the system will use available product data from other sources.
 
 ## Development
 
@@ -226,4 +228,5 @@ Create a `.env` file in the root directory with the following variables:
 VITE_SUPABASE_URL=your_supabase_url
 VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
 VITE_F2A_BARCODE_API_KEY=your_f2a_barcode_api_key
+VITE_RAINFOREST_API_KEY=your_rainforest_api_key (optional, for enhanced product images and details)
 ```

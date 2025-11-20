@@ -5,7 +5,19 @@ import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../config/supabaseClient';
 import PriceIdWarning from '../components/PriceIdWarning';
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000'; // Your Flask backend URL
+// Get API URL from environment or detect from current origin for production
+const getApiUrl = () => {
+  if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
+  if (import.meta.env.VITE_BACKEND_URL) return import.meta.env.VITE_BACKEND_URL;
+  if (typeof window !== 'undefined') {
+    const origin = window.location.origin;
+    if (!origin.includes('localhost') && !origin.includes('127.0.0.1')) {
+      return origin.replace(/:\d+$/, ':5000');
+    }
+  }
+  return 'http://localhost:5000'; // Fallback for local development
+};
+const API_URL = getApiUrl();
 
 // Price IDs from environment variables with validation
 const getValidPriceId = (envVar, fallback = null) => {

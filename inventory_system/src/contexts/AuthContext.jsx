@@ -33,6 +33,24 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     console.log('AuthProvider initialized, checking for session...');
     
+    // Check if Supabase is properly configured
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+    const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+    const isSupabaseConfigured = supabaseUrl && 
+                                 supabaseAnonKey && 
+                                 supabaseUrl !== 'https://placeholder.supabase.co' && 
+                                 supabaseAnonKey !== 'placeholder-key' &&
+                                 !supabaseUrl.includes('your-project') &&
+                                 !supabaseAnonKey.includes('your-anon-key');
+    
+    if (!isSupabaseConfigured) {
+      console.warn('⚠️ Supabase not configured. Running in unauthenticated mode.');
+      console.warn('⚠️ Please set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in your .env file.');
+      setLoading(false);
+      return; // Exit early if Supabase is not configured
+    }
+    
+    console.log('✅ Supabase configured. Authentication enabled.');
     setLoading(true);
     const fetchSession = async () => {
       try {
@@ -44,8 +62,9 @@ export const AuthProvider = ({ children }) => {
       } catch (error) {
         console.error('AuthProvider: Error fetching initial session:', error);
         logAuthState('init-no-session');
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     };
 
     fetchSession();
@@ -69,22 +88,50 @@ export const AuthProvider = ({ children }) => {
 
   // Sign in with email and password
   const signIn = async (email, password) => {
-    console.log('SignIn attempt with email:', email);
+    console.log('🔐 SignIn attempt with email:', email);
+    
+    // Check if Supabase is properly configured
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+    const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+    const isSupabaseConfigured = supabaseUrl && 
+                                 supabaseAnonKey && 
+                                 supabaseUrl !== 'https://placeholder.supabase.co' && 
+                                 supabaseAnonKey !== 'placeholder-key' &&
+                                 !supabaseUrl.includes('your-project') &&
+                                 !supabaseAnonKey.includes('your-anon-key');
+    
+    if (!isSupabaseConfigured) {
+      const errorMsg = 'Supabase is not configured. Please add your Supabase credentials to the .env file.';
+      console.error('❌', errorMsg);
+      console.error('Current URL:', supabaseUrl ? supabaseUrl.substring(0, 30) + '...' : 'MISSING');
+      console.error('Current Key:', supabaseAnonKey ? supabaseAnonKey.substring(0, 20) + '...' : 'MISSING');
+      toast.error(errorMsg + ' Check the browser console for details.');
+      return { success: false, error: errorMsg };
+    }
+    
+    console.log('✅ Supabase configured, attempting sign in...');
     setLoading(true);
     try {
       const { data, error } = await supabase.auth.signInWithPassword({
         email,
         password,
       });
-      if (error) throw error;
+      
+      if (error) {
+        console.error('❌ Supabase sign in error:', error);
+        throw error;
+      }
+      
+      console.log('✅ Sign in successful!', { userId: data.user?.id, email: data.user?.email });
       // setUser and setSession will be handled by onAuthStateChange
       toast.success('Signed in successfully!');
       return { success: true, user: data.user, session: data.session };
     } catch (error) {
-      console.error('Error signing in:', error.message);
-      toast.error(error.message || 'Failed to sign in.');
+      console.error('❌ Error signing in:', error);
+      const errorMessage = error.message || 'Failed to sign in. Please check your credentials.';
+      toast.error(errorMessage);
       logAuthState('signin-exception', { error });
-      return { success: false, error: error.message };
+      return { success: false, error: errorMessage };
     } finally {
       setLoading(false);
     }

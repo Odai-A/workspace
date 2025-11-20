@@ -3,7 +3,19 @@ import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
 // import { useAuth } from '../contexts/AuthContext'; // Your existing AuthContext
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+// Get API URL from environment or detect from current origin for production
+const getApiUrl = () => {
+  if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
+  if (import.meta.env.VITE_BACKEND_URL) return import.meta.env.VITE_BACKEND_URL;
+  if (typeof window !== 'undefined') {
+    const origin = window.location.origin;
+    if (!origin.includes('localhost') && !origin.includes('127.0.0.1')) {
+      return origin.replace(/:\d+$/, ':5000');
+    }
+  }
+  return 'http://localhost:5000'; // Fallback for local development
+};
+const API_URL = getApiUrl();
 
 const CustomerDashboardPage = () => {
   const [isLoading, setIsLoading] = useState(false);

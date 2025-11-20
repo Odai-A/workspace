@@ -400,20 +400,54 @@ export const productLookupService = {
     console.log(`Attempting to save to manifest_data:`, mappedData);
 
     try {
-      // Using upsert for simplicity, with conflict on the specified Supabase column name
-      const { data, error } = await supabase
-        .from(PRODUCT_TABLE) // manifest_data
-        .upsert(mappedData, { onConflict: conflictColumnSupabase, ignoreDuplicates: false })
-        .select()
-        .single();
+      // Check if record exists first (since there may not be a unique constraint)
+      const searchValue = mappedData[conflictColumnSupabase];
+      const { data: existingData, error: searchError } = await supabase
+        .from(PRODUCT_TABLE)
+        .select('*')
+        .eq(conflictColumnSupabase, searchValue)
+        .limit(1)
+        .maybeSingle();
       
-      if (error) {
-        console.error('Error upserting product to manifest_data:', error);
-        console.error('Attempted to save:', mappedData);
+      if (searchError && searchError.code !== 'PGRST116') {
+        console.error('Error checking for existing product:', searchError);
         return null;
       }
-      console.log('✅ Successfully saved/updated product in manifest_data:', data);
-      return data;
+
+      let result;
+      if (existingData) {
+        // Update existing record
+        const { data, error } = await supabase
+          .from(PRODUCT_TABLE)
+          .update(mappedData)
+          .eq(conflictColumnSupabase, searchValue)
+          .select()
+          .single();
+        
+        if (error) {
+          console.error('Error updating product in manifest_data:', error);
+          return null;
+        }
+        result = data;
+        console.log('✅ Successfully updated product in manifest_data:', result);
+      } else {
+        // Insert new record
+        const { data, error } = await supabase
+          .from(PRODUCT_TABLE)
+          .insert(mappedData)
+          .select()
+          .single();
+        
+        if (error) {
+          console.error('Error inserting product to manifest_data:', error);
+          console.error('Attempted to save:', mappedData);
+          return null;
+        }
+        result = data;
+        console.log('✅ Successfully inserted product in manifest_data:', result);
+      }
+      
+      return result;
     } catch (error) {
       console.error('Exception in saveProductToManifest:', error);
       return null;
@@ -502,9 +536,15 @@ export const productLookupService = {
     }
   },
 
-  async logScanEvent(scannedCode, productDetails = null) {
+  async logScanEvent(scannedCode, productDetails = null, userId = null) {
     if (!scannedCode) return null;
     try {
+      // Get current user ID if not provided
+      if (!userId) {
+        const { data: { user } } = await supabase.auth.getUser();
+        userId = user?.id || null;
+      }
+
       let manifestDataId = null;
       let productDescription = productDetails?.name || productDetails?.description || 'N/A';
       let apiCacheId = null;
@@ -523,6 +563,7 @@ export const productLookupService = {
       const eventData = {
         scanned_code: scannedCode,
         scanned_at: new Date().toISOString(),
+        user_id: userId, // Add user_id to track who scanned
         manifest_data_id: manifestDataId,
         api_lookup_cache_id: apiCacheId, // New field to link to api_lookup_cache
         product_description: productDescription,

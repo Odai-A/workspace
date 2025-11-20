@@ -57,8 +57,16 @@ if 'postgresql' in app.config['SQLALCHEMY_DATABASE_URI']:
     app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {"pool_pre_ping": True}
 app.config['SECRET_KEY'] = os.urandom(24) # For flash messages
 
-# Enable CORS for all domains and routes
-CORS(app)
+# Enable CORS - configure for production
+# In production, set ALLOWED_ORIGINS environment variable (comma-separated)
+# Example: ALLOWED_ORIGINS=https://yourdomain.com,https://www.yourdomain.com
+allowed_origins = os.environ.get('ALLOWED_ORIGINS', '*').split(',')
+if allowed_origins == ['*']:
+    # Development: allow all origins
+    CORS(app)
+else:
+    # Production: allow specific origins
+    CORS(app, resources={r"/api/*": {"origins": allowed_origins}})
 
 # eBay API Configuration
 EBAY_CLIENT_ID = os.getenv('EBAY_CLIENT_ID')
@@ -824,7 +832,14 @@ def external_lookup():
         # NOT FOUND LOCALLY: Proceed with external API call
         # Using the provided fnskutoasin.com API
         BASE_URL = "https://ato.fnskutoasin.com"
-        API_KEY = "20a98a6a-437e-497c-b64c-ec97ec2fbc19"
+        API_KEY = os.environ.get('FNSKU_API_KEY')
+        
+        if not API_KEY:
+            logger.error("FNSKU_API_KEY not found in environment variables")
+            return jsonify({
+                "success": False,
+                "message": "FNSKU API key not configured. Please set FNSKU_API_KEY in your .env file."
+            }), 500
         
         # Try to get existing scan task by barcode first
         lookup_url = f"{BASE_URL}/api/v1/ScanTask/GetByBarCode"
@@ -1224,6 +1239,263 @@ def upload_shopify_image():
             "success": False,
             "message": f"Error uploading image: {str(e)}"
         }), 500
+
+# --- User Management Endpoints ---
+@app.route('/api/users', methods=['GET'])
+def list_users():
+    """List all users with their scan statistics"""
+    try:
+        user_id, tenant_id = get_ids_from_request()
+        if not user_id:
+            return jsonify({'error': 'Unauthorized'}), 401
+
+        # Check if user is admin (you can add role checking here)
+        # For now, we'll allow any authenticated user to see users in their tenant
+        
+        if not supabase_admin:
+            return jsonify({'error': 'Admin client not configured'}), 500
+
+        # Get all users
+        try:
+            response = supabase_admin.auth.admin.list_users()
+            # Supabase Python client returns response with users attribute
+            if hasattr(response, 'users'):
+                users = response.users or []
+            elif hasattr(response, 'data') and hasattr(response.data, 'users'):
+                users = response.data.users or []
+            else:
+                # Try to access directly
+                users = getattr(response, 'users', []) or []
+        except Exception as list_error:
+            logger.error(f"Error listing users from Supabase: {list_error}")
+            return jsonify({'error': f'Failed to list users: {str(list_error)}'}), 500
+        
+        # Enrich each user with scan statistics
+        enriched_users = []
+        for auth_user in users:
+            scan_count = 0
+            last_scan = None
+            is_actively_scanning = False
+
+            try:
+                # Get scan count (try with user_id, fallback to all scans if column doesn't exist)
+                try:
+                    scan_count_result = supabase_admin.from_('scan_history').select('*', count='exact').eq('user_id', auth_user.id).execute()
+                    scan_count = scan_count_result.count if hasattr(scan_count_result, 'count') else (len(scan_count_result.data) if scan_count_result.data else 0)
+
+                    # Get last scan
+                    last_scan_result = supabase_admin.from_('scan_history').select('scanned_at').eq('user_id', auth_user.id).order('scanned_at', ascending=False).limit(1).execute()
+                    last_scan = last_scan_result.data[0] if last_scan_result.data and len(last_scan_result.data) > 0 else None
+
+                    # Determine active scanning status (within last 30 minutes)
+                    if last_scan and last_scan.get('scanned_at'):
+                        from datetime import datetime, timezone
+                        last_scan_time = datetime.fromisoformat(last_scan['scanned_at'].replace('Z', '+00:00'))
+                        time_diff = datetime.now(timezone.utc) - last_scan_time.replace(tzinfo=timezone.utc)
+                        is_actively_scanning = time_diff.total_seconds() < 1800  # 30 minutes
+                except Exception as scan_error:
+                    logger.warning(f"Could not fetch scan stats for user {auth_user.id}: {scan_error}")
+                    # scan_history might not have user_id column yet, or user has no scans
+                    pass
+            except Exception as e:
+                logger.warning(f"Error processing scan stats: {e}")
+
+            # Get role from app_metadata
+            role = 'employee'
+            if auth_user.app_metadata:
+                role = auth_user.app_metadata.get('role', 'employee')
+            elif auth_user.user_metadata:
+                role = auth_user.user_metadata.get('role', 'employee')
+
+            # Format dates
+            last_login_str = None
+            if auth_user.last_sign_in_at:
+                if isinstance(auth_user.last_sign_in_at, str):
+                    last_login_str = auth_user.last_sign_in_at
+                else:
+                    last_login_str = auth_user.last_sign_in_at.isoformat()
+
+            created_at_str = None
+            if auth_user.created_at:
+                if isinstance(auth_user.created_at, str):
+                    created_at_str = auth_user.created_at
+                else:
+                    created_at_str = auth_user.created_at.isoformat()
+
+            enriched_users.append({
+                'id': auth_user.id,
+                'email': auth_user.email,
+                'firstName': auth_user.user_metadata.get('first_name', '') if auth_user.user_metadata else '',
+                'lastName': auth_user.user_metadata.get('last_name', '') if auth_user.user_metadata else '',
+                'role': role,
+                'status': 'Inactive' if auth_user.banned_at else ('Active' if auth_user.email_confirmed_at else 'Pending'),
+                'lastLogin': last_login_str,
+                'scanCount': scan_count,
+                'isActivelyScanning': is_actively_scanning,
+                'lastScanTime': last_scan['scanned_at'] if last_scan and last_scan.get('scanned_at') else None,
+                'createdAt': created_at_str
+            })
+
+        return jsonify({'users': enriched_users}), 200
+
+    except Exception as e:
+        logger.error(f"Error listing users: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/users', methods=['POST'])
+def create_user():
+    """Create a new user/employee"""
+    try:
+        user_id, tenant_id = get_ids_from_request()
+        if not user_id:
+            return jsonify({'error': 'Unauthorized'}), 401
+
+        data = request.get_json()
+        email = data.get('email')
+        password = data.get('password')
+        firstName = data.get('firstName', '')
+        lastName = data.get('lastName', '')
+        role = data.get('role', 'employee')
+
+        if not email or not password:
+            return jsonify({'error': 'Email and password are required'}), 400
+
+        if not supabase_admin:
+            return jsonify({'error': 'Admin client not configured'}), 500
+
+        # Create user
+        try:
+            response = supabase_admin.auth.admin.create_user({
+                'email': email,
+                'password': password,
+                'email_confirm': True,
+                'user_metadata': {
+                    'first_name': firstName,
+                    'last_name': lastName,
+                    'role': role
+                },
+                'app_metadata': {
+                    'role': role,
+                    'tenant_id': tenant_id  # Associate with tenant
+                }
+            })
+
+            # Check response structure
+            user = None
+            if hasattr(response, 'user'):
+                user = response.user
+            elif hasattr(response, 'data') and hasattr(response.data, 'user'):
+                user = response.data.user
+            elif hasattr(response, 'data'):
+                user = response.data
+
+            if user:
+                return jsonify({'user': {
+                    'id': user.id if hasattr(user, 'id') else str(user.get('id', '')),
+                    'email': user.email if hasattr(user, 'email') else user.get('email', email),
+                    'firstName': firstName,
+                    'lastName': lastName,
+                    'role': role
+                }}), 201
+            else:
+                return jsonify({'error': 'Failed to create user - no user in response'}), 500
+        except Exception as create_error:
+            logger.error(f"Error creating user: {create_error}")
+            return jsonify({'error': f'Failed to create user: {str(create_error)}'}), 500
+
+    except Exception as e:
+        logger.error(f"Error creating user: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/users/<user_id>', methods=['PUT'])
+def update_user(user_id):
+    """Update a user"""
+    try:
+        current_user_id, tenant_id = get_ids_from_request()
+        if not current_user_id:
+            return jsonify({'error': 'Unauthorized'}), 401
+
+        data = request.get_json()
+        
+        if not supabase_admin:
+            return jsonify({'error': 'Admin client not configured'}), 500
+
+        updates = {}
+        
+        # Update user metadata
+        if 'firstName' in data or 'lastName' in data or 'role' in data:
+            user_metadata = {}
+            app_metadata = {}
+            
+            if 'firstName' in data:
+                user_metadata['first_name'] = data['firstName']
+            if 'lastName' in data:
+                user_metadata['last_name'] = data['lastName']
+            if 'role' in data:
+                user_metadata['role'] = data['role']
+                app_metadata['role'] = data['role']
+            
+            if user_metadata:
+                updates['user_metadata'] = user_metadata
+            if app_metadata:
+                updates['app_metadata'] = app_metadata
+
+        # Update password if provided
+        if 'newPassword' in data and data['newPassword']:
+            try:
+                password_response = supabase_admin.auth.admin.update_user_by_id(
+                    user_id,
+                    {'password': data['newPassword']}
+                )
+                if hasattr(password_response, 'error') and password_response.error:
+                    return jsonify({'error': str(password_response.error)}), 500
+            except Exception as pwd_error:
+                logger.error(f"Error updating password: {pwd_error}")
+                return jsonify({'error': f'Failed to update password: {str(pwd_error)}'}), 500
+
+        # Update other fields
+        if updates:
+            try:
+                response = supabase_admin.auth.admin.update_user_by_id(user_id, updates)
+                if hasattr(response, 'error') and response.error:
+                    return jsonify({'error': str(response.error)}), 500
+            except Exception as update_error:
+                logger.error(f"Error updating user: {update_error}")
+                return jsonify({'error': f'Failed to update user: {str(update_error)}'}), 500
+
+        return jsonify({'message': 'User updated successfully'}), 200
+
+    except Exception as e:
+        logger.error(f"Error updating user: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/users/<user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    """Delete a user"""
+    try:
+        current_user_id, tenant_id = get_ids_from_request()
+        if not current_user_id:
+            return jsonify({'error': 'Unauthorized'}), 401
+
+        if user_id == current_user_id:
+            return jsonify({'error': 'You cannot delete your own account'}), 400
+
+        if not supabase_admin:
+            return jsonify({'error': 'Admin client not configured'}), 500
+
+        try:
+            response = supabase_admin.auth.admin.delete_user(user_id)
+            if hasattr(response, 'error') and response.error:
+                return jsonify({'error': str(response.error)}), 500
+
+            return jsonify({'message': 'User deleted successfully'}), 200
+        except Exception as delete_error:
+            logger.error(f"Error deleting user: {delete_error}")
+            return jsonify({'error': f'Failed to delete user: {str(delete_error)}'}), 500
+
+    except Exception as e:
+        logger.error(f"Error deleting user: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/marketplace/pricing-suggestions', methods=['POST'])
 def get_pricing_suggestions():

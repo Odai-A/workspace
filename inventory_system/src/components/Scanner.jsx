@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useRef, useContext } from 'react';
 import { ToastContainer, toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
+import axios from 'axios';
 import BarcodeReader from './BarcodeReader';
 import MarketplaceListing from './MarketplaceListing';
 import ShopifyListing from './ShopifyListing';
 import { getProductLookup, externalApiService } from '../services/api';
 import { productLookupService as dbProductLookupService, apiCacheService } from '../services/databaseService';
 import { inventoryService } from '../config/supabaseClient';
-import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, CheckCircleIcon, CurrencyDollarIcon, ArrowTopRightOnSquareIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, CheckCircleIcon, CurrencyDollarIcon, ArrowTopRightOnSquareIcon, PrinterIcon, QrCodeIcon } from '@heroicons/react/24/outline';
 import { mockService } from '../services/mockData';
 import { useAuth } from '../contexts/AuthContext';
 
@@ -51,6 +52,12 @@ const Scanner = () => {
   const [manualScanError, setManualScanError] = useState(null);
   const [isManualScanning, setIsManualScanning] = useState(false);
   
+  // State for Add to Inventory modal
+  const [showAddToInventoryModal, setShowAddToInventoryModal] = useState(false);
+  const [inventoryQuantity, setInventoryQuantity] = useState(1);
+  const [inventoryLocation, setInventoryLocation] = useState('');
+  const [isAddingToInventory, setIsAddingToInventory] = useState(false);
+  
   // State for BarcodeReader component
   const [isCameraActive, setIsCameraActive] = useState(false);
   
@@ -78,6 +85,57 @@ const Scanner = () => {
       }
     };
   }, []);
+
+  // Load scanned codes from localStorage on mount
+  useEffect(() => {
+    const savedScans = localStorage.getItem('scannedCodes');
+    if (savedScans) {
+      try {
+        const parsed = JSON.parse(savedScans);
+        setScannedCodes(parsed);
+      } catch (error) {
+        console.error('Error loading saved scans:', error);
+      }
+    }
+  }, []);
+
+  // Save scanned codes to localStorage whenever they change
+  useEffect(() => {
+    if (scannedCodes.length > 0) {
+      localStorage.setItem('scannedCodes', JSON.stringify(scannedCodes));
+    } else {
+      localStorage.removeItem('scannedCodes');
+    }
+  }, [scannedCodes]);
+
+  // Update scan entry with product info when productInfo is set
+  useEffect(() => {
+    if (productInfo && lastScannedCode) {
+      setScannedCodes(prev => {
+        const updated = prev.map(item => {
+          if (item.code === lastScannedCode && !item.productInfo) {
+            // Save essential product info (not the entire object to avoid localStorage size issues)
+            return {
+              ...item,
+              productInfo: {
+                name: productInfo.name,
+                asin: productInfo.asin,
+                fnsku: productInfo.fnsku,
+                lpn: productInfo.lpn,
+                upc: productInfo.upc,
+                price: productInfo.price,
+                category: productInfo.category,
+                image_url: productInfo.image_url,
+                quantity: productInfo.quantity
+              }
+            };
+          }
+          return item;
+        });
+        return updated;
+      });
+    }
+  }, [productInfo, lastScannedCode]);
 
   // Helper function to map Supabase data to the structure expected by productInfo JSX
   const mapSupabaseProductToDisplay = (supabaseProduct) => {
@@ -345,7 +403,50 @@ const Scanner = () => {
           console.log('🚀 [DEBUG] Final displayableProduct before setProductInfo:', displayableProduct);
           console.log('🚀 [DEBUG] Final displayableProduct ASIN:', displayableProduct?.asin);
           
-          setProductInfo(displayableProduct);
+          // If we have an ASIN, automatically fetch enhanced data from Rainforest API
+          if (displayableProduct && displayableProduct.asin && displayableProduct.asin.trim() !== '') {
+            toast.info("📦 Fetching product details from Rainforest API...", { autoClose: 2000 });
+            
+            try {
+              const rainforestData = await fetchProductDataFromRainforest(displayableProduct.asin);
+              
+              if (rainforestData) {
+                // Merge Rainforest API data with existing product data
+                const enhancedProduct = {
+                  ...displayableProduct,
+                  name: rainforestData.title || displayableProduct.name || 'Product',
+                  image_url: rainforestData.image || displayableProduct.image_url || displayableProduct.image || '',
+                  price: rainforestData.price || displayableProduct.price,
+                  rating: rainforestData.rating || displayableProduct.rating || null,
+                  reviews_count: rainforestData.reviews_count || displayableProduct.reviews_count || null,
+                  brand: rainforestData.brand || displayableProduct.brand || '',
+                  category: rainforestData.category || displayableProduct.category || '',
+                  description: rainforestData.description || displayableProduct.description || ''
+                };
+                
+                console.log('✅ Enhanced product data from Rainforest API:', enhancedProduct);
+                toast.success("✅ Product details loaded with image!", { autoClose: 2000 });
+                setProductInfo(enhancedProduct);
+              } else {
+                // No Rainforest data, use what we have
+                console.log('⚠️ No Rainforest API data available, using existing product data');
+                setProductInfo(displayableProduct);
+              }
+            } catch (error) {
+              console.error("Error fetching Rainforest API data:", error);
+              // Continue with existing data even if Rainforest API fails
+              setProductInfo(displayableProduct);
+            }
+          } else {
+            // No ASIN available, just set the product info as is
+            console.log('⚠️ No ASIN found in displayableProduct, cannot fetch Rainforest data');
+            console.log('⚠️ displayableProduct:', displayableProduct);
+            if (displayableProduct) {
+              setProductInfo(displayableProduct);
+            } else {
+              toast.error("❌ Could not retrieve product information. Please check the FNSKU and try again.", { autoClose: 5000 });
+            }
+          }
           
           // Removed scan history logging to avoid database issues
           // if (productForLogging) {
@@ -359,10 +460,22 @@ const Scanner = () => {
       }
     } catch (error) {
       console.error("Error looking up product by code:", error);
-      if (error.message?.includes('External API')) {
-        toast.error("❌ External API lookup failed. Please try again.");
+      
+      // Check for specific error types
+      if (error.message?.includes('Backend server is not running')) {
+        toast.error("❌ Backend server is not running. Please start the Flask backend server.", {
+          autoClose: 8000,
+          icon: "⚠️"
+        });
+      } else if (error.message?.includes('Monthly Limit Reached') || error.message?.includes('limit')) {
+        toast.error("❌ API Monthly Limit Reached. Please upgrade your plan or use the backend server to avoid limits.", {
+          autoClose: 10000,
+          icon: "⚠️"
+        });
+      } else if (error.message?.includes('External API') || error.message?.includes('Backend API') || error.message?.includes('FNSKU API')) {
+        toast.error(`❌ ${error.message}`, { autoClose: 6000 });
       } else {
-        toast.error("❌ Error looking up product by code");
+        toast.error("❌ Error looking up product by code: " + (error.message || 'Unknown error'));
       }
     } finally {
       setLoading(false);
@@ -412,6 +525,333 @@ const Scanner = () => {
     } else {
       toast.error("No ASIN available to view on Amazon");
     }
+  };
+
+  // Fetch product data from Rainforest API
+  const fetchProductDataFromRainforest = async (asin) => {
+    const rainforestApiKey = import.meta.env.VITE_RAINFOREST_API_KEY;
+    
+    if (!rainforestApiKey) {
+      console.warn("Rainforest API key not configured. Using available product data.");
+      return null;
+    }
+
+    try {
+      const response = await axios.get('https://api.rainforestapi.com/request', {
+        params: {
+          api_key: rainforestApiKey,
+          type: 'product',
+          amazon_domain: 'amazon.com',
+          asin: asin
+        },
+        timeout: 10000
+      });
+
+      if (response.data && response.data.product) {
+        const product = response.data.product;
+        return {
+          title: product.title || '',
+          image: product.main_image?.link || product.images?.[0]?.link || '',
+          price: product.buybox_winner?.price?.value || product.price?.value || null,
+          rating: product.rating || null,
+          reviews_count: product.reviews_total || null,
+          brand: product.brand || '',
+          category: product.category?.name || '',
+          description: product.description || ''
+        };
+      }
+    } catch (error) {
+      console.error("Error fetching from Rainforest API:", error);
+      return null;
+    }
+    
+    return null;
+  };
+
+  // Handle printing 4x6 label
+  const handlePrintLabel = async () => {
+    if (!productInfo || !productInfo.asin) {
+      toast.error("No ASIN available to print label");
+      return;
+    }
+
+    const amazonUrl = `https://www.amazon.com/dp/${productInfo.asin}`;
+    
+    // Use QR code API service for reliable printing (smaller size for top right corner)
+    const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(amazonUrl)}`;
+    
+    // Product data should already be enhanced from Rainforest API when scanned
+    // But if image is missing, try to fetch it one more time
+    let labelProductData = { ...productInfo };
+    
+    if (!labelProductData.image_url && productInfo.asin) {
+      toast.info("📦 Fetching product image...", { autoClose: 1500 });
+      try {
+        const rainforestData = await fetchProductDataFromRainforest(productInfo.asin);
+        if (rainforestData && rainforestData.image) {
+          labelProductData.image_url = rainforestData.image;
+        }
+      } catch (error) {
+        console.warn("Could not fetch image from Rainforest API:", error);
+      }
+    }
+    
+    // Create print window with formatted label
+    const printWindow = window.open('', '_blank');
+    const labelContent = createLabelHTML(labelProductData, amazonUrl, qrApiUrl);
+    
+    printWindow.document.write(labelContent);
+    printWindow.document.close();
+    
+    // Wait for content to load, then trigger print dialog
+    setTimeout(() => {
+      printWindow.focus();
+      printWindow.print();
+    }, 800);
+    
+    toast.success("🖨️ Opening print dialog for 4x6 label");
+  };
+
+  // Helper function to create label HTML
+  const createLabelHTML = (productInfo, amazonUrl, qrCodeHtml) => {
+    // Calculate prices automatically
+    const retailPrice = productInfo.price != null ? parseFloat(productInfo.price) : 0;
+    const ourPrice = retailPrice / 2; // 50% off retail
+    
+    return `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Product Label - ${productInfo.asin}</title>
+          <style>
+            @page {
+              size: 4in 6in;
+              margin: 0.125in;
+            }
+            @media print {
+              body {
+                margin: 0;
+                padding: 0;
+              }
+              .no-print {
+                display: none;
+              }
+            }
+            body {
+              font-family: Arial, sans-serif;
+              width: 4in;
+              height: 6in;
+              margin: 0;
+              padding: 0.125in;
+              box-sizing: border-box;
+              display: flex;
+              flex-direction: column;
+              position: relative;
+            }
+            .qr-code-top-right {
+              position: absolute;
+              top: 0.125in;
+              right: 0.125in;
+              z-index: 10;
+            }
+            .qr-code {
+              border: 1px solid #000;
+              padding: 0.03in;
+              background: white;
+            }
+            .qr-code img {
+              display: block;
+              width: 80px;
+              height: 80px;
+            }
+            .label-header {
+              text-align: center;
+              border-bottom: 2px solid #000;
+              padding-bottom: 0.08in;
+              margin-bottom: 0.1in;
+              padding-right: 1in;
+            }
+            .label-title {
+              font-size: 12pt;
+              font-weight: bold;
+              margin: 0;
+              line-height: 1.3;
+              word-wrap: break-word;
+            }
+            .label-subtitle {
+              font-size: 8pt;
+              color: #666;
+              margin: 0.03in 0 0 0;
+            }
+            .asin-display {
+              font-size: 11pt;
+              font-weight: bold;
+              text-align: center;
+              background: #f0f0f0;
+              padding: 0.08in;
+              margin: 0.08in 0;
+              border: 1px solid #000;
+            }
+            .product-image-section {
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              margin: 0.1in 0;
+              min-height: 2in;
+              max-height: 2.2in;
+            }
+            .product-image {
+              max-width: 100%;
+              max-height: 2.2in;
+              width: auto;
+              height: auto;
+              object-fit: contain;
+              border: 1px solid #ddd;
+              background: white;
+            }
+            .product-info {
+              flex: 1;
+              display: flex;
+              flex-direction: column;
+              justify-content: flex-start;
+              margin: 0.08in 0;
+              font-size: 9pt;
+            }
+            .info-row {
+              display: flex;
+              justify-content: space-between;
+              margin: 0.05in 0;
+              font-size: 9pt;
+            }
+            .info-label {
+              font-weight: bold;
+              margin-right: 0.1in;
+            }
+            .info-value {
+              flex: 1;
+              text-align: right;
+              font-family: monospace;
+            }
+            .price-section {
+              margin: 0.1in 0;
+              text-align: center;
+            }
+            .retail-price {
+              font-size: 12pt;
+              font-weight: bold;
+              color: #666;
+              margin-bottom: 0.05in;
+            }
+            .retail-price-label {
+              font-size: 9pt;
+              color: #666;
+              margin-right: 0.1in;
+            }
+            .our-price {
+              font-size: 20pt;
+              font-weight: bold;
+              color: #059669;
+              margin-top: 0.05in;
+            }
+            .our-price-label {
+              font-size: 11pt;
+              font-weight: bold;
+              color: #059669;
+              margin-bottom: 0.03in;
+            }
+            .amazon-url {
+              font-size: 7pt;
+              text-align: center;
+              color: #666;
+              word-break: break-all;
+              margin-top: 0.08in;
+            }
+            .print-button {
+              position: fixed;
+              top: 20px;
+              right: 20px;
+              padding: 10px 20px;
+              background: #3b82f6;
+              color: white;
+              border: none;
+              border-radius: 5px;
+              cursor: pointer;
+              font-size: 14px;
+              z-index: 1000;
+            }
+            .print-button:hover {
+              background: #2563eb;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="no-print">
+            <button class="print-button" onclick="window.print()">Print Label</button>
+          </div>
+          
+          <div class="qr-code-top-right">
+            <div class="qr-code">
+              <img src="${qrCodeHtml}" alt="QR Code" onerror="this.style.display='none'; this.parentElement.innerHTML='<div style=\\'text-align:center; padding:5px; font-size:6pt;\\'>QR<br/>Code</div>';" />
+            </div>
+          </div>
+          
+          <div class="label-header">
+            <h1 class="label-title">${escapeHtml(productInfo.name || 'Product')}</h1>
+            <p class="label-subtitle">Amazon Product Label</p>
+          </div>
+
+          <div class="asin-display">
+            ASIN: ${productInfo.asin}
+          </div>
+
+          ${productInfo.image_url ? `
+            <div class="product-image-section">
+              <img src="${productInfo.image_url}" alt="Product Image" class="product-image" onerror="this.style.display='none';" />
+            </div>
+          ` : ''}
+
+          <div class="product-info">
+            ${productInfo.fnsku ? `
+              <div class="info-row">
+                <span class="info-label">FNSKU:</span>
+                <span class="info-value">${escapeHtml(productInfo.fnsku)}</span>
+              </div>
+            ` : ''}
+            ${productInfo.lpn ? `
+              <div class="info-row">
+                <span class="info-label">LPN:</span>
+                <span class="info-value">${escapeHtml(productInfo.lpn)}</span>
+              </div>
+            ` : ''}
+            ${productInfo.upc ? `
+              <div class="info-row">
+                <span class="info-label">UPC:</span>
+                <span class="info-value">${escapeHtml(productInfo.upc)}</span>
+              </div>
+            ` : ''}
+          </div>
+
+          ${retailPrice > 0 ? `
+            <div class="price-section">
+              <div class="retail-price">
+                <span class="retail-price-label">RETAIL PRICE:</span> $${retailPrice.toFixed(2)}
+              </div>
+              <div class="our-price-label">OUR PRICE:</div>
+              <div class="our-price">
+                $${ourPrice.toFixed(2)}
+              </div>
+            </div>
+          ` : ''}
+        </body>
+      </html>
+    `;
+  };
+
+  // Helper to escape HTML
+  const escapeHtml = (text) => {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
   };
 
   // Handle marketplace listing creation
@@ -502,13 +942,33 @@ const Scanner = () => {
   // Select product from search results
   const selectProduct = (product) => {
     setProductInfo(product);
+    setLastScannedCode(product.sku || product.asin || product.fnsku);
     setShowSearchResults(false);
     setSearchQuery('');
-    // Add to scanned codes history
-    setScannedCodes(prev => [
-      { code: product.sku || product.asin || product.fnsku, timestamp: new Date().toISOString() },
-      ...prev.slice(0, 9)
-    ]);
+    // Add to scanned codes history with product info
+    const code = product.sku || product.asin || product.fnsku;
+    setScannedCodes(prev => {
+      const newHistory = [
+        { 
+          code: code, 
+          timestamp: new Date().toISOString(), 
+          type: 'search',
+          productInfo: {
+            name: product.name,
+            asin: product.asin,
+            fnsku: product.fnsku,
+            lpn: product.lpn,
+            upc: product.upc,
+            price: product.price,
+            category: product.category,
+            image_url: product.image_url,
+            quantity: product.quantity
+          }
+        },
+        ...prev.filter(item => item.code !== code)
+      ].slice(0, 10);
+      return newHistory;
+    });
   };
 
   // Function to handle file selection
@@ -692,15 +1152,15 @@ const Scanner = () => {
                 
                 if (existingProduct) {
                   // Update with new information if needed
-                  await dbProductLookupService.saveProductLookup({
+                  await dbProductLookupService.saveProductToManifest({
                     ...existingProduct,
                     ...normalizedItem,
                     updated_at: new Date().toISOString()
-                  });
+                  }, { conflictKey: 'fnsku' });
                   duplicateCount++;
                 } else {
                   // Save as new product
-                  await dbProductLookupService.saveProductLookup(normalizedItem);
+                  await dbProductLookupService.saveProductToManifest(normalizedItem, { conflictKey: 'fnsku' });
                   successCount++;
                 }
               } else if (fileImportType === 'inventory') {
@@ -726,15 +1186,15 @@ const Scanner = () => {
                     productId = product.id;
                   } else {
                     // Add to product lookups first
-                    const newProduct = await dbProductLookupService.saveProductLookup({
+                    const newProduct = await dbProductLookupService.saveProductToManifest({
                       name: normalizedItem.name,
                       sku: normalizedItem.sku,
                       price: normalizedItem.price,
                       category: 'Imported',
                       condition: normalizedItem.condition,
                       source: 'Imported File'
-                    });
-                    productId = newProduct.id;
+                    }, { conflictKey: 'fnsku' });
+                    productId = newProduct?.id;
                   }
                 }
                 
@@ -880,7 +1340,7 @@ const Scanner = () => {
     }
     setIsAutoRefreshing(false);
     setAutoRefreshCode(null);
-    setCountdown(0); 
+    setAutoRefreshCountdown(0); 
     console.log('⏹️ Auto-refresh stopped.');
   };
 
@@ -903,6 +1363,176 @@ const Scanner = () => {
       toast.error("❌ Error checking for updates");
     } finally {
       setIsCheckingDatabase(false);
+    }
+  };
+
+  // Handle deleting individual scan
+  const handleDeleteScan = (index) => {
+    setScannedCodes(prev => {
+      const updated = prev.filter((_, i) => i !== index);
+      // Update localStorage
+      if (updated.length > 0) {
+        localStorage.setItem('scannedCodes', JSON.stringify(updated));
+      } else {
+        localStorage.removeItem('scannedCodes');
+      }
+      return updated;
+    });
+    toast.success('Scan removed');
+  };
+
+  // Handle clearing all scans
+  const handleClearAllScans = () => {
+    if (window.confirm('Are you sure you want to clear all recent scans?')) {
+      setScannedCodes([]);
+      localStorage.removeItem('scannedCodes');
+      toast.success('All scans cleared');
+    }
+  };
+
+  // Handle viewing Amazon from recent scan
+  const handleViewOnAmazonFromScan = (scanItem) => {
+    if (scanItem.productInfo && scanItem.productInfo.asin) {
+      const amazonUrl = `https://www.amazon.com/dp/${scanItem.productInfo.asin}`;
+      window.open(amazonUrl, '_blank');
+      toast.success(`🔗 Opening Amazon page for ASIN: ${scanItem.productInfo.asin}`);
+    } else {
+      toast.error("No ASIN available for this scan");
+    }
+  };
+
+  // Handle printing label from recent scan
+  const handlePrintLabelFromScan = async (scanItem) => {
+    if (!scanItem.productInfo || !scanItem.productInfo.asin) {
+      toast.error("No ASIN available to print label");
+      return;
+    }
+
+    const amazonUrl = `https://www.amazon.com/dp/${scanItem.productInfo.asin}`;
+    const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(amazonUrl)}`;
+    
+    let labelProductData = { ...scanItem.productInfo };
+    
+    // If image is missing, try to fetch it
+    if (!labelProductData.image_url && scanItem.productInfo.asin) {
+      toast.info("📦 Fetching product image...", { autoClose: 1500 });
+      try {
+        const rainforestData = await fetchProductDataFromRainforest(scanItem.productInfo.asin);
+        if (rainforestData && rainforestData.image) {
+          labelProductData.image_url = rainforestData.image;
+        }
+      } catch (error) {
+        console.warn("Could not fetch image from Rainforest API:", error);
+      }
+    }
+    
+    const printWindow = window.open('', '_blank');
+    const labelContent = createLabelHTML(labelProductData, amazonUrl, qrApiUrl);
+    
+    printWindow.document.write(labelContent);
+    printWindow.document.close();
+    
+    setTimeout(() => {
+      printWindow.focus();
+      printWindow.print();
+    }, 800);
+    
+    toast.success("🖨️ Opening print dialog for 4x6 label");
+  };
+
+  // Handle opening Add to Inventory modal
+  const handleOpenAddToInventory = () => {
+    if (!productInfo) {
+      toast.error("No product information available");
+      return;
+    }
+    setInventoryQuantity(1);
+    setInventoryLocation('');
+    setShowAddToInventoryModal(true);
+  };
+
+  // Handle adding product to inventory
+  const handleAddToInventory = async () => {
+    if (!productInfo) {
+      toast.error("No product information available");
+      return;
+    }
+
+    if (!inventoryQuantity || inventoryQuantity < 1) {
+      toast.error("Please enter a valid quantity (at least 1)");
+      return;
+    }
+
+    setIsAddingToInventory(true);
+    try {
+      // First, check if product exists in product lookup database
+      let productId = null;
+      const existingProduct = await dbProductLookupService.getProductByFnsku(productInfo.fnsku || productInfo.sku);
+      
+      if (existingProduct) {
+        productId = existingProduct.id;
+      } else {
+        // Try to create a new product lookup entry (optional - may fail due to RLS)
+        // If it fails, we'll still add to inventory without product_id
+        try {
+          const productData = {
+            name: productInfo.name || 'Unknown Product',
+            sku: productInfo.fnsku || productInfo.sku || productInfo.asin,
+            fnsku: productInfo.fnsku,
+            asin: productInfo.asin,
+            lpn: productInfo.lpn,
+            upc: productInfo.upc,
+            price: productInfo.price,
+            category: productInfo.category || 'Uncategorized',
+            description: productInfo.description || productInfo.name,
+            condition: 'New',
+            source: 'Scanner',
+            created_at: new Date().toISOString()
+          };
+          
+          const savedProduct = await dbProductLookupService.saveProductToManifest(productData, { conflictKey: 'fnsku' });
+          productId = savedProduct?.id;
+        } catch (manifestError) {
+          // If saving to manifest_data fails (e.g., RLS policy), continue without product_id
+          console.warn('Could not save to manifest_data (may be RLS restricted):', manifestError);
+          // Continue without productId - inventory item will still be saved
+        }
+      }
+
+      // Check if inventory item already exists
+      const existingInventory = await inventoryService.getInventoryBySku(productInfo.fnsku || productInfo.sku || productInfo.asin);
+      
+      // Only include fields that exist in the inventory table
+      const inventoryItem = {
+        sku: productInfo.fnsku || productInfo.sku || productInfo.asin,
+        name: productInfo.name || 'Unknown Product',
+        quantity: parseInt(inventoryQuantity, 10), // The addOrUpdateInventory function will handle adding to existing quantity
+        location: inventoryLocation || 'Default',
+        condition: 'New',
+        price: productInfo.price || 0,
+        cost: productInfo.price ? (productInfo.price / 2) : 0 // Our price (50% of retail)
+      };
+      
+      // Only add product_id if it exists (may be null if manifest_data save failed)
+      if (productId) {
+        inventoryItem.product_id = productId;
+      }
+
+      const result = await inventoryService.addOrUpdateInventory(inventoryItem);
+      
+      if (result) {
+        toast.success(`✅ Added ${inventoryQuantity} ${inventoryQuantity === 1 ? 'item' : 'items'} to inventory${existingInventory ? ' (quantity updated)' : ''}!`);
+        setShowAddToInventoryModal(false);
+        setInventoryQuantity(1);
+        setInventoryLocation('');
+      } else {
+        toast.error("Failed to add to inventory. Please try again.");
+      }
+    } catch (error) {
+      console.error("Error adding to inventory:", error);
+      toast.error(`Failed to add to inventory: ${error.message || 'Unknown error'}`);
+    } finally {
+      setIsAddingToInventory(false);
     }
   };
 
@@ -986,14 +1616,30 @@ const Scanner = () => {
           </button>
 
           {isCameraActive && (
-            <div className="mb-4 p-4 border rounded-md bg-gray-50">
-              <BarcodeReader onCodeDetected={handleCodeDetected} />
-              <button
-                onClick={() => setIsCameraActive(false)}
-                className="mt-3 w-full inline-flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
-              >
-                Close Camera
-              </button>
+            <div className="mb-4">
+              <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-xl p-4 md:p-6 shadow-2xl">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+                    <QrCodeIcon className="h-6 w-6 text-green-400" />
+                    Barcode Scanner
+                  </h3>
+                  <button
+                    onClick={() => setIsCameraActive(false)}
+                    className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                    title="Close Scanner"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+                <BarcodeReader 
+                  onCodeDetected={handleCodeDetected}
+                  active={isCameraActive}
+                  showViewFinder={true}
+                  className="w-full"
+                />
+              </div>
             </div>
           )}
 
@@ -1099,6 +1745,20 @@ const Scanner = () => {
                   <span className="text-xs font-medium text-gray-600">Code Type: {productInfo.code_type || 'N/A'} ({productInfo.code_type === 'FNSKU' ? 'Fulfillment Network Stock Keeping Unit' : productInfo.code_type})</span>
               </div>
 
+              {/* Product Image */}
+              {productInfo.image_url && (
+                <div className="mb-4 flex justify-center">
+                  <img 
+                    src={productInfo.image_url} 
+                    alt={productInfo.name || 'Product'} 
+                    className="max-w-full h-48 w-auto object-contain border border-gray-200 rounded-lg bg-white shadow-sm"
+                    onError={(e) => {
+                      e.target.style.display = 'none';
+                    }}
+                  />
+                </div>
+              )}
+
               <h3 className="text-lg font-bold text-gray-900 mb-1">{productInfo.name || 'N/A'}</h3>
               <p className="text-sm text-gray-600 mb-1">FNSKU: {productInfo.fnsku || 'N/A'} {productInfo.asin_found === false && productInfo.source ==='fnskutoasin.com' ? '(No ASIN found)' : ''}</p>
               
@@ -1112,15 +1772,37 @@ const Scanner = () => {
                 <p>MSRP: <span className="font-semibold text-green-600">${productInfo.price != null ? parseFloat(productInfo.price).toFixed(2) : '0.00'}</span></p>
               </div>
 
-              <button
-                type="button"
-                className="w-full mt-3 inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
-                onClick={handleViewOnAmazon}
-                disabled={loading || !productInfo.asin}
-              >
-                <ArrowTopRightOnSquareIcon className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
-                View on Amazon
-              </button>
+              <div className="mt-3 flex flex-col gap-2">
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    className="flex-1 inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
+                    onClick={handleViewOnAmazon}
+                    disabled={loading || !productInfo.asin}
+                  >
+                    <ArrowTopRightOnSquareIcon className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
+                    View on Amazon
+                  </button>
+                  <button
+                    type="button"
+                    className="flex-1 inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                    onClick={handlePrintLabel}
+                    disabled={loading || !productInfo.asin}
+                  >
+                    <PrinterIcon className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
+                    Print Label
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  className="w-full inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+                  onClick={handleOpenAddToInventory}
+                  disabled={loading || !productInfo}
+                >
+                  <ShoppingBagIcon className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
+                  Add to Inventory
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -1128,17 +1810,93 @@ const Scanner = () => {
 
       {/* Bottom Section: Recent Scans */}
       <div className="mt-6 bg-white p-6 rounded-lg shadow-md">
-        <h2 className="text-xl font-semibold mb-4 text-gray-800">Recent Scans</h2>
+        <div className="flex justify-between items-center mb-4">
+          <h2 className="text-xl font-semibold text-gray-800">Recent Scans</h2>
+          {scannedCodes.length > 0 && (
+            <button
+              onClick={handleClearAllScans}
+              className="text-sm text-red-600 hover:text-red-800 font-medium"
+            >
+              Clear All
+            </button>
+          )}
+        </div>
         {scannedCodes.length > 0 ? (
-          <ul className="divide-y divide-gray-200 max-h-60 overflow-y-auto">
+          <div className="space-y-4 max-h-96 overflow-y-auto">
             {scannedCodes.map((item, index) => (
-              <li key={index} className="py-3 flex justify-between items-center text-sm">
-                <span className="font-mono text-gray-700">{item.code}</span>
-                <span className="capitalize text-gray-600">{item.type}</span>
-                <span className="text-gray-500">{new Date(item.timestamp).toLocaleString()}</span>
-              </li>
+              <div key={`${item.code}-${item.timestamp}-${index}`} className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50">
+                <div className="flex justify-between items-start mb-2">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="font-mono text-sm font-semibold text-gray-800">{item.code}</span>
+                      <span className="capitalize text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded">({item.type})</span>
+                      <span className="text-xs text-gray-400">{new Date(item.timestamp).toLocaleString()}</span>
+                    </div>
+                    {item.productInfo ? (
+                      <div className="mt-2 space-y-1">
+                        <p className="text-sm font-medium text-gray-900">{item.productInfo.name || 'Product Name'}</p>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600">
+                          {item.productInfo.asin && <span>ASIN: <span className="font-mono">{item.productInfo.asin}</span></span>}
+                          {item.productInfo.fnsku && <span>FNSKU: <span className="font-mono">{item.productInfo.fnsku}</span></span>}
+                          {item.productInfo.lpn && <span>LPN: <span className="font-mono">{item.productInfo.lpn}</span></span>}
+                          {item.productInfo.price != null && <span>Price: <span className="font-semibold text-green-600">${parseFloat(item.productInfo.price).toFixed(2)}</span></span>}
+                        </div>
+                        {item.productInfo.image_url && (
+                          <img 
+                            src={item.productInfo.image_url} 
+                            alt={item.productInfo.name || 'Product'} 
+                            className="mt-2 h-16 w-16 object-contain border border-gray-200 rounded"
+                            onError={(e) => { e.target.style.display = 'none'; }}
+                          />
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-gray-500 italic mt-1">Loading product details...</p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => handleDeleteScan(index)}
+                    className="ml-2 text-red-600 hover:text-red-800 hover:bg-red-50 p-1 rounded flex-shrink-0"
+                    title="Delete this scan"
+                  >
+                    <XMarkIcon className="h-4 w-4" />
+                  </button>
+                </div>
+                {item.productInfo && (
+                  <div className="mt-3 flex flex-col gap-2">
+                    {item.productInfo.asin && (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleViewOnAmazonFromScan(item)}
+                          className="flex-1 inline-flex items-center justify-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
+                        >
+                          <ArrowTopRightOnSquareIcon className="h-3 w-3 mr-1" />
+                          View on Amazon
+                        </button>
+                        <button
+                          onClick={() => handlePrintLabelFromScan(item)}
+                          className="flex-1 inline-flex items-center justify-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                        >
+                          <PrinterIcon className="h-3 w-3 mr-1" />
+                          Print Label
+                        </button>
+                      </div>
+                    )}
+                    <button
+                      onClick={() => {
+                        setProductInfo(item.productInfo);
+                        handleOpenAddToInventory();
+                      }}
+                      className="w-full inline-flex items-center justify-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+                    >
+                      <ShoppingBagIcon className="h-3 w-3 mr-1" />
+                      Add to Inventory
+                    </button>
+                  </div>
+                )}
+              </div>
             ))}
-          </ul>
+          </div>
         ) : (
           <p className="text-center text-gray-500 py-4">No recent scans.</p>
         )}
@@ -1159,6 +1917,94 @@ const Scanner = () => {
           onSuccess={handleShopifySuccess}
         />
       )}
+      {/* Add to Inventory Modal */}
+      {showAddToInventoryModal && productInfo && (
+        <div className="fixed inset-0 flex items-center justify-center z-50 bg-black bg-opacity-50 p-4">
+          <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-semibold">Add to Inventory</h2>
+              <button 
+                onClick={() => setShowAddToInventoryModal(false)} 
+                className="text-gray-500 hover:text-gray-700"
+                disabled={isAddingToInventory}
+              >
+                <XMarkIcon className="h-6 w-6" />
+              </button>
+            </div>
+            
+            <div className="mb-4 p-3 bg-gray-50 rounded-md">
+              <p className="text-sm font-medium text-gray-900">{productInfo.name || 'Product'}</p>
+              <p className="text-xs text-gray-600 mt-1">
+                {productInfo.fnsku && `FNSKU: ${productInfo.fnsku}`}
+                {productInfo.asin && ` • ASIN: ${productInfo.asin}`}
+              </p>
+            </div>
+
+            <div className="mb-4">
+              <label htmlFor="inventoryQuantity" className="block text-sm font-medium text-gray-700 mb-1">
+                Quantity <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="number"
+                id="inventoryQuantity"
+                name="inventoryQuantity"
+                min="1"
+                value={inventoryQuantity}
+                onChange={(e) => setInventoryQuantity(parseInt(e.target.value, 10) || 1)}
+                className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
+                disabled={isAddingToInventory}
+                required
+              />
+            </div>
+
+            <div className="mb-4">
+              <label htmlFor="inventoryLocation" className="block text-sm font-medium text-gray-700 mb-1">
+                Location
+              </label>
+              <input
+                type="text"
+                id="inventoryLocation"
+                name="inventoryLocation"
+                value={inventoryLocation}
+                onChange={(e) => setInventoryLocation(e.target.value)}
+                placeholder="e.g., Warehouse A, Shelf 3"
+                className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
+                disabled={isAddingToInventory}
+              />
+            </div>
+
+            <div className="mb-4 p-3 bg-blue-50 rounded-md">
+              <p className="text-xs text-gray-600">
+                <strong>Note:</strong> If this product already exists in inventory, the quantity will be added to the existing stock.
+              </p>
+            </div>
+
+            <div className="flex justify-end space-x-3">
+              <button
+                type="button"
+                className="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                onClick={() => {
+                  setShowAddToInventoryModal(false);
+                  setInventoryQuantity(1);
+                  setInventoryLocation('');
+                }}
+                disabled={isAddingToInventory}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+                onClick={handleAddToInventory}
+                disabled={isAddingToInventory || !inventoryQuantity || inventoryQuantity < 1}
+              >
+                {isAddingToInventory ? 'Adding...' : 'Add to Inventory'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showFileImportModal && (
         <div className="fixed inset-0 flex items-center justify-center z-50 bg-black bg-opacity-50 p-4">
           <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-lg">
