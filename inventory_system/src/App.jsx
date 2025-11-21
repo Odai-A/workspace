@@ -61,7 +61,6 @@ function App() {
             {/* Public routes */}
             <Route path="/login" element={!isAuthenticated ? <Login /> : <Navigate to="/dashboard" replace />} />
             <Route path="/register" element={!isAuthenticated ? <Register /> : <Navigate to="/dashboard" replace />} />
-            <Route path="/pricing" element={<PricingPage />} />
             <Route path="/checkout-success" element={<SuccessPage />} />
             <Route path="/checkout-cancel" element={<CancelPage />} />
             
@@ -79,6 +78,7 @@ function App() {
               <Route path="settings/subscription" element={<CustomerDashboardPage />} />
               <Route path="profile" element={<Profile />} />
               <Route path="users" element={<Users />} />
+              <Route path="pricing" element={<PricingPage />} />
               {/* <Route path="scan-tasks" element={<ScanTasks />} /> */}
               <Route path="product-import" element={<ProductImport />} />
             </Route>

@@ -14,6 +14,7 @@ CREATE TABLE api_lookup_cache (
   price DECIMAL(10,2) DEFAULT 0,
   category TEXT DEFAULT 'External API',
   upc TEXT,
+  image_url TEXT,  -- Product image URL from API
   source TEXT DEFAULT 'fnskutoasin.com',
   scan_task_id TEXT,
   task_state TEXT,

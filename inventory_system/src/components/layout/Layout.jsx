@@ -11,6 +11,7 @@ import {
   ChartBarIcon,
   UsersIcon,
   Cog6ToothIcon,
+  CurrencyDollarIcon,
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 import { FiUser, FiLogOut } from 'react-icons/fi';
@@ -25,6 +26,7 @@ const iconMap = {
   ChartBarIcon,
   UsersIcon,
   Cog6ToothIcon,
+  CurrencyDollarIcon,
 };
 
 const Layout = () => {

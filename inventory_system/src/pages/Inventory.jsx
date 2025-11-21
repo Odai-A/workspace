@@ -19,7 +19,7 @@ import InventoryLevelBadge from '../components/inventory/InventoryLevelBadge';
 import AddStockModal from '../components/inventory/AddStockModal';
 import { useAuth } from '../contexts/AuthContext';
 import { toast } from 'react-toastify';
-import { productLookupService } from '../services/databaseService';
+import { productLookupService, apiCacheService } from '../services/databaseService';
 import { inventoryService, supabase } from '../config/supabaseClient';
 import axios from 'axios';
 
@@ -169,15 +169,26 @@ const Inventory = () => {
           }
         }
         
-        // If we have ASIN but no image, try to fetch from Rainforest API
+        // If we have ASIN but no image, check cache first (NO API CALLS - only use Supabase data)
         if (asin && !image_url) {
           try {
-            const rainforestImage = await fetchImageFromRainforest(asin);
-            if (rainforestImage) {
-              image_url = rainforestImage;
+            // Check api_lookup_cache for image (no charge - just database lookup)
+            const cachedData = await apiCacheService.getCachedLookup(asin);
+            if (cachedData && cachedData.image_url) {
+              image_url = cachedData.image_url;
+              console.log(`✅ Found image in cache for ASIN ${asin} - no API charge`);
+            } else if (fnsku) {
+              // Also try by FNSKU
+              const cachedByFnsku = await apiCacheService.getCachedLookup(fnsku);
+              if (cachedByFnsku && cachedByFnsku.image_url) {
+                image_url = cachedByFnsku.image_url;
+                console.log(`✅ Found image in cache for FNSKU ${fnsku} - no API charge`);
+              }
             }
+            // NO Rainforest API call - only use cached data to avoid charges
           } catch (err) {
-            console.warn('Could not fetch image from Rainforest API:', err);
+            console.warn('Could not fetch image from cache:', err);
+            // Don't call Rainforest API - just use what we have
           }
         }
         
@@ -277,37 +288,12 @@ const Inventory = () => {
     }
   };
 
-  // Fetch product image from Rainforest API if we have ASIN but no image
-  const fetchImageFromRainforest = async (asin) => {
-    if (!asin) return null;
-    
-    const rainforestApiKey = import.meta.env.VITE_RAINFOREST_API_KEY;
-    if (!rainforestApiKey) {
-      return null;
-    }
-
-    try {
-      const response = await axios.get('https://api.rainforestapi.com/request', {
-        params: {
-          api_key: rainforestApiKey,
-          type: 'product',
-          amazon_domain: 'amazon.com',
-          asin: asin
-        },
-        timeout: 30000 // Increased timeout to 30 seconds
-      });
-
-      if (response.data && response.data.product) {
-        const product = response.data.product;
-        return product.main_image?.link || product.images?.[0]?.link || null;
-      }
-    } catch (error) {
-      console.warn("Error fetching image from Rainforest API:", error);
-      return null;
-    }
-    
-    return null;
-  };
+  // REMOVED: fetchImageFromRainforest function
+  // We no longer automatically fetch from Rainforest API to avoid charges
+  // Images should come from:
+  // 1. manifest_data table (image_url column)
+  // 2. api_lookup_cache table (cached from previous scans)
+  // If you need to fetch images, do it manually via the Scanner page where it's cached
 
   // Create print label HTML (similar to Scanner.jsx)
   const createPrintLabelHTML = (productInfo) => {
@@ -328,32 +314,45 @@ const Inventory = () => {
       return div.innerHTML;
     };
 
+    // Show full product name (no truncation)
+    const productName = productInfo.name || 'Product';
+
     return `
       <!DOCTYPE html>
       <html>
         <head>
-          <title>Product Label - ${escapeHtml(productInfo.name || 'Product')}</title>
+          <title>Product Label - ${escapeHtml(productName)}</title>
           <style>
+            @page {
+              size: 4in 6in;
+              margin: 0.1in;
+            }
             @media print {
-              @page {
-                size: 4in 6in;
-                margin: 0;
-              }
               body {
                 margin: 0;
                 padding: 0;
+                overflow: hidden;
               }
               .no-print {
                 display: none;
               }
+              * {
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+              }
+            }
+            * {
+              box-sizing: border-box;
             }
             body {
               font-family: Arial, sans-serif;
               width: 4in;
               height: 6in;
+              max-width: 4in;
+              max-height: 6in;
               margin: 0;
-              padding: 0.15in;
-              box-sizing: border-box;
+              padding: 0.1in;
+              overflow: hidden;
               display: flex;
               flex-direction: column;
               position: relative;
@@ -363,86 +362,110 @@ const Inventory = () => {
               top: 0.1in;
               right: 0.1in;
               z-index: 10;
+              width: 0.75in;
+              height: 0.75in;
             }
             .qr-code {
-              width: 80px;
-              height: 80px;
+              border: 1px solid #000;
+              padding: 0.02in;
+              background: white;
+              width: 100%;
+              height: 100%;
               display: flex;
               align-items: center;
               justify-content: center;
             }
+            .qr-code img {
+              display: block;
+              width: 100%;
+              height: 100%;
+              object-fit: contain;
+            }
             .label-header {
               text-align: center;
-              margin-bottom: 0.1in;
-              margin-top: 0.05in;
+              border-bottom: 2px solid #000;
+              padding-bottom: 0.06in;
+              margin-bottom: 0.08in;
+              padding-right: 0.85in;
+              flex-shrink: 0;
+              overflow: hidden;
             }
             .label-title {
-              font-size: 12pt;
+              font-size: 9pt;
               font-weight: bold;
               margin: 0;
               padding: 0;
               line-height: 1.2;
               word-wrap: break-word;
               overflow-wrap: break-word;
+              overflow: hidden;
             }
             .label-subtitle {
-              font-size: 8pt;
+              font-size: 7pt;
               color: #666;
               margin: 0.02in 0 0 0;
+              padding: 0;
             }
             .asin-display {
-              font-size: 9pt;
+              font-size: 10pt;
               font-weight: bold;
               text-align: center;
-              margin-bottom: 0.08in;
-              color: #333;
+              background: #f0f0f0;
+              padding: 0.06in;
+              margin: 0.06in 0;
+              border: 1px solid #000;
+              flex-shrink: 0;
             }
             .product-image-section {
-              text-align: center;
-              margin: 0.1in 0;
-              max-height: 2.2in;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              margin: 0.08in 0;
+              max-height: 1.8in;
+              min-height: 1.2in;
+              flex-shrink: 1;
               overflow: hidden;
             }
             .product-image {
               max-width: 100%;
-              max-height: 2.2in;
+              max-height: 1.8in;
+              width: auto;
+              height: auto;
               object-fit: contain;
-            }
-            .product-info {
-              font-size: 8pt;
-              margin: 0.1in 0;
-            }
-            .info-row {
-              margin: 0.03in 0;
-            }
-            .info-label {
-              font-weight: bold;
-              margin-right: 0.05in;
+              border: 1px solid #ddd;
+              background: white;
             }
             .price-section {
               margin-top: auto;
+              margin-bottom: 0.05in;
               text-align: center;
-              padding-top: 0.1in;
+              flex-shrink: 0;
+              padding-top: 0.05in;
             }
             .retail-price {
               font-size: 10pt;
-              margin-bottom: 0.05in;
+              font-weight: bold;
+              color: #666;
+              margin-bottom: 0.03in;
+              line-height: 1.2;
             }
             .retail-price-label {
-              font-weight: bold;
-              margin-right: 0.05in;
-            }
-            .our-price-label {
-              font-size: 11pt;
-              font-weight: bold;
-              color: #059669;
-              margin-bottom: 0.03in;
+              font-size: 8pt;
+              color: #666;
+              margin-right: 0.08in;
             }
             .our-price {
-              font-size: 20pt;
+              font-size: 18pt;
               font-weight: bold;
               color: #059669;
-              margin-top: 0.05in;
+              margin-top: 0.03in;
+              line-height: 1.2;
+            }
+            .our-price-label {
+              font-size: 10pt;
+              font-weight: bold;
+              color: #059669;
+              margin-bottom: 0.02in;
             }
             .no-print {
               position: fixed;
@@ -476,7 +499,7 @@ const Inventory = () => {
           </div>
           
           <div class="label-header">
-            <h1 class="label-title">${escapeHtml(productInfo.name || 'Product')}</h1>
+            <h1 class="label-title">${escapeHtml(productName)}</h1>
             <p class="label-subtitle">Amazon Product Label</p>
           </div>
 
@@ -490,25 +513,10 @@ const Inventory = () => {
             </div>
           ` : ''}
 
-          <div class="product-info">
-            ${productInfo.fnsku ? `
-              <div class="info-row">
-                <span class="info-label">FNSKU:</span>
-                <span class="info-value">${escapeHtml(productInfo.fnsku)}</span>
-              </div>
-            ` : ''}
-            ${productInfo.lpn ? `
-              <div class="info-row">
-                <span class="info-label">LPN:</span>
-                <span class="info-value">${escapeHtml(productInfo.lpn)}</span>
-              </div>
-            ` : ''}
-          </div>
-
           ${retailPrice > 0 ? `
             <div class="price-section">
               <div class="retail-price">
-                <span class="retail-price-label">RETAIL PRICE:</span> $${retailPrice.toFixed(2)}
+                <span class="retail-price-label">RETAIL:</span> $${retailPrice.toFixed(2)}
               </div>
               <div class="our-price-label">OUR PRICE:</div>
               <div class="our-price">

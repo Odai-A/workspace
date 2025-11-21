@@ -13,6 +13,7 @@ import {
   MapPinIcon,
   UsersIcon,
   Cog6ToothIcon,
+  CurrencyDollarIcon,
 } from '@heroicons/react/24/outline';
 import { useNavigation } from '../../contexts/NavigationContext';
 import { useAuth } from '../../contexts/AuthContext';
@@ -30,6 +31,7 @@ const iconMap = {
   MapPinIcon,
   UsersIcon,
   Cog6ToothIcon,
+  CurrencyDollarIcon,
 };
 
 const Sidebar = () => {

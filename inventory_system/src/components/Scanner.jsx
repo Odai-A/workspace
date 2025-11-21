@@ -237,7 +237,170 @@ const Scanner = () => {
           });
         }
         
-        setProductInfo(displayProduct);
+        // Even if found in local DB, check cache FIRST before calling Rainforest API
+        if (displayProduct && displayProduct.asin && displayProduct.asin.trim() !== '') {
+          // STEP 1: Check api_lookup_cache FIRST before calling Rainforest API
+          let imageFoundInCache = false;
+          
+          try {
+            const cacheKey = displayProduct.fnsku || displayProduct.sku || displayProduct.asin;
+            console.log('🔍 [LOCAL DB] Checking api_lookup_cache for image, key:', cacheKey);
+            
+            const cachedData = await apiCacheService.getCachedLookup(cacheKey);
+            
+            if (cachedData && cachedData.image_url) {
+              console.log('✅ [LOCAL DB] Found image in cache - using cached image (NO Rainforest API charge!)');
+              displayProduct.image_url = cachedData.image_url;
+              
+              // Also use other cached data
+              if (cachedData.product_name && cachedData.product_name !== `Product ${cacheKey}`) {
+                displayProduct.name = cachedData.product_name;
+              }
+              if (cachedData.price) {
+                displayProduct.price = cachedData.price;
+              }
+              
+              imageFoundInCache = true;
+              toast.success("✅ Using cached image - no API charge!", { autoClose: 2000 });
+              setProductInfo(displayProduct);
+              return; // Exit early - no need to call Rainforest
+            } else {
+              console.log('❌ [LOCAL DB] No image in cache for key:', cacheKey);
+            }
+          } catch (cacheCheckError) {
+            console.warn('⚠️ [LOCAL DB] Error checking cache:', cacheCheckError);
+            // Continue to Rainforest API if cache check fails
+          }
+          
+          // STEP 2: Only call Rainforest API if image NOT in cache
+          if (!imageFoundInCache && !displayProduct.image_url) {
+            console.log('📦 [LOCAL DB] Image not in cache - fetching from Rainforest API (will be charged)');
+            toast.info("📦 Fetching product image from Rainforest API...", { autoClose: 2000 });
+            
+            try {
+              const rainforestData = await fetchProductDataFromRainforest(displayProduct.asin);
+              
+              if (rainforestData) {
+                const enhancedProduct = {
+                  ...displayProduct,
+                  name: rainforestData.title || displayProduct.name || 'Product',
+                  image_url: rainforestData.image || displayProduct.image_url || '',
+                  price: rainforestData.price || displayProduct.price,
+                  rating: rainforestData.rating || displayProduct.rating || null,
+                  reviews_count: rainforestData.reviews_count || displayProduct.reviews_count || null,
+                  brand: rainforestData.brand || displayProduct.brand || '',
+                  category: rainforestData.category || displayProduct.category || '',
+                  description: rainforestData.description || displayProduct.description || ''
+                };
+                
+                console.log('✅ Enhanced product data from Rainforest API:', enhancedProduct);
+                
+                // Save Rainforest data to cache for future use
+                try {
+                  const fnskuToSave = enhancedProduct.fnsku || enhancedProduct.sku || enhancedProduct.asin;
+                  
+                  if (!fnskuToSave || !enhancedProduct.asin) {
+                    console.error('❌ Cannot save to cache: Missing fnsku or asin', {
+                      fnsku: enhancedProduct.fnsku,
+                      sku: enhancedProduct.sku,
+                      asin: enhancedProduct.asin
+                    });
+                  } else {
+                    const cacheData = {
+                      fnsku: fnskuToSave,
+                      asin: enhancedProduct.asin,
+                      name: enhancedProduct.name,
+                      description: enhancedProduct.description,
+                      price: enhancedProduct.price,
+                      category: enhancedProduct.category,
+                      image_url: enhancedProduct.image_url,
+                      source: 'rainforest_api'
+                    };
+                    
+                    console.log('💾 [1/2] Saving Rainforest data to api_lookup_cache:', cacheData);
+                    const savedToCache = await apiCacheService.saveLookup(cacheData);
+                    
+                    // STEP 2: Also update manifest_data if product exists there
+                    try {
+                      const { supabase } = await import('../config/supabaseClient');
+                      
+                      // Try to find product in manifest_data by FNSKU
+                      const { data: manifestProduct, error: findError } = await supabase
+                        .from('manifest_data')
+                        .select('id, "Fn Sku", "B00 Asin"')
+                        .eq('Fn Sku', fnskuToSave)
+                        .maybeSingle();
+                      
+                      if (!findError && manifestProduct) {
+                        console.log('💾 [2/2] Found product in manifest_data, updating with image_url...');
+                        
+                        // Update manifest_data with image_url
+                        const updateData = {
+                          image_url: enhancedProduct.image_url || null
+                        };
+                        
+                        // Also update description if available and better
+                        if (enhancedProduct.name && enhancedProduct.name !== `Amazon Product (ASIN: ${enhancedProduct.asin})`) {
+                          updateData['Description'] = enhancedProduct.name;
+                        }
+                        
+                        const { data: updatedManifest, error: updateError } = await supabase
+                          .from('manifest_data')
+                          .update(updateData)
+                          .eq('id', manifestProduct.id)
+                          .select()
+                          .single();
+                        
+                        if (updateError) {
+                          console.error('❌ Failed to update manifest_data:', updateError);
+                        } else {
+                          console.log('✅ Updated manifest_data with image_url:', updatedManifest);
+                        }
+                      } else if (findError && findError.code !== 'PGRST116') {
+                        console.warn('⚠️ Error checking manifest_data:', findError);
+                      } else {
+                        console.log('ℹ️ Product not found in manifest_data (may not be uploaded yet)');
+                      }
+                    } catch (manifestError) {
+                      console.warn('⚠️ Could not update manifest_data:', manifestError);
+                      // Don't fail the whole operation if manifest update fails
+                    }
+                    
+                    if (savedToCache) {
+                      console.log('✅ Saved Rainforest API data to cache - future lookups will be free!', savedToCache);
+                      toast.success("💾 Image saved to cache & manifest - future scans will be FREE! 🎉", { autoClose: 3000 });
+                    } else {
+                      console.error('❌ Failed to save to cache - saveLookup returned null');
+                      toast.warn("⚠️ Could not save image to cache. Next scan may charge again.", { autoClose: 4000 });
+                    }
+                  }
+                } catch (cacheError) {
+                  console.error('❌ Error saving Rainforest data:', cacheError);
+                  console.error('Error details:', {
+                    message: cacheError.message,
+                    code: cacheError.code,
+                    details: cacheError.details,
+                    hint: cacheError.hint
+                  });
+                  toast.error("❌ Failed to save to cache. Check console for details.", { autoClose: 5000 });
+                }
+                
+                setProductInfo(enhancedProduct);
+              } else {
+                setProductInfo(displayProduct);
+              }
+            } catch (error) {
+              console.error("Error fetching Rainforest API data:", error);
+              setProductInfo(displayProduct);
+            }
+          } else {
+            // Already has complete data, no need for Rainforest
+            setProductInfo(displayProduct);
+          }
+        } else {
+          // No ASIN, can't enhance
+          setProductInfo(displayProduct);
+        }
         
         // Removed scan history logging to avoid database issues  
         // if (displayProduct) {
@@ -403,38 +566,193 @@ const Scanner = () => {
           console.log('🚀 [DEBUG] Final displayableProduct before setProductInfo:', displayableProduct);
           console.log('🚀 [DEBUG] Final displayableProduct ASIN:', displayableProduct?.asin);
           
-          // If we have an ASIN, automatically fetch enhanced data from Rainforest API
+          // If we have an ASIN, check cache FIRST before calling Rainforest API
           if (displayableProduct && displayableProduct.asin && displayableProduct.asin.trim() !== '') {
-            toast.info("📦 Fetching product details from Rainforest API...", { autoClose: 2000 });
+            // STEP 1: Check cache for image BEFORE calling Rainforest API
+            let cachedImage = null;
+            let shouldCallRainforest = true;
             
             try {
-              const rainforestData = await fetchProductDataFromRainforest(displayableProduct.asin);
+              // Check api_lookup_cache for this ASIN or FNSKU
+              const cacheKey = displayableProduct.fnsku || displayableProduct.asin;
+              const cachedData = await apiCacheService.getCachedLookup(cacheKey);
               
-              if (rainforestData) {
-                // Merge Rainforest API data with existing product data
-                const enhancedProduct = {
-                  ...displayableProduct,
-                  name: rainforestData.title || displayableProduct.name || 'Product',
-                  image_url: rainforestData.image || displayableProduct.image_url || displayableProduct.image || '',
-                  price: rainforestData.price || displayableProduct.price,
-                  rating: rainforestData.rating || displayableProduct.rating || null,
-                  reviews_count: rainforestData.reviews_count || displayableProduct.reviews_count || null,
-                  brand: rainforestData.brand || displayableProduct.brand || '',
-                  category: rainforestData.category || displayableProduct.category || '',
-                  description: rainforestData.description || displayableProduct.description || ''
-                };
+              if (cachedData && cachedData.image_url) {
+                console.log('✅ Found image in cache - using cached image (no Rainforest API charge)');
+                cachedImage = cachedData.image_url;
+                shouldCallRainforest = false;
                 
-                console.log('✅ Enhanced product data from Rainforest API:', enhancedProduct);
-                toast.success("✅ Product details loaded with image!", { autoClose: 2000 });
-                setProductInfo(enhancedProduct);
+                // Use cached image and other cached data
+                displayableProduct.image_url = cachedData.image_url;
+                if (cachedData.product_name && cachedData.product_name !== `Product ${cacheKey}`) {
+                  displayableProduct.name = cachedData.product_name;
+                }
+                if (cachedData.price) {
+                  displayableProduct.price = cachedData.price;
+                }
+                
+                toast.success("✅ Using cached image - no API charge!", { autoClose: 2000 });
+                setProductInfo(displayableProduct);
+                return; // Exit early, no need to call Rainforest
               } else {
-                // No Rainforest data, use what we have
-                console.log('⚠️ No Rainforest API data available, using existing product data');
+                console.log('❌ No image in cache - will fetch from Rainforest API (will be charged)');
+              }
+            } catch (cacheCheckError) {
+              console.warn('⚠️ Error checking cache:', cacheCheckError);
+              // Continue to Rainforest API if cache check fails
+            }
+            
+            // STEP 2: Only call Rainforest API if image not in cache
+            if (shouldCallRainforest && !displayableProduct.image_url) {
+              console.log('📦 Missing image - fetching from Rainforest API (will be charged)');
+              toast.info("📦 Fetching product image from Rainforest API...", { autoClose: 2000 });
+              
+              try {
+                const rainforestData = await fetchProductDataFromRainforest(displayableProduct.asin);
+                
+                if (rainforestData) {
+                  // Merge Rainforest API data with existing product data
+                  const enhancedProduct = {
+                    ...displayableProduct,
+                    name: rainforestData.title || displayableProduct.name || 'Product',
+                    image_url: rainforestData.image || displayableProduct.image_url || displayableProduct.image || '',
+                    price: rainforestData.price || displayableProduct.price,
+                    rating: rainforestData.rating || displayableProduct.rating || null,
+                    reviews_count: rainforestData.reviews_count || displayableProduct.reviews_count || null,
+                    brand: rainforestData.brand || displayableProduct.brand || '',
+                    category: rainforestData.category || displayableProduct.category || '',
+                    description: rainforestData.description || displayableProduct.description || ''
+                  };
+                  
+                  console.log('✅ Enhanced product data from Rainforest API:', enhancedProduct);
+                  
+                  // Save Rainforest data to cache for future use
+                  try {
+                    // Ensure we have fnsku - use ASIN as fallback if needed (required by table)
+                    const fnskuToSave = enhancedProduct.fnsku || enhancedProduct.sku || enhancedProduct.asin;
+                    
+                    if (!fnskuToSave || !enhancedProduct.asin) {
+                      console.error('❌ Cannot save to cache: Missing fnsku or asin', {
+                        fnsku: enhancedProduct.fnsku,
+                        sku: enhancedProduct.sku,
+                        asin: enhancedProduct.asin,
+                        fullProduct: enhancedProduct
+                      });
+                      toast.warn("⚠️ Cannot save to cache: Missing FNSKU or ASIN", { autoClose: 3000 });
+                    } else {
+                      const cacheData = {
+                        fnsku: fnskuToSave,
+                        asin: enhancedProduct.asin,
+                        name: enhancedProduct.name,
+                        description: enhancedProduct.description,
+                        price: enhancedProduct.price,
+                        category: enhancedProduct.category,
+                        image_url: enhancedProduct.image_url,
+                        source: 'rainforest_api'
+                      };
+                      
+                      console.log('💾 [SAVE] Step 1: Saving Rainforest data to api_lookup_cache');
+                      console.log('💾 [SAVE] Cache data to save:', JSON.stringify(cacheData, null, 2));
+                      
+                      const savedToCache = await apiCacheService.saveLookup(cacheData);
+                      
+                      if (!savedToCache) {
+                        console.error('❌ [SAVE] CRITICAL: saveLookup returned null - save FAILED!');
+                        console.error('❌ [SAVE] This means the data was NOT saved to api_lookup_cache');
+                        toast.error("❌ FAILED to save to cache! Check console for errors.", { autoClose: 6000 });
+                      } else {
+                        console.log('✅ [SAVE] Step 1 SUCCESS: Saved to api_lookup_cache:', savedToCache);
+                        console.log('✅ [SAVE] Cache entry ID:', savedToCache.id);
+                        console.log('✅ [SAVE] Image URL saved:', savedToCache.image_url ? 'YES' : 'NO');
+                      }
+                      
+                      // STEP 2: Also update manifest_data if product exists there
+                      try {
+                        const { supabase } = await import('../config/supabaseClient');
+                        
+                        console.log('💾 [SAVE] Step 2: Checking manifest_data for FNSKU:', fnskuToSave);
+                        
+                        // Try to find product in manifest_data by FNSKU
+                        const { data: manifestProduct, error: findError } = await supabase
+                          .from('manifest_data')
+                          .select('id, "Fn Sku", "B00 Asin"')
+                          .eq('Fn Sku', fnskuToSave)
+                          .maybeSingle();
+                        
+                        if (!findError && manifestProduct) {
+                          console.log('💾 [SAVE] Step 2: Found product in manifest_data (ID:', manifestProduct.id, '), updating with image_url...');
+                          
+                          // Update manifest_data with image_url
+                          const updateData = {
+                            image_url: enhancedProduct.image_url || null
+                          };
+                          
+                          // Also update description if available and better
+                          if (enhancedProduct.name && enhancedProduct.name !== `Amazon Product (ASIN: ${enhancedProduct.asin})`) {
+                            updateData['Description'] = enhancedProduct.name;
+                          }
+                          
+                          console.log('💾 [SAVE] Step 2: Update data:', updateData);
+                          
+                          const { data: updatedManifest, error: updateError } = await supabase
+                            .from('manifest_data')
+                            .update(updateData)
+                            .eq('id', manifestProduct.id)
+                            .select()
+                            .single();
+                          
+                          if (updateError) {
+                            console.error('❌ [SAVE] Step 2 FAILED: Error updating manifest_data:', updateError);
+                            console.error('❌ [SAVE] Error code:', updateError.code);
+                            console.error('❌ [SAVE] Error message:', updateError.message);
+                            toast.warn("⚠️ Saved to cache but failed to update manifest_data", { autoClose: 4000 });
+                          } else {
+                            console.log('✅ [SAVE] Step 2 SUCCESS: Updated manifest_data with image_url');
+                            console.log('✅ [SAVE] Updated manifest entry:', updatedManifest);
+                          }
+                        } else if (findError && findError.code !== 'PGRST116') {
+                          console.warn('⚠️ [SAVE] Step 2: Error checking manifest_data:', findError);
+                        } else {
+                          console.log('ℹ️ [SAVE] Step 2: Product not found in manifest_data (may not be uploaded yet)');
+                        }
+                      } catch (manifestError) {
+                        console.error('❌ [SAVE] Step 2: Exception updating manifest_data:', manifestError);
+                        // Don't fail the whole operation if manifest update fails
+                      }
+                      
+                      if (savedToCache) {
+                        console.log('✅ [SAVE] COMPLETE: Rainforest data saved to cache - future lookups will be free!');
+                        toast.success("💾 Image saved to cache & manifest - future scans will be FREE! 🎉", { autoClose: 3000 });
+                      } else {
+                        console.error('❌ [SAVE] CRITICAL ERROR: saveLookup returned null - data NOT saved!');
+                        toast.error("❌ CRITICAL: Failed to save to cache! Next scan WILL charge again!", { autoClose: 6000 });
+                      }
+                    }
+                  } catch (cacheError) {
+                    console.error('❌ Error saving Rainforest data:', cacheError);
+                    console.error('Error details:', {
+                      message: cacheError.message,
+                      code: cacheError.code,
+                      details: cacheError.details,
+                      hint: cacheError.hint
+                    });
+                    toast.error("❌ Failed to save to cache. Check console for details.", { autoClose: 5000 });
+                  }
+                  
+                  toast.success("✅ Product details loaded with image!", { autoClose: 2000 });
+                  setProductInfo(enhancedProduct);
+                } else {
+                  // No Rainforest data, use what we have
+                  console.log('⚠️ No Rainforest API data available, using existing product data');
+                  setProductInfo(displayableProduct);
+                }
+              } catch (error) {
+                console.error("Error fetching Rainforest API data:", error);
+                // Continue with existing data even if Rainforest API fails
                 setProductInfo(displayableProduct);
               }
-            } catch (error) {
-              console.error("Error fetching Rainforest API data:", error);
-              // Continue with existing data even if Rainforest API fails
+            } else {
+              // We have the data we need, no need to call Rainforest
               setProductInfo(displayableProduct);
             }
           } else {
@@ -618,6 +936,9 @@ const Scanner = () => {
     const retailPrice = productInfo.price != null ? parseFloat(productInfo.price) : 0;
     const ourPrice = retailPrice / 2; // 50% off retail
     
+    // Show full product name (no truncation)
+    const productName = productInfo.name || 'Product';
+    
     return `
       <!DOCTYPE html>
       <html>
@@ -626,145 +947,155 @@ const Scanner = () => {
           <style>
             @page {
               size: 4in 6in;
-              margin: 0.125in;
+              margin: 0.1in;
             }
             @media print {
               body {
                 margin: 0;
                 padding: 0;
+                overflow: hidden;
               }
               .no-print {
                 display: none;
               }
+              * {
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+              }
+            }
+            * {
+              box-sizing: border-box;
             }
             body {
               font-family: Arial, sans-serif;
               width: 4in;
               height: 6in;
+              max-width: 4in;
+              max-height: 6in;
               margin: 0;
-              padding: 0.125in;
-              box-sizing: border-box;
+              padding: 0.1in;
+              overflow: hidden;
               display: flex;
               flex-direction: column;
               position: relative;
             }
             .qr-code-top-right {
               position: absolute;
-              top: 0.125in;
-              right: 0.125in;
+              top: 0.1in;
+              right: 0.1in;
               z-index: 10;
+              width: 0.75in;
+              height: 0.75in;
             }
             .qr-code {
               border: 1px solid #000;
-              padding: 0.03in;
+              padding: 0.02in;
               background: white;
+              width: 100%;
+              height: 100%;
+              display: flex;
+              align-items: center;
+              justify-content: center;
             }
             .qr-code img {
               display: block;
-              width: 80px;
-              height: 80px;
+              width: 100%;
+              height: 100%;
+              object-fit: contain;
             }
             .label-header {
               text-align: center;
               border-bottom: 2px solid #000;
-              padding-bottom: 0.08in;
-              margin-bottom: 0.1in;
-              padding-right: 1in;
+              padding-bottom: 0.06in;
+              margin-bottom: 0.08in;
+              padding-right: 0.85in;
+              flex-shrink: 0;
+              overflow: hidden;
             }
             .label-title {
-              font-size: 12pt;
+              font-size: 9pt;
               font-weight: bold;
               margin: 0;
-              line-height: 1.3;
+              padding: 0;
+              line-height: 1.2;
               word-wrap: break-word;
+              overflow-wrap: break-word;
+              overflow: hidden;
             }
             .label-subtitle {
-              font-size: 8pt;
+              font-size: 7pt;
               color: #666;
-              margin: 0.03in 0 0 0;
+              margin: 0.02in 0 0 0;
+              padding: 0;
             }
             .asin-display {
-              font-size: 11pt;
+              font-size: 10pt;
               font-weight: bold;
               text-align: center;
               background: #f0f0f0;
-              padding: 0.08in;
-              margin: 0.08in 0;
+              padding: 0.06in;
+              margin: 0.06in 0;
               border: 1px solid #000;
+              flex-shrink: 0;
             }
             .product-image-section {
               display: flex;
               align-items: center;
               justify-content: center;
-              margin: 0.1in 0;
-              min-height: 2in;
-              max-height: 2.2in;
+              margin: 0.08in 0;
+              max-height: 1.8in;
+              min-height: 1.2in;
+              flex-shrink: 1;
+              overflow: hidden;
             }
             .product-image {
               max-width: 100%;
-              max-height: 2.2in;
+              max-height: 1.8in;
               width: auto;
               height: auto;
               object-fit: contain;
               border: 1px solid #ddd;
               background: white;
             }
-            .product-info {
-              flex: 1;
-              display: flex;
-              flex-direction: column;
-              justify-content: flex-start;
-              margin: 0.08in 0;
-              font-size: 9pt;
-            }
-            .info-row {
-              display: flex;
-              justify-content: space-between;
-              margin: 0.05in 0;
-              font-size: 9pt;
-            }
-            .info-label {
-              font-weight: bold;
-              margin-right: 0.1in;
-            }
-            .info-value {
-              flex: 1;
-              text-align: right;
-              font-family: monospace;
-            }
             .price-section {
-              margin: 0.1in 0;
+              margin-top: auto;
+              margin-bottom: 0.05in;
               text-align: center;
+              flex-shrink: 0;
+              padding-top: 0.05in;
             }
             .retail-price {
-              font-size: 12pt;
+              font-size: 10pt;
               font-weight: bold;
               color: #666;
-              margin-bottom: 0.05in;
+              margin-bottom: 0.03in;
+              line-height: 1.2;
             }
             .retail-price-label {
-              font-size: 9pt;
+              font-size: 8pt;
               color: #666;
-              margin-right: 0.1in;
+              margin-right: 0.08in;
             }
             .our-price {
-              font-size: 20pt;
+              font-size: 18pt;
               font-weight: bold;
               color: #059669;
-              margin-top: 0.05in;
+              margin-top: 0.03in;
+              line-height: 1.2;
             }
             .our-price-label {
-              font-size: 11pt;
+              font-size: 10pt;
               font-weight: bold;
               color: #059669;
-              margin-bottom: 0.03in;
+              margin-bottom: 0.02in;
             }
             .amazon-url {
-              font-size: 7pt;
+              font-size: 6pt;
               text-align: center;
               color: #666;
               word-break: break-all;
-              margin-top: 0.08in;
+              margin-top: 0.05in;
+              display: none;
             }
             .print-button {
               position: fixed;
@@ -796,7 +1127,7 @@ const Scanner = () => {
           </div>
           
           <div class="label-header">
-            <h1 class="label-title">${escapeHtml(productInfo.name || 'Product')}</h1>
+            <h1 class="label-title">${escapeHtml(productName)}</h1>
             <p class="label-subtitle">Amazon Product Label</p>
           </div>
 
@@ -810,31 +1141,10 @@ const Scanner = () => {
             </div>
           ` : ''}
 
-          <div class="product-info">
-            ${productInfo.fnsku ? `
-              <div class="info-row">
-                <span class="info-label">FNSKU:</span>
-                <span class="info-value">${escapeHtml(productInfo.fnsku)}</span>
-              </div>
-            ` : ''}
-            ${productInfo.lpn ? `
-              <div class="info-row">
-                <span class="info-label">LPN:</span>
-                <span class="info-value">${escapeHtml(productInfo.lpn)}</span>
-              </div>
-            ` : ''}
-            ${productInfo.upc ? `
-              <div class="info-row">
-                <span class="info-label">UPC:</span>
-                <span class="info-value">${escapeHtml(productInfo.upc)}</span>
-              </div>
-            ` : ''}
-          </div>
-
           ${retailPrice > 0 ? `
             <div class="price-section">
               <div class="retail-price">
-                <span class="retail-price-label">RETAIL PRICE:</span> $${retailPrice.toFixed(2)}
+                <span class="retail-price-label">RETAIL:</span> $${retailPrice.toFixed(2)}
               </div>
               <div class="our-price-label">OUR PRICE:</div>
               <div class="our-price">

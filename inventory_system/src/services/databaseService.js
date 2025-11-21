@@ -72,44 +72,69 @@ export const apiCacheService = {
    * @returns {Promise<Object|null>} - The saved cache entry or null on error
    */
   async saveLookup(apiResult) {
+    console.log('🔍 [saveLookup] Called with:', apiResult);
+    
     if (!apiResult || (!apiResult.fnsku && !apiResult.asin)) {
-      console.error('❌ saveLookup: apiResult is missing or does not contain FNSKU or ASIN.');
+      console.error('❌ saveLookup: apiResult is missing or does not contain FNSKU or ASIN.', apiResult);
       return null;
     }
 
     try {
       const lookupKey = apiResult.fnsku || apiResult.asin; // Prioritize FNSKU if available
-      console.log(`💾 Attempting to save/update in api_lookup_cache for key: ${lookupKey}`, apiResult);
+      console.log(`💾 [saveLookup] Attempting to save/update in api_lookup_cache for key: ${lookupKey}`);
+      console.log('💾 [saveLookup] Full apiResult:', JSON.stringify(apiResult, null, 2));
 
       const existingEntry = await this.getCachedLookup(lookupKey);
+      console.log('💾 [saveLookup] Existing entry found:', existingEntry ? `ID: ${existingEntry.id}` : 'None');
+      
       const now = new Date().toISOString();
 
+      // Ensure we have a fnsku (required by table constraint)
+      if (!apiResult.fnsku && !apiResult.asin) {
+        console.error('❌ Cannot save: Both fnsku and asin are missing');
+        return null;
+      }
+      
+      // If we only have ASIN but no FNSKU, we can't save (fnsku is NOT NULL)
+      // In this case, use ASIN as a fallback for fnsku (not ideal but works)
+      const fnskuValue = apiResult.fnsku || apiResult.asin || null;
+      
+      // Determine asin_found - check if asin exists and is valid
+      const hasValidAsin = apiResult.asin && apiResult.asin.trim() !== '' && apiResult.asin.length >= 10;
+      const asinFound = apiResult.asin_found !== undefined ? !!apiResult.asin_found : hasValidAsin;
+      
       const dataToUpsert = {
-        fnsku: apiResult.fnsku || null, // Ensure FNSKU is present or null
+        fnsku: fnskuValue, // Required - use ASIN as fallback if FNSKU not available
         asin: apiResult.asin || null,
         product_name: apiResult.name || `Product ${lookupKey}`,
         description: apiResult.description || apiResult.name || '',
-        price: apiResult.price != null ? parseFloat(apiResult.price) : null,
-        category: apiResult.category || null,
+        price: apiResult.price != null ? parseFloat(apiResult.price) : 0,
+        category: apiResult.category || 'External API',
         upc: apiResult.upc || null,
         image_url: apiResult.image_url || null,
-        task_state: apiResult.task_state || (apiResult.asin ? 'completed' : 'processing'),
+        source: apiResult.source || 'fnskutoasin.com',
+        task_state: apiResult.task_state || (hasValidAsin ? 'completed' : 'processing'),
         scan_task_id: apiResult.scan_task_id || null,
-        api_source: apiResult.source || 'unknown',
-        is_processing: !apiResult.asin_found && apiResult.task_state !== 'completed',
-        asin_found: !!apiResult.asin_found,
+        asin_found: asinFound,
         lookup_count: existingEntry ? (existingEntry.lookup_count || 0) + 1 : 1,
-        last_check_time: now,
-        // created_at will be set by DB on insert, updated_at will be set by DB on update or here
-        // If it's a direct ASIN lookup, fnsku might be null initially.
+        last_accessed: now,
       };
       
-      // Ensure FNSKU is not an empty string if it's null, some DBs prefer null
-      if (dataToUpsert.fnsku === '') dataToUpsert.fnsku = null;
+      // Ensure price is a valid number
+      if (dataToUpsert.price === null || isNaN(dataToUpsert.price)) {
+        dataToUpsert.price = 0;
+      }
+      
+      // Clean up empty strings to null for optional fields
+      if (dataToUpsert.upc === '') dataToUpsert.upc = null;
+      if (dataToUpsert.image_url === '') dataToUpsert.image_url = null;
+      if (dataToUpsert.scan_task_id === '') dataToUpsert.scan_task_id = null;
+      
+      console.log('💾 [saveLookup] Data to upsert:', JSON.stringify(dataToUpsert, null, 2));
 
       let result;
       if (existingEntry) {
-        console.log('🔄 Updating existing entry in api_lookup_cache with ID:', existingEntry.id);
+        console.log('🔄 [saveLookup] Updating existing entry in api_lookup_cache with ID:', existingEntry.id);
         dataToUpsert.updated_at = now;
         const { data, error } = await supabase
           .from(API_LOOKUP_CACHE_TABLE)
@@ -117,10 +142,20 @@ export const apiCacheService = {
           .eq('id', existingEntry.id) // Update by primary key 'id'
           .select()
           .single();
-        if (error) throw error;
+        
+        if (error) {
+          console.error('❌ [saveLookup] Update error:', error);
+          console.error('❌ [saveLookup] Error code:', error.code);
+          console.error('❌ [saveLookup] Error message:', error.message);
+          console.error('❌ [saveLookup] Error details:', error.details);
+          console.error('❌ [saveLookup] Error hint:', error.hint);
+          throw error;
+        }
+        
+        console.log('✅ [saveLookup] Update successful, result:', data);
         result = data;
       } else {
-        console.log('➕ Creating new entry in api_lookup_cache.');
+        console.log('➕ [saveLookup] Creating new entry in api_lookup_cache.');
         dataToUpsert.created_at = now; // Set created_at for new entries
         dataToUpsert.updated_at = now;
         const { data, error } = await supabase
@@ -128,15 +163,48 @@ export const apiCacheService = {
           .insert(dataToUpsert)
           .select()
           .single();
-        if (error) throw error;
+        
+        if (error) {
+          console.error('❌ [saveLookup] Insert error:', error);
+          console.error('❌ [saveLookup] Error code:', error.code);
+          console.error('❌ [saveLookup] Error message:', error.message);
+          console.error('❌ [saveLookup] Error details:', error.details);
+          console.error('❌ [saveLookup] Error hint:', error.hint);
+          console.error('❌ [saveLookup] Attempted to insert:', JSON.stringify(dataToUpsert, null, 2));
+          throw error;
+        }
+        
+        console.log('✅ [saveLookup] Insert successful, result:', data);
         result = data;
       }
 
-      console.log('✅ Cache operation successful for api_lookup_cache:', result);
+      console.log('✅ [saveLookup] Cache operation successful for api_lookup_cache:', result);
+      console.log('✅ [saveLookup] Saved data includes image_url:', result?.image_url ? 'YES' : 'NO');
       return result;
     } catch (error) {
-      console.error('❌ Exception in saveLookup to api_lookup_cache:', error);
-      console.error('Attempted to save data:', apiResult);
+      console.error('❌ [saveLookup] Exception in saveLookup to api_lookup_cache:', error);
+      console.error('❌ [saveLookup] Error details:', {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+        fullError: error
+      });
+      console.error('❌ [saveLookup] Attempted to save apiResult:', apiResult);
+      console.error('❌ [saveLookup] Full error object:', JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+      
+      // Try to get more details from Supabase error
+      if (error.code) {
+        console.error('❌ [saveLookup] Supabase error code:', error.code);
+        if (error.code === '23505') {
+          console.error('❌ [saveLookup] UNIQUE constraint violation - fnsku already exists');
+        } else if (error.code === '23502') {
+          console.error('❌ [saveLookup] NOT NULL constraint violation - required field is missing');
+        } else if (error.code === '42703') {
+          console.error('❌ [saveLookup] Column does not exist - check table schema');
+        }
+      }
+      
       return null;
     }
   },

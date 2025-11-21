@@ -1,0 +1,31 @@
+═══════════════════════════════════════════════════════════════
+  FRONTEND .env FILE SETUP
+═══════════════════════════════════════════════════════════════
+
+LOCATION: inventory_system/.env
+(Same folder as package.json)
+
+REQUIRED FORMAT:
+All variables MUST start with "VITE_"
+
+═══════════════════════════════════════════════════════════════
+
+Copy this into inventory_system/.env:
+
+VITE_STRIPE_BASIC_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+VITE_STRIPE_PRO_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+VITE_STRIPE_ENTREPRENEUR_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+
+═══════════════════════════════════════════════════════════════
+
+Replace "price_xxxxxxxxxxxxx" with your actual Price IDs
+(Use the SAME Price IDs as in your backend .env file)
+
+═══════════════════════════════════════════════════════════════
+
+AFTER CREATING/UPDATING:
+1. Stop frontend server (Ctrl+C)
+2. Restart: cd inventory_system && npm run dev
+
+═══════════════════════════════════════════════════════════════
+

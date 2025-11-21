@@ -1,0 +1,55 @@
+═══════════════════════════════════════════════════════════════
+  WHERE TO PUT YOUR STRIPE PRICE ID
+═══════════════════════════════════════════════════════════════
+
+STEP 1: Find your .env file
+   → Location: C:\Users\odaia\LiqAmz\workspace\.env
+   → (Same folder as app.py)
+
+STEP 2: Open the .env file and add your Price ID
+
+STEP 3: Determine which plan you're setting up:
+
+   If it's the BASE PRICE (monthly subscription):
+   
+   Basic Plan ($150/month):
+      STRIPE_BASIC_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+   
+   Pro Plan ($300/month):
+      STRIPE_PRO_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+   
+   Entrepreneur Plan ($500/month):
+      STRIPE_ENTREPRENEUR_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+   
+   
+   If it's the USAGE PRICE (for overages, $0.11/scan):
+   
+   Basic Plan usage:
+      STRIPE_BASIC_USAGE_PRICE_ID=price_xxxxxxxxxxxxx
+   
+   Pro Plan usage:
+      STRIPE_PRO_USAGE_PRICE_ID=price_xxxxxxxxxxxxx
+   
+   Entrepreneur Plan usage:
+      STRIPE_ENTREPRENEUR_USAGE_PRICE_ID=price_xxxxxxxxxxxxx
+
+STEP 4: Example .env file:
+
+   # Stripe API Keys
+   STRIPE_API_KEY=sk_test_xxxxxxxxxxxxx
+   STRIPE_WEBHOOK_SECRET=whsec_xxxxxxxxxxxxx
+   
+   # Base subscription prices
+   STRIPE_BASIC_PLAN_PRICE_ID=price_1ABC123...
+   STRIPE_PRO_PLAN_PRICE_ID=price_1DEF456...
+   STRIPE_ENTREPRENEUR_PLAN_PRICE_ID=price_1GHI789...
+   
+   # Usage prices (for overages)
+   STRIPE_BASIC_USAGE_PRICE_ID=price_1JKL012...
+   STRIPE_PRO_USAGE_PRICE_ID=price_1MNO345...
+   STRIPE_ENTREPRENEUR_USAGE_PRICE_ID=price_1PQR678...
+
+STEP 5: Restart your backend server after saving!
+
+═══════════════════════════════════════════════════════════════
+

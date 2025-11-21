@@ -43,21 +43,9 @@ function Users() {
     try {
       console.log('Fetching users from Supabase...');
       
-      // First, check current user's role
-      const { data: { user: currentAuthUser } } = await supabase.auth.getUser();
-      console.log('Current auth user:', currentAuthUser?.id);
-      
-      // Get current user's profile to check role
-      const { data: currentUserProfile } = await supabase
-        .from('users')
-        .select('role, email')
-        .eq('id', currentAuthUser?.id)
-        .maybeSingle();
-      
-      console.log('Current user profile:', currentUserProfile);
-      console.log('Current user role:', currentUserProfile?.role);
-      
-      // Fetch users from Supabase users table
+      // Fetch users directly from Supabase users table
+      // This will show all users that have profiles in the users table
+      // (including unconfirmed users if the trigger created their profile)
       const { data: usersData, error: usersError } = await supabase
         .from('users')
         .select('*')
@@ -65,40 +53,21 @@ function Users() {
 
       if (usersError) {
         console.error('Error fetching users:', usersError);
-        console.error('Error code:', usersError.code);
-        console.error('Error message:', usersError.message);
         
-        // If permission denied, try to fetch only own profile
-        if (usersError.code === '42501' || usersError.message.includes('permission')) {
-          console.warn('Permission denied for all users, trying to fetch own profile only');
-          const { data: ownProfile } = await supabase
-            .from('users')
-            .select('*')
-            .eq('id', currentAuthUser?.id)
-            .maybeSingle();
-          
-          if (ownProfile) {
-            const enriched = await enrichUserWithStats(ownProfile);
-            setUsers([enriched]);
-            toast.warning('Only showing your profile. You may need admin role to see all users.');
-            setIsLoading(false);
-            return;
-          }
+        // If RLS blocks access, provide helpful guidance
+        if (usersError.code === '42501') {
+          toast.error('❌ Permission denied. Make sure your user has admin role in the users table. Check RLS policies in Supabase.', { autoClose: 10000 });
+        } else {
+          toast.error(`Failed to load users: ${usersError.message}`);
         }
-        
         throw usersError;
       }
 
       console.log('Users fetched:', usersData?.length || 0, 'users');
-      console.log('Users data:', usersData);
 
       if (!usersData || usersData.length === 0) {
         console.warn('No users found in users table');
-        // Check if it's an RLS issue by trying to count
-        const { count } = await supabase
-          .from('users')
-          .select('*', { count: 'exact', head: true });
-        console.log('Total users count (if accessible):', count);
+        toast.info('ℹ️ No users found. Add your first employee to get started.', { autoClose: 3000 });
         setUsers([]);
         setIsLoading(false);
         return;
@@ -120,10 +89,9 @@ function Users() {
         hint: error.hint
       });
       
-      if (error.code === '42501') {
-        toast.error('Permission denied. Make sure your user has admin role in the users table.');
-      } else {
-        toast.error(`Failed to load users: ${error.message}`);
+      // Don't show duplicate error toast if we already showed one above
+      if (error.code !== '42501') {
+        toast.error(`Failed to load users: ${error.message || 'Unknown error'}`);
       }
     } finally {
       setIsLoading(false);
@@ -199,7 +167,8 @@ function Users() {
     try {
       console.log('Creating user:', newUser.email);
       
-      // Create user in Supabase Auth
+      // Create user in Supabase Auth directly
+      // The trigger should automatically create a profile in the users table
       const { data: authData, error: authError } = await supabase.auth.signUp({
         email: newUser.email,
         password: newUser.password,

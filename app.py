@@ -1,15 +1,14 @@
 import os
 import pandas as pd
-<<<<<<< HEAD
-=======
 import requests
 import json
 import base64
->>>>>>> c50ba32bc7ce0bd4ad0a31e0ab8402b70b945444
+from datetime import datetime, timezone
 from flask import Flask, request, render_template, redirect, url_for, flash, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from dotenv import load_dotenv
+from datetime import datetime, timezone
 import stripe
 from supabase import create_client, Client
 import logging # For better logging
@@ -32,30 +31,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-<<<<<<< HEAD
-
-# Enable CORS - important for allowing the React frontend to call your API
-CORS(app, resources={r"/api/*": {"origins": "*"}})
-=======
-
-# Try to use Supabase, but fall back to local SQLite for testing
-try:
-    # Check if we can resolve the Supabase hostname first
-    import socket
-    socket.gethostbyname('db.jjtdvdbfbsdcoyehubmx.supabase.co')
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:Od_pugilist5243@db.jjtdvdbfbsdcoyehubmx.supabase.co:5432/postgres'
-    print("✅ Using Supabase database")
-except (socket.gaierror, Exception) as e:
-    # Fall back to local SQLite for testing
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///local_inventory.db'
-    print("⚠️  Supabase unavailable, using local SQLite database for testing")
-    print(f"   Network error: {e}")
-
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-# Only use pool_pre_ping for PostgreSQL
-if 'postgresql' in app.config['SQLALCHEMY_DATABASE_URI']:
-    app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {"pool_pre_ping": True}
-app.config['SECRET_KEY'] = os.urandom(24) # For flash messages
 
 # Enable CORS - configure for production
 # In production, set ALLOWED_ORIGINS environment variable (comma-separated)
@@ -77,9 +52,6 @@ EBAY_REDIRECT_URI = os.getenv('EBAY_REDIRECT_URI')
 # Shopify API Configuration
 SHOPIFY_SHOP_DOMAIN = os.getenv('SHOPIFY_SHOP_DOMAIN')  # e.g., 'your-shop.myshopify.com'
 SHOPIFY_ACCESS_TOKEN = os.getenv('SHOPIFY_ACCESS_TOKEN')
-
-db = SQLAlchemy(app)
->>>>>>> c50ba32bc7ce0bd4ad0a31e0ab8402b70b945444
 
 # --- Flask App Configuration ---
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', os.urandom(24))
@@ -109,37 +81,59 @@ STRIPE_STARTER_PLAN_PRICE_ID = os.environ.get('STRIPE_STARTER_PLAN_PRICE_ID')
 STRIPE_PRO_PLAN_PRICE_ID = os.environ.get('STRIPE_PRO_PLAN_PRICE_ID')
 STRIPE_ENTERPRISE_PLAN_PRICE_ID = os.environ.get('STRIPE_ENTERPRISE_PLAN_PRICE_ID')
 
-<<<<<<< HEAD
+# New pricing plan IDs (Base subscription prices)
+STRIPE_BASIC_PLAN_PRICE_ID = os.environ.get('STRIPE_BASIC_PLAN_PRICE_ID')
+STRIPE_ENTREPRENEUR_PLAN_PRICE_ID = os.environ.get('STRIPE_ENTREPRENEUR_PLAN_PRICE_ID')
+
+# Usage-based price IDs for metered billing (overages)
+STRIPE_BASIC_USAGE_PRICE_ID = os.environ.get('STRIPE_BASIC_USAGE_PRICE_ID')
+STRIPE_PRO_USAGE_PRICE_ID = os.environ.get('STRIPE_PRO_USAGE_PRICE_ID')
+STRIPE_ENTREPRENEUR_USAGE_PRICE_ID = os.environ.get('STRIPE_ENTREPRENEUR_USAGE_PRICE_ID')
+
+# --- Plan Configuration ---
+PLAN_CONFIG = {
+    'basic': {
+        'name': 'Basic',
+        'monthly_price': 150.00,
+        'included_scans': 1000,
+        'overage_rate': 0.11,
+        'base_price_id': os.environ.get('STRIPE_BASIC_PLAN_PRICE_ID'),
+        'usage_price_id': os.environ.get('STRIPE_BASIC_USAGE_PRICE_ID'),
+    },
+    'pro': {
+        'name': 'Pro',
+        'monthly_price': 300.00,
+        'included_scans': 5000,
+        'overage_rate': 0.11,
+        'base_price_id': os.environ.get('STRIPE_PRO_PLAN_PRICE_ID'),
+        'usage_price_id': os.environ.get('STRIPE_PRO_USAGE_PRICE_ID'),
+    },
+    'entrepreneur': {
+        'name': 'Entrepreneur',
+        'monthly_price': 500.00,
+        'included_scans': 20000,
+        'overage_rate': 0.11,
+        'base_price_id': os.environ.get('STRIPE_ENTREPRENEUR_PLAN_PRICE_ID'),
+        'usage_price_id': os.environ.get('STRIPE_ENTREPRENEUR_USAGE_PRICE_ID'),
+    },
+}
+
+def get_plan_config_by_price_id(price_id):
+    """Get plan configuration by base price ID"""
+    for plan_id, config in PLAN_CONFIG.items():
+        if config['base_price_id'] == price_id:
+            return plan_id, config
+    return None, None
+
+# Usage-based price IDs for metered billing (overages)
+STRIPE_BASIC_USAGE_PRICE_ID = os.environ.get('STRIPE_BASIC_USAGE_PRICE_ID')
+STRIPE_PRO_USAGE_PRICE_ID = os.environ.get('STRIPE_PRO_USAGE_PRICE_ID')
+STRIPE_ENTREPRENEUR_USAGE_PRICE_ID = os.environ.get('STRIPE_ENTREPRENEUR_USAGE_PRICE_ID')
+
 if not STRIPE_API_KEY or not STRIPE_WEBHOOK_SECRET:
     logger.error("Stripe API Key or Webhook Secret not found in .env. Stripe integration will fail.")
-stripe.api_key = STRIPE_API_KEY
-=======
-@app.before_request
-def create_tables_if_not_exist():
-    # This will create tables based on SQLAlchemy models if they don't exist.
-    # In a production environment, you might prefer to use migrations (e.g., Alembic).
-    with app.app_context(): # Ensure we are within application context
-        db.create_all()
-        
-        # Add sample data for testing if using local SQLite
-        if 'sqlite' in app.config['SQLALCHEMY_DATABASE_URI']:
-            # Check if we already have data
-            if Product.query.count() == 0:
-                print("📦 Adding sample data for testing...")
-                sample_products = [
-                    Product(lpn='TEST-001', asin='B08XYZ123', fnsku='X001-ABC-123', title='Sample Product 1', msrp=29.99),
-                    Product(lpn='TEST-002', asin='B08XYZ456', fnsku='X002-DEF-456', title='Sample Product 2', msrp=19.99),
-                    Product(lpn='TEST-003', asin='B08XYZ789', fnsku='X003-GHI-789', title='Sample Product 3', msrp=39.99),
-                ]
-                for product in sample_products:
-                    db.session.add(product)
-                try:
-                    db.session.commit()
-                    print("✅ Sample data added successfully")
-                except Exception as e:
-                    db.session.rollback()
-                    print(f"❌ Error adding sample data: {e}")
->>>>>>> c50ba32bc7ce0bd4ad0a31e0ab8402b70b945444
+if STRIPE_API_KEY:
+    stripe.api_key = STRIPE_API_KEY
 
 # --- Supabase Configuration ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -435,19 +429,46 @@ def create_checkout_session():
         # Get the frontend URL for success/cancel redirects
         frontend_url = os.environ.get('FRONTEND_BASE_URL', request.host_url.rstrip('/'))
         
+        # Determine plan and get usage price ID
+        plan_id, plan_config = get_plan_config_by_price_id(price_id)
+        usage_price_id = plan_config.get('usage_price_id') if plan_config else None
+        
+        # Create line items - base subscription + usage-based (if configured)
+        line_items = [{'price': price_id, 'quantity': 1}]
+        subscription_items = [{'price': price_id}]
+        
+        # Add usage price if configured (for metered billing)
+        if usage_price_id:
+            line_items.append({'price': usage_price_id, 'quantity': 0})  # Start at 0 usage
+            subscription_items.append({'price': usage_price_id})
+            logger.info(f"Adding usage price {usage_price_id} to subscription for plan {plan_id}")
+        
         # Create the checkout session
-        checkout_session = stripe.checkout.Session.create(
-            customer=stripe_customer_id,
-            payment_method_types=['card'],
-            line_items=[{'price': price_id, 'quantity': 1}],
-            mode='subscription',
-            success_url=f"{frontend_url}/checkout-success?session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{frontend_url}/checkout-cancel",
-            metadata={
-                'tenant_id': tenant_id, 
-                'supabase_user_id': user_id
+        checkout_session_params = {
+            'customer': stripe_customer_id,
+            'payment_method_types': ['card'],
+            'line_items': line_items,
+            'mode': 'subscription',
+            'success_url': f"{frontend_url}/checkout-success?session_id={{CHECKOUT_SESSION_ID}}",
+            'cancel_url': f"{frontend_url}/checkout-cancel",
+            'metadata': {
+                'tenant_id': str(tenant_id), 
+                'supabase_user_id': user_id,
+                'plan_id': plan_id or 'unknown'
             }
-        )
+        }
+        
+        # Add subscription_data if usage price is configured
+        if usage_price_id:
+            checkout_session_params['subscription_data'] = {
+                'items': subscription_items,
+                'metadata': {
+                    'tenant_id': str(tenant_id),
+                    'plan_id': plan_id or 'unknown'
+                }
+            }
+        
+        checkout_session = stripe.checkout.Session.create(**checkout_session_params)
         
         print(f"Created checkout session: {checkout_session.id}")
         return jsonify({'checkout_url': checkout_session.url})
@@ -798,7 +819,7 @@ def external_scan():
 
 @app.route('/api/external-lookup', methods=['POST'])
 def external_lookup():
-    """Lookup product data from external API using FNSKU"""
+    """Lookup product data from external API using FNSKU - with Supabase caching to avoid duplicate charges"""
     try:
         data = request.get_json()
         fnsku = data.get('fnsku', '').strip()
@@ -809,28 +830,52 @@ def external_lookup():
                 "message": "FNSKU is required"
             }), 400
         
-        # FIRST: Check local database for FNSKU
-        local_product = Product.query.filter_by(fnsku=fnsku).first()
+        # STEP 1: Check Supabase api_lookup_cache FIRST (no API charge)
+        if supabase_admin:
+            try:
+                # Try to find by FNSKU
+                cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('fnsku', fnsku).maybe_single().execute()
+                
+                if cache_result.data:
+                    logger.info(f"✅ Found FNSKU {fnsku} in Supabase cache - NO API CHARGE!")
+                    cached = cache_result.data
+                    
+                    # Update last_accessed and lookup_count
+                    from datetime import datetime
+                    now = datetime.utcnow().isoformat()
+                    current_count = cached.get('lookup_count') or 0
+                    supabase_admin.table('api_lookup_cache').update({
+                        'last_accessed': now,
+                        'lookup_count': current_count + 1,
+                        'updated_at': now
+                    }).eq('id', cached['id']).execute()
+                    
+                    # Return cached data
+                    product_data = {
+                        "success": True,
+                        "source": "api_cache",
+                        "asin": cached.get('asin') or '',
+                        "title": cached.get('product_name') or f"Product {fnsku}",
+                        "price": str(cached.get('price', 0)) if cached.get('price') else '',
+                        "fnsku": fnsku,
+                        "image_url": cached.get('image_url') or '',
+                        "description": cached.get('description') or '',
+                        "category": cached.get('category') or '',
+                        "upc": cached.get('upc') or '',
+                        "amazon_url": f"https://www.amazon.com/dp/{cached.get('asin')}" if cached.get('asin') else '',
+                        "scan_task_id": cached.get('scan_task_id') or '',
+                        "task_state": cached.get('task_state') or '',
+                        "asin_found": cached.get('asin_found', False),
+                        "cost_status": "no_charge",
+                        "message": "Found in cache - no API charge"
+                    }
+                    return jsonify(product_data)
+            except Exception as cache_error:
+                logger.warning(f"Error checking Supabase cache: {cache_error}")
+                # Continue to API call if cache check fails
         
-        if local_product:
-            # Found in local database - return this data without API call
-            product_data = {
-                "success": True,
-                "source": "local_database",
-                "asin": local_product.asin or '',
-                "title": local_product.title or '',
-                "price": str(local_product.msrp) if local_product.msrp else '',
-                "fnsku": fnsku,
-                "lpn": local_product.lpn,
-                "image_url": '',  # Local database doesn't have images
-                "amazon_url": f"https://www.amazon.com/dp/{local_product.asin}" if local_product.asin else '',
-                "message": "Found in local inventory database"
-            }
-            
-            return jsonify(product_data)
-        
-        # NOT FOUND LOCALLY: Proceed with external API call
-        # Using the provided fnskutoasin.com API
+        # STEP 2: Not in cache - proceed with external API call (will be charged)
+        logger.info(f"💰 FNSKU {fnsku} not in cache - calling external API (this will be charged)")
         BASE_URL = "https://ato.fnskutoasin.com"
         API_KEY = os.environ.get('FNSKU_API_KEY')
         
@@ -885,52 +930,107 @@ def external_lookup():
                     "message": f"External API error: {response.status_code} - {response.text}"
                 }), response.status_code
         
-        # Process the scan data
+        # STEP 3: Process the scan data and extract all information
         if scan_data:
-            # Extract relevant data from the API response
             asin = scan_data.get('asin', '')
+            
+            # Extract all available data from API response
+            # Try to get image URL from various possible fields
+            image_url = (scan_data.get('imageUrl') or 
+                        scan_data.get('image') or 
+                        scan_data.get('mainImage', {}).get('url') if isinstance(scan_data.get('mainImage'), dict) else '' or
+                        scan_data.get('images', [{}])[0].get('src') if scan_data.get('images') else '' or
+                        '')
+            
+            # Extract price from various possible fields
+            price = (scan_data.get('price') or 
+                    scan_data.get('listPrice') or 
+                    scan_data.get('msrp') or 
+                    0)
+            
+            # Extract product name/title
+            product_name = (scan_data.get('productName') or 
+                           scan_data.get('name') or 
+                           scan_data.get('title') or 
+                           (f"Amazon Product (ASIN: {asin})" if asin else f"Product for FNSKU: {fnsku}"))
+            
+            # Extract description
+            description = scan_data.get('description') or product_name
+            
+            # Extract category
+            category = (scan_data.get('category') or 
+                       (scan_data.get('categories', [{}])[0].get('name') if scan_data.get('categories') else '') or
+                       'External API')
+            
+            # Extract UPC
+            upc = scan_data.get('upc') or ''
             
             product_data = {
                 "success": True,
                 "source": "external_api",
                 "asin": asin,
-                "title": f"Product for ASIN: {asin}" if asin else "Product information found",
-                "price": "",  # This API doesn't seem to provide price info based on the screenshots
+                "title": product_name,
+                "price": str(price) if price else '',
                 "fnsku": fnsku,
-                "image_url": "",  # This API doesn't seem to provide image URLs
+                "image_url": image_url,
+                "description": description,
+                "category": category,
+                "upc": upc,
                 "amazon_url": f"https://www.amazon.com/dp/{asin}" if asin else '',
                 "scan_task_id": scan_data.get('id', ''),
                 "task_state": scan_data.get('taskState', ''),
                 "assignment_date": scan_data.get('assignmentDate', ''),
+                "asin_found": bool(asin and len(asin) >= 10),
                 "raw_data": scan_data,  # Include raw response for debugging
+                "cost_status": "charged",
                 "message": "Found via fnskutoasin.com API (charged lookup)"
             }
             
-            # OPTIONAL: Save external API result to local database for future use
-            # This prevents future API calls for the same FNSKU
-            try:
-                if asin:
-                    # Create a new product entry with the external data
-                    # Use a generated LPN since we don't have one from external API
-                    new_lpn = f"EXT-{fnsku}"  # Prefix to indicate external source
+            # STEP 4: Save ALL data to Supabase cache for future lookups (prevents future charges)
+            if supabase_admin:
+                try:
+                    from datetime import datetime
+                    now = datetime.utcnow().isoformat()
                     
-                    # Check if this LPN already exists to avoid duplicates
-                    existing_product = Product.query.filter_by(lpn=new_lpn).first()
-                    if not existing_product:
-                        new_product = Product(
-                            lpn=new_lpn,
-                            asin=asin,
-                            fnsku=fnsku,
-                            title=f"Product for ASIN: {asin}",
-                            msrp=None  # No price data from this API
-                        )
-                        db.session.add(new_product)
-                        db.session.commit()
-                        product_data["saved_to_local"] = True
-            except Exception as e:
-                # Don't fail the whole request if saving fails
-                print(f"Warning: Could not save external API result to local database: {e}")
-                product_data["saved_to_local"] = False
+                    # Check if entry already exists
+                    existing = supabase_admin.table('api_lookup_cache').select('id').eq('fnsku', fnsku).maybe_single().execute()
+                    
+                    cache_data = {
+                        'fnsku': fnsku,
+                        'asin': asin if asin else None,
+                        'product_name': product_name,
+                        'description': description,
+                        'price': float(price) if price else 0,
+                        'category': category,
+                        'upc': upc if upc else None,
+                        'image_url': image_url if image_url else None,
+                        'source': 'fnskutoasin.com',
+                        'scan_task_id': scan_data.get('id', ''),
+                        'task_state': scan_data.get('taskState', ''),
+                        'asin_found': bool(asin and len(asin) >= 10),
+                        'last_accessed': now,
+                        'updated_at': now
+                    }
+                    
+                    if existing.data:
+                        # Update existing entry - increment lookup_count
+                        current_count = existing.data.get('lookup_count') or 0
+                        cache_data['lookup_count'] = current_count + 1
+                        supabase_admin.table('api_lookup_cache').update(cache_data).eq('id', existing.data['id']).execute()
+                        logger.info(f"✅ Updated cache entry for FNSKU {fnsku} (lookup #{cache_data['lookup_count']})")
+                    else:
+                        # Insert new entry
+                        cache_data['created_at'] = now
+                        cache_data['lookup_count'] = 1
+                        supabase_admin.table('api_lookup_cache').insert(cache_data).execute()
+                        logger.info(f"✅ Saved new cache entry for FNSKU {fnsku} - future lookups will be FREE!")
+                    
+                    product_data["saved_to_cache"] = True
+                    product_data["message"] = "Found via fnskutoasin.com API (charged lookup) - saved to cache for future use"
+                except Exception as save_error:
+                    logger.error(f"❌ Failed to save to Supabase cache: {save_error}")
+                    product_data["saved_to_cache"] = False
+                    # Don't fail the request if cache save fails
             
             return jsonify(product_data)
         else:
@@ -950,6 +1050,7 @@ def external_lookup():
             "message": f"External API request failed: {str(e)}"
         }), 500
     except Exception as e:
+        logger.error(f"Error in external_lookup: {str(e)}")
         return jsonify({
             "success": False,
             "message": f"Error performing external lookup: {str(e)}"
@@ -1525,6 +1626,166 @@ def get_pricing_suggestions():
             "ebay": {"suggested": 0},
             "shopify": {"suggested": 0}
         }), 500
+
+# --- Usage Reporting Functions for Metered Billing ---
+def get_tenant_subscription_info(tenant_id):
+    """Get Stripe subscription information for a tenant"""
+    try:
+        tenant_res = supabase_admin.table('tenants').select(
+            'stripe_subscription_id, stripe_customer_id, subscription_status'
+        ).eq('id', tenant_id).single().execute()
+        
+        if not tenant_res.data:
+            return None
+        
+        subscription_id = tenant_res.data.get('stripe_subscription_id')
+        if not subscription_id:
+            return None
+        
+        # Get subscription from Stripe to find usage price item
+        subscription = stripe.Subscription.retrieve(subscription_id)
+        return {
+            'subscription_id': subscription_id,
+            'customer_id': tenant_res.data.get('stripe_customer_id'),
+            'status': tenant_res.data.get('subscription_status'),
+            'subscription': subscription
+        }
+    except Exception as e:
+        logger.error(f"Error getting subscription info for tenant {tenant_id}: {str(e)}")
+        return None
+
+def get_usage_subscription_item(subscription):
+    """Get the usage-based subscription item from a Stripe subscription"""
+    try:
+        # Find the subscription item with metered billing
+        for item in subscription.items.data:
+            price = stripe.Price.retrieve(item.price.id)
+            if price.billing_scheme == 'per_unit' and price.recurring and price.recurring.usage_type == 'metered':
+                return item
+        return None
+    except Exception as e:
+        logger.error(f"Error finding usage subscription item: {str(e)}")
+        return None
+
+def calculate_monthly_scan_count(tenant_id, start_date=None, end_date=None):
+    """Calculate total scans for a tenant in the current billing period"""
+    try:
+        # If no dates provided, use current month
+        if not start_date:
+            now = datetime.now(timezone.utc)
+            start_date = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if not end_date:
+            # Next month
+            if start_date.month == 12:
+                end_date = start_date.replace(year=start_date.year + 1, month=1)
+            else:
+                end_date = start_date.replace(month=start_date.month + 1)
+        
+        # Count scans for this tenant in the period
+        scan_res = supabase_admin.from_('scan_history').select('*', count='exact').eq(
+            'tenant_id', tenant_id
+        ).gte('scanned_at', start_date.isoformat()).lt('scanned_at', end_date.isoformat()).execute()
+        
+        return scan_res.count if hasattr(scan_res, 'count') else (len(scan_res.data) if scan_res.data else 0)
+    except Exception as e:
+        logger.error(f"Error calculating scan count for tenant {tenant_id}: {str(e)}")
+        return 0
+
+def report_usage_to_stripe(tenant_id, usage_quantity):
+    """Report usage to Stripe for metered billing"""
+    try:
+        if usage_quantity <= 0:
+            return True  # No usage to report
+        
+        subscription_info = get_tenant_subscription_info(tenant_id)
+        if not subscription_info:
+            logger.warning(f"No subscription found for tenant {tenant_id}")
+            return False
+        
+        subscription = subscription_info['subscription']
+        usage_item = get_usage_subscription_item(subscription)
+        
+        if not usage_item:
+            logger.warning(f"No usage subscription item found for tenant {tenant_id}")
+            return False
+        
+        # Report usage to Stripe
+        timestamp = int(datetime.now(timezone.utc).timestamp())
+        stripe.UsageRecord.create(
+            subscription_item=usage_item.id,
+            quantity=usage_quantity,
+            timestamp=timestamp,
+            action='increment'  # Add to existing usage
+        )
+        
+        logger.info(f"Reported {usage_quantity} usage units to Stripe for tenant {tenant_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error reporting usage to Stripe for tenant {tenant_id}: {str(e)}")
+        return False
+
+def calculate_and_report_overage(tenant_id):
+    """Calculate overage for current billing period and report to Stripe"""
+    try:
+        subscription_info = get_tenant_subscription_info(tenant_id)
+        if not subscription_info:
+            return 0
+        
+        subscription = subscription_info['subscription']
+        
+        # Get current billing period
+        current_period_start = datetime.fromtimestamp(subscription.current_period_start, tz=timezone.utc)
+        current_period_end = datetime.fromtimestamp(subscription.current_period_end, tz=timezone.utc)
+        
+        # Determine plan type from subscription
+        plan_id = None
+        for item in subscription.items.data:
+            price_id = item.price.id
+            found_plan_id, _ = get_plan_config_by_price_id(price_id)
+            if found_plan_id:
+                plan_id = found_plan_id
+                break
+        
+        if not plan_id:
+            logger.warning(f"Could not determine plan for tenant {tenant_id}")
+            return 0
+        
+        plan_config = PLAN_CONFIG[plan_id]
+        included_scans = plan_config['included_scans']
+        
+        # Calculate total scans in current period
+        total_scans = calculate_monthly_scan_count(tenant_id, current_period_start, current_period_end)
+        
+        # Calculate overage
+        overage = max(0, total_scans - included_scans)
+        
+        if overage > 0:
+            # Report overage to Stripe
+            report_usage_to_stripe(tenant_id, overage)
+            logger.info(f"Tenant {tenant_id}: {total_scans} scans, {overage} overage (included: {included_scans})")
+        
+        return overage
+    except Exception as e:
+        logger.error(f"Error calculating overage for tenant {tenant_id}: {str(e)}")
+        return 0
+
+@app.route('/api/report-usage/', methods=['POST'])
+def report_usage_endpoint():
+    """Endpoint to manually trigger usage reporting (for testing or scheduled jobs)"""
+    user_id, tenant_id = get_ids_from_request()
+    if not tenant_id:
+        return jsonify({"error": "Tenant not found"}), 401
+    
+    try:
+        overage = calculate_and_report_overage(tenant_id)
+        return jsonify({
+            "success": True,
+            "overage_scans": overage,
+            "message": f"Reported {overage} overage scans to Stripe"
+        })
+    except Exception as e:
+        logger.error(f"Error in report-usage endpoint: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("FLASK_RUN_PORT", 5000))

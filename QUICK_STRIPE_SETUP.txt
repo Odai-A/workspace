@@ -1,0 +1,45 @@
+═══════════════════════════════════════════════════════════════
+  QUICK STRIPE SETUP - Copy This to Your .env Files
+═══════════════════════════════════════════════════════════════
+
+STEP 1: Create products in Stripe Dashboard
+   → Go to: https://dashboard.stripe.com/products
+   → Create 3 products:
+      • Basic: $150/month
+      • Pro: $300/month  
+      • Entrepreneur: $500/month
+   → Copy the Price IDs (start with "price_")
+
+STEP 2: Create inventory_system/.env file
+   → Create file: inventory_system/.env
+   → Add these lines (replace with your actual Price IDs):
+
+VITE_STRIPE_BASIC_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+VITE_STRIPE_PRO_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+VITE_STRIPE_ENTREPRENEUR_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+
+STEP 3: Update backend .env file (in project root)
+   → Add/update these lines:
+
+STRIPE_API_KEY=sk_test_xxxxxxxxxxxxx
+STRIPE_WEBHOOK_SECRET=whsec_xxxxxxxxxxxxx
+STRIPE_BASIC_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+STRIPE_PRO_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+STRIPE_ENTREPRENEUR_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+FRONTEND_BASE_URL=http://localhost:5173
+
+STEP 4: Restart your servers
+   → Stop both (Ctrl+C)
+   → Restart backend: python app.py
+   → Restart frontend: cd inventory_system && npm run dev
+
+STEP 5: Test
+   → Go to Pricing page
+   → Click "Choose Plan"
+   → Should redirect to Stripe Checkout
+   → Use test card: 4242 4242 4242 4242
+
+═══════════════════════════════════════════════════════════════
+  For detailed instructions, see: STRIPE_CHECKOUT_SETUP.md
+═══════════════════════════════════════════════════════════════
+

@@ -1,0 +1,28 @@
+═══════════════════════════════════════════════════════════════
+  BACKEND .env FILE TEMPLATE
+  Copy this to: C:\Users\odaia\LiqAmz\workspace\.env
+═══════════════════════════════════════════════════════════════
+
+# Stripe Configuration
+STRIPE_API_KEY=sk_test_xxxxxxxxxxxxx
+STRIPE_WEBHOOK_SECRET=whsec_xxxxxxxxxxxxx
+STRIPE_PUBLISHABLE_KEY=pk_test_xxxxxxxxxxxxx
+
+# Base subscription prices (monthly fees)
+# Copy your Price IDs from inventory_system/.env (remove VITE_ prefix)
+STRIPE_BASIC_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+STRIPE_PRO_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+STRIPE_ENTREPRENEUR_PLAN_PRICE_ID=price_xxxxxxxxxxxxx
+
+# Usage-based prices (for overages - optional for now)
+STRIPE_BASIC_USAGE_PRICE_ID=price_xxxxxxxxxxxxx
+STRIPE_PRO_USAGE_PRICE_ID=price_xxxxxxxxxxxxx
+STRIPE_ENTREPRENEUR_USAGE_PRICE_ID=price_xxxxxxxxxxxxx
+
+# Frontend URL
+FRONTEND_BASE_URL=http://localhost:5173
+
+═══════════════════════════════════════════════════════════════
+  IMPORTANT: Replace xxxxxxxxxxxxx with your actual values!
+═══════════════════════════════════════════════════════════════
+
