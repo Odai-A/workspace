@@ -26,9 +26,18 @@ print("SUPABASE_SERVICE_KEY:", os.environ.get('SUPABASE_SERVICE_KEY'))
 # Load environment variables from .env file
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging - ensure it outputs to console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Output to console/terminal
+    ]
+)
 logger = logging.getLogger(__name__)
+logger.info("=" * 60)
+logger.info("LOGGING CONFIGURED - All logs will appear in terminal")
+logger.info("=" * 60)
 
 app = Flask(__name__)
 
@@ -141,7 +150,10 @@ SUPABASE_ANON_KEY = os.environ.get("SUPABASE_KEY") # Anon key for RLS-protected 
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY") # Service role key for admin operations
 
 if not SUPABASE_URL or not SUPABASE_ANON_KEY or not SUPABASE_SERVICE_KEY:
-    logger.error("Supabase URL or Keys not found in .env. Supabase integration will fail.")
+    logger.error("❌ CRITICAL: Supabase URL or Keys not found in .env. Supabase integration will fail.")
+    logger.error(f"   SUPABASE_URL: {'SET' if SUPABASE_URL else 'MISSING'}")
+    logger.error(f"   SUPABASE_ANON_KEY: {'SET' if SUPABASE_ANON_KEY else 'MISSING'}")
+    logger.error(f"   SUPABASE_SERVICE_KEY: {'SET' if SUPABASE_SERVICE_KEY else 'MISSING'}")
     supabase: Client = None
     supabase_admin: Client = None
 else:
@@ -149,6 +161,15 @@ else:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
     # Client for admin operations (bypasses RLS)
     supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    logger.info("✅ Supabase clients initialized")
+    
+    # Test connection to api_lookup_cache table
+    try:
+        test_result = supabase_admin.table('api_lookup_cache').select('id').limit(1).execute()
+        logger.info(f"✅ Supabase api_lookup_cache table is accessible")
+    except Exception as test_error:
+        logger.error(f"❌ CRITICAL: Cannot access api_lookup_cache table: {test_error}")
+        logger.error("   Check table exists and service key has proper permissions")
 
 # --- Data Models & Access ---
 # For multi-tenancy with Supabase RLS, it's generally recommended to manage
@@ -755,8 +776,6 @@ def upload_csv():
     # Or this endpoint might be API-only, and React handles the form.
     return render_template('upload.html')
 
-<<<<<<< HEAD
-=======
 @app.route('/search', methods=['GET'])
 def search():
     query = request.args.get('query', '').strip()
@@ -841,8 +860,7 @@ def external_lookup():
                     cached = cache_result.data
                     
                     # Update last_accessed and lookup_count
-                    from datetime import datetime
-                    now = datetime.utcnow().isoformat()
+                    now = datetime.now(timezone.utc).isoformat()
                     current_count = cached.get('lookup_count') or 0
                     supabase_admin.table('api_lookup_cache').update({
                         'last_accessed': now,
@@ -989,8 +1007,7 @@ def external_lookup():
             # STEP 4: Save ALL data to Supabase cache for future lookups (prevents future charges)
             if supabase_admin:
                 try:
-                    from datetime import datetime
-                    now = datetime.utcnow().isoformat()
+                    now = datetime.now(timezone.utc).isoformat()
                     
                     # Check if entry already exists
                     existing = supabase_admin.table('api_lookup_cache').select('id').eq('fnsku', fnsku).maybe_single().execute()
@@ -1056,6 +1073,598 @@ def external_lookup():
             "message": f"Error performing external lookup: {str(e)}"
         }), 500
 
+# ===== NEW UNIFIED SCAN ENDPOINT =====
+
+@app.route('/api/scan', methods=['POST'])
+def scan_product():
+    """
+    Unified scan endpoint that handles FNSKU → ASIN → Rainforest API → Cache → Response
+    Frontend makes ONE request and gets complete product data back.
+    """
+    try:
+        data = request.get_json()
+        code = data.get('code', '').strip()
+        user_id = data.get('user_id', '').strip()
+        
+        # Use both print and logger to ensure visibility
+        print("\n" + "=" * 60)
+        print(f"🔍 SCAN REQUEST RECEIVED")
+        print(f"   FNSKU: {code}")
+        print(f"   UserID: {user_id}")
+        print(f"   Supabase admin client: {supabase_admin is not None}")
+        print("=" * 60)
+        
+        logger.info(f"🔍 ========== SCAN REQUEST RECEIVED ==========")
+        logger.info(f"   FNSKU: {code}")
+        logger.info(f"   UserID: {user_id}")
+        logger.info(f"   Supabase admin client: {supabase_admin is not None}")
+        if supabase_admin:
+            logger.info(f"   ✅ Supabase is READY for saving to api_lookup_cache")
+            print(f"✅ Supabase is READY for saving to api_lookup_cache")
+        else:
+            logger.error(f"   ❌ Supabase is NOT READY - save will FAIL")
+            print(f"❌ Supabase is NOT READY - save will FAIL")
+        
+        if not code:
+            return jsonify({
+                "success": False,
+                "error": "Invalid FNSKU",
+                "message": "Code is required"
+            }), 400
+        
+        # Get API keys from environment
+        FNSKU_API_KEY = os.environ.get('FNSKU_API_KEY')
+        RAINFOREST_API_KEY = os.environ.get('RAINFOREST_API_KEY')
+        
+        if not FNSKU_API_KEY:
+            logger.error("FNSKU_API_KEY not found in environment variables")
+            return jsonify({
+                "success": False,
+                "error": "Unauthorized API key",
+                "message": "FNSKU API key not configured"
+            }), 500
+        
+        # STEP 1: Check Supabase cache first (instant return if cached)
+        if supabase_admin:
+            try:
+                cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('fnsku', code).maybe_single().execute()
+                
+                if cache_result.data:
+                    cached = cache_result.data
+                    from datetime import timedelta
+                    now = datetime.now(timezone.utc)
+                    cached_date = datetime.fromisoformat(cached.get('updated_at', cached.get('created_at', now.isoformat())))
+                    age_days = (now - cached_date).days
+                    
+                    # Update access tracking
+                    current_count = cached.get('lookup_count') or 0
+                    supabase_admin.table('api_lookup_cache').update({
+                        'last_accessed': now.isoformat(),
+                        'lookup_count': current_count + 1
+                    }).eq('id', cached['id']).execute()
+                    
+                    # If cache is fresh (<30 days) and has complete data, return immediately
+                    if age_days < 30 and cached.get('image_url') and cached.get('product_name'):
+                        logger.info(f"✅ Returning cached data for FNSKU {code} (age: {age_days} days)")
+                        return jsonify({
+                            "success": True,
+                            "fnsku": cached.get('fnsku', code),
+                            "asin": cached.get('asin', ''),
+                            "title": cached.get('product_name', ''),
+                            "price": str(cached.get('price', 0)) if cached.get('price') else '',
+                            "image": cached.get('image_url', ''),
+                            "brand": cached.get('brand', ''),
+                            "category": cached.get('category', ''),
+                            "description": cached.get('description', ''),
+                            "upc": cached.get('upc', ''),
+                            "amazon_url": f"https://www.amazon.com/dp/{cached.get('asin')}" if cached.get('asin') else '',
+                            "source": "cache",
+                            "cost_status": "no_charge",
+                            "cached": True,
+                            "raw": cached
+                        })
+            except Exception as cache_error:
+                logger.warning(f"Error checking cache: {cache_error}")
+        
+        # STEP 2: Not in cache or cache is stale - call FNSKU API with polling
+        logger.info(f"💰 FNSKU {code} not in cache - calling FNSKU API (will be charged)")
+        BASE_URL = "https://ato.fnskutoasin.com"
+        headers = {
+            'api-key': FNSKU_API_KEY,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+        
+        # Try to get existing scan task first
+        lookup_url = f"{BASE_URL}/api/v1/ScanTask/GetByBarCode"
+        scan_data = None
+        asin = None
+        
+        try:
+            response = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=30)
+            if response.status_code == 200:
+                lookup_result = response.json()
+                if lookup_result.get('succeeded') and lookup_result.get('data'):
+                    scan_data = lookup_result['data']
+                    # Check if ASIN is already available in existing scan task
+                    potential_asin = scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or ''
+                    if potential_asin:
+                        asin = str(potential_asin).strip()
+                        if asin and len(asin) >= 10:
+                            logger.info(f"✅ Found existing scan task with ASIN already available: {asin}")
+                        else:
+                            asin = None
+                    if not asin:
+                        logger.info(f"✅ Found existing scan task for FNSKU {code}, but ASIN not yet available")
+        except Exception as e:
+            logger.warning(f"GetByBarCode failed: {e}")
+        
+        # If no existing scan, create one
+        if not scan_data:
+            add_scan_url = f"{BASE_URL}/api/v1/ScanTask/AddOrGet"
+            payload = {"barCode": code, "callbackUrl": ""}
+            
+            try:
+                response = requests.post(add_scan_url, headers=headers, json=payload, timeout=30)
+                if response.status_code == 200:
+                    add_result = response.json()
+                    if add_result.get('succeeded') and add_result.get('data'):
+                        scan_data = add_result['data']
+                        logger.info(f"✅ Created scan task {scan_data.get('id')} for FNSKU {code}")
+                        # Check if ASIN is already available in the response
+                        potential_asin = scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or ''
+                        if potential_asin:
+                            initial_asin = str(potential_asin).strip()
+                            if initial_asin and len(initial_asin) >= 10:
+                                asin = initial_asin
+                                logger.info(f"🎉 ASIN found immediately in AddOrGet response: {asin}")
+            except Exception as e:
+                logger.error(f"AddOrGet failed: {e}")
+                return jsonify({
+                    "success": False,
+                    "error": "FNSKU API timeout",
+                    "message": f"Failed to create scan task: {str(e)}"
+                }), 500
+        
+        if not scan_data:
+            logger.error(f"❌ Failed to get or create scan task for FNSKU {code}")
+            return jsonify({
+                "success": False,
+                "error": "Product not found",
+                "message": "Could not create or retrieve scan task. Please try again."
+            }), 404
+        
+        # STEP 3: Poll for ASIN (up to 30 attempts, 2 second intervals = 60 seconds max)
+        # Only overwrite asin if we don't already have it from existing scan task
+        if not asin or len(asin) < 10:
+            potential_asin = scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or ''
+            if potential_asin:
+                asin = str(potential_asin).strip()
+        
+        task_id = scan_data.get('id') if scan_data else None
+        max_polls = 15  # Reduced to 15 polls = 30 seconds max to avoid timeout
+        poll_interval = 2000  # 2 seconds
+        retry_add_or_get_after = 2
+        
+        # If ASIN not available, poll for it
+        if not asin or len(asin) < 10:
+            logger.info(f"⏳ ASIN not immediately available. Polling for task {task_id} (max {max_polls} attempts, ~{max_polls * 2}s)...")
+            import time
+            
+            for attempt in range(1, max_polls + 1):
+                # Retry AddOrGet after 2 polls to trigger processing
+                if attempt == retry_add_or_get_after:
+                    logger.info(f"🔄 Retrying AddOrGet to trigger processing (attempt {attempt})...")
+                    try:
+                        retry_response = requests.post(add_scan_url, headers=headers, json=payload, timeout=30)
+                        if retry_response.status_code == 200:
+                            retry_result = retry_response.json()
+                            if retry_result.get('succeeded') and retry_result.get('data'):
+                                scan_data = retry_result['data']
+                                # Get ASIN properly
+                                potential_asin = scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or ''
+                                if potential_asin:
+                                    asin = str(potential_asin).strip()
+                                else:
+                                    asin = ''
+                                # Check if ASIN is valid (at least 10 characters, usually starts with B)
+                                if asin and len(asin) >= 10:
+                                    logger.info(f"🎉 ASIN found after retry: {asin}")
+                                    break
+                    except Exception as e:
+                        logger.warning(f"Retry AddOrGet failed: {e}")
+                
+                # Poll for ASIN - check immediately on first attempt, then wait between polls
+                # Only wait if this isn't the first attempt and we haven't just done a retry
+                if attempt > 1 and attempt != retry_add_or_get_after + 1:
+                    # Wait before polling (except first attempt and right after retry)
+                    if attempt == 2:
+                        time.sleep(1)  # Short initial wait
+                    else:
+                        time.sleep(poll_interval / 1000)  # 2 seconds between polls
+                
+                try:
+                    poll_response = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=5)  # Reduced timeout
+                    if poll_response.status_code == 200:
+                        poll_result = poll_response.json()
+                        if poll_result.get('succeeded') and poll_result.get('data'):
+                            scan_data = poll_result['data']
+                            # Get ASIN - check multiple possible fields and handle None/empty
+                            potential_asin = scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or ''
+                            if potential_asin:
+                                asin = str(potential_asin).strip()
+                            else:
+                                asin = ''
+                            
+                            task_state = scan_data.get('taskState') or scan_data.get('task_state', 0)
+                            
+                            # Log what we found (every attempt for debugging)
+                            logger.info(f"📊 Poll {attempt}/{max_polls}: ASIN='{asin}' (len={len(asin)}), State={task_state}")
+                            
+                            # Check if ASIN is valid (at least 10 characters, usually starts with B)
+                            if asin and len(asin) >= 10:
+                                logger.info(f"🎉🎉🎉 ASIN FOUND after {attempt} polls: '{asin}' - BREAKING POLLING LOOP NOW!")
+                                break  # Exit polling loop immediately - this should work!
+                            
+                            # If task completed/failed but no ASIN, stop
+                            if task_state in [2, 3] or scan_data.get('finishedOn'):
+                                if not asin or len(asin) < 10:
+                                    logger.warning(f"⚠️ Task {task_state} completed but no ASIN found. Stopping.")
+                                    break
+                            
+                            if attempt % 3 == 0:  # Log every 3 attempts
+                                logger.info(f"📊 Polling progress: Attempt {attempt}/{max_polls}, State: {task_state}, ASIN: '{asin or 'not found'}'")
+                except Exception as poll_error:
+                    logger.warning(f"Poll attempt {attempt} failed: {poll_error}")
+                    # Don't slow down - keep trying fast
+                
+                # Double-check ASIN after each iteration (in case it was set in retry)
+                if asin and isinstance(asin, str) and len(asin.strip()) >= 10:
+                    logger.info(f"✅ ASIN confirmed available: {asin} - exiting polling immediately")
+                    break
+                
+                # Early exit if we've been polling for a while and task seems stuck
+                if attempt >= 10 and task_state == 0:  # Still pending after 10 attempts
+                    logger.warning(f"⚠️ Task still pending after {attempt} attempts. May need more time.")
+                    # Continue polling but log warning
+            
+            # After polling loop, verify we have ASIN
+            if not asin or not isinstance(asin, str) or len(asin.strip()) < 10:
+                logger.warning(f"⚠️ Polling completed but no valid ASIN found. ASIN value: '{asin}'")
+                # Try one final lookup to see if ASIN is now available
+                try:
+                    final_response = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=10)
+                    if final_response.status_code == 200:
+                        final_result = final_response.json()
+                        if final_result.get('succeeded') and final_result.get('data'):
+                            final_scan_data = final_result['data']
+                            potential_asin = final_scan_data.get('asin') or final_scan_data.get('ASIN') or final_scan_data.get('Asin') or ''
+                            if potential_asin:
+                                final_asin = str(potential_asin).strip()
+                                if final_asin and len(final_asin) >= 10:
+                                    asin = final_asin
+                                    logger.info(f"🎉 ASIN found in final check: {asin}")
+                except Exception as e:
+                    logger.warning(f"Final ASIN check failed: {e}")
+        
+        # Final ASIN validation
+        if not asin or not isinstance(asin, str) or len(asin.strip()) < 10:
+            logger.warning(f"⚠️ No valid ASIN found after polling. Returning partial data - user can retry.")
+            # Return partial response so user can see progress and retry
+            return jsonify({
+                "success": True,  # Still success so frontend can show partial data
+                "fnsku": code,
+                "asin": "",
+                "title": scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}",
+                "price": "",
+                "image": scan_data.get('imageUrl') or scan_data.get('image') or '',
+                "brand": "",
+                "category": "External API",
+                "message": "ASIN is still being processed. Please scan again in a few moments.",
+                "processing": True
+            }), 200
+        
+        # STEP 4: If we have ASIN, fetch from Rainforest API
+        rainforest_data = None
+        logger.info(f"🔍 Checking Rainforest API conditions - ASIN: '{asin}' (len={len(asin) if asin else 0}), API Key: {'SET' if RAINFOREST_API_KEY else 'MISSING'}")
+        
+        if asin and len(asin) >= 10:
+            if not RAINFOREST_API_KEY:
+                logger.warning("⚠️ RAINFOREST_API_KEY not set - skipping Rainforest API call")
+            else:
+                logger.info(f"📦 Fetching product data from Rainforest API for ASIN {asin}...")
+                try:
+                    rainforest_response = requests.get(
+                        'https://api.rainforestapi.com/request',
+                        params={
+                            'api_key': RAINFOREST_API_KEY,
+                            'type': 'product',
+                            'amazon_domain': 'amazon.com',
+                            'asin': asin
+                        },
+                        timeout=15
+                    )
+                    
+                    logger.info(f"📡 Rainforest API response status: {rainforest_response.status_code}")
+                    
+                    if rainforest_response.status_code == 200:
+                        response_json = rainforest_response.json()
+                        logger.info(f"📦 Rainforest API response keys: {list(response_json.keys())}")
+                        
+                        if response_json.get('product'):
+                            product = response_json['product']
+                            logger.info(f"✅ Product found in Rainforest response. Title: {product.get('title', 'N/A')[:50]}...")
+                            
+                            rainforest_data = {
+                                'title': product.get('title', ''),
+                                'image': product.get('main_image', {}).get('link') or (product.get('images', [{}])[0].get('link') if product.get('images') else ''),
+                                'price': product.get('buybox_winner', {}).get('price', {}).get('value') or product.get('price', {}).get('value'),
+                                'rating': product.get('rating'),
+                                'reviews_count': product.get('reviews_total'),
+                                'brand': product.get('brand', ''),
+                                'category': product.get('category', {}).get('name', '') if isinstance(product.get('category'), dict) else '',
+                                'description': product.get('description', '')
+                            }
+                            logger.info(f"✅ Rainforest API data retrieved for ASIN {asin}: title={rainforest_data.get('title', '')[:50]}, price={rainforest_data.get('price')}, brand={rainforest_data.get('brand')}")
+                        else:
+                            logger.warning(f"⚠️ Rainforest API response does not contain 'product' key. Response: {str(response_json)[:200]}")
+                    else:
+                        logger.error(f"❌ Rainforest API returned status {rainforest_response.status_code}. Response: {rainforest_response.text[:200]}")
+                except requests.exceptions.Timeout:
+                    logger.error("❌ Rainforest API timeout after 15 seconds")
+                except Exception as rf_error:
+                    logger.error(f"❌ Rainforest API error: {type(rf_error).__name__}: {str(rf_error)}")
+                    import traceback
+                    logger.error(f"Traceback: {traceback.format_exc()}")
+        else:
+            logger.warning(f"⚠️ Cannot call Rainforest API - ASIN invalid: '{asin}' (len={len(asin) if asin else 0})")
+        
+        # STEP 5: Build response data
+        # Safety check: ensure scan_data exists
+        if not scan_data:
+            logger.error(f"❌ scan_data is None when building response for FNSKU {code}")
+            return jsonify({
+                "success": False,
+                "error": "Internal server error",
+                "message": "Failed to retrieve scan task data. Please try again."
+            }), 500
+        
+        logger.info(f"📊 Building response - Rainforest data available: {rainforest_data is not None}, ASIN: {asin}")
+        if rainforest_data:
+            logger.info(f"📊 Rainforest data: title={rainforest_data.get('title', '')[:50]}, price={rainforest_data.get('price')}, brand={rainforest_data.get('brand')}, category={rainforest_data.get('category')}")
+        
+        # Safely access scan_data with fallbacks
+        product_name = (rainforest_data.get('title') if rainforest_data else '') or (scan_data.get('productName') if scan_data else '') or (scan_data.get('name') if scan_data else '') or (f"Amazon Product (ASIN: {asin})" if asin else f"FNSKU: {code}")
+        image_url = (rainforest_data.get('image') if rainforest_data else '') or (scan_data.get('imageUrl') if scan_data else '') or (scan_data.get('image') if scan_data else '') or ''
+        price = (rainforest_data.get('price') if rainforest_data else None) or (scan_data.get('price') if scan_data else None) or (scan_data.get('listPrice') if scan_data else None) or 0
+        description = (rainforest_data.get('description') if rainforest_data else '') or (scan_data.get('description') if scan_data else '') or product_name
+        category = (rainforest_data.get('category') if rainforest_data else '') or (scan_data.get('category') if scan_data else '') or 'External API'
+        brand = (rainforest_data.get('brand') if rainforest_data else '') or (scan_data.get('brand') if scan_data else '') or ''
+        
+        logger.info(f"📊 Final response data: title={product_name[:50]}, price={price}, brand={brand}, category={category}, image={image_url[:50] if image_url else 'none'}")
+        
+        response_data = {
+            "success": True,
+            "fnsku": code,
+            "asin": asin,
+            "title": product_name,
+            "price": str(price) if price else '',
+            "image": image_url,
+            "brand": brand,
+            "category": category,
+            "description": description,
+            "upc": scan_data.get('upc', '') if scan_data else '',
+            "amazon_url": f"https://www.amazon.com/dp/{asin}" if asin else '',
+            "source": "api",
+            "cost_status": "charged",
+            "cached": False,
+            "saved_to_cache": False,  # Initialize - will be updated after save attempt
+            "raw": {
+                "scan_data": scan_data,
+                "rainforest_data": rainforest_data
+            }
+        }
+        
+        # STEP 6: Save to Supabase cache for future lookups - ALWAYS SAVE IF ASIN IS VALID
+        print("\n" + "=" * 60)
+        print(f"💾 SAVE TO CACHE CHECK")
+        print(f"   supabase_admin exists: {supabase_admin is not None}")
+        print(f"   asin: '{asin}' (len={len(asin) if asin else 0})")
+        print(f"   code (FNSKU): '{code}'")
+        print("=" * 60)
+        
+        logger.info(f"💾 ========== SAVE TO CACHE CHECK ==========")
+        logger.info(f"   supabase_admin exists: {supabase_admin is not None}")
+        logger.info(f"   asin: '{asin}' (len={len(asin) if asin else 0})")
+        logger.info(f"   code (FNSKU): '{code}'")
+        
+        response_data["saved_to_cache"] = False  # Default to False
+        
+        # FORCE SAVE - Only skip if Supabase is completely unavailable
+        if not supabase_admin:
+            logger.error("❌ CRITICAL: supabase_admin is None - CANNOT SAVE TO api_lookup_cache")
+            logger.error("❌ Check SUPABASE_SERVICE_KEY in .env file")
+            logger.error("❌ This is a CRITICAL error - data will NOT be saved!")
+        elif not asin or len(asin) < 10:
+            logger.warning(f"⚠️ ASIN invalid for caching: '{asin}' (len={len(asin) if asin else 0}) - need at least 10 chars")
+            logger.warning(f"⚠️ Cannot save without valid ASIN")
+        else:
+            logger.info(f"✅ ALL CONDITIONS MET - PROCEEDING WITH SAVE TO api_lookup_cache")
+            # VALID ASIN - MUST SAVE TO api_lookup_cache
+            print(f"\n✅ VALID ASIN '{asin}' - ATTEMPTING TO SAVE TO api_lookup_cache...")
+            logger.info(f"✅ VALID ASIN '{asin}' - ATTEMPTING TO SAVE TO api_lookup_cache...")
+            try:
+                now = datetime.now(timezone.utc).isoformat()
+                
+                print(f"💾 Step 1: Checking for existing cache entry for FNSKU {code}...")
+                logger.info(f"💾 Step 1: Checking for existing cache entry for FNSKU {code}...")
+                try:
+                    existing = supabase_admin.table('api_lookup_cache').select('id, lookup_count').eq('fnsku', code).maybe_single().execute()
+                    if existing is None:
+                        print(f"⚠️ Step 1 Result: Query returned None (likely 406 error)")
+                        logger.warning(f"⚠️ Step 1 Result: Query returned None (likely 406 error)")
+                        existing_data = None
+                    else:
+                        existing_data = existing.data if hasattr(existing, 'data') else None
+                        print(f"💾 Step 1 Result: existing.data = {existing_data is not None}")
+                        logger.info(f"💾 Step 1 Result: existing.data = {existing_data is not None}")
+                except Exception as query_error:
+                    print(f"❌ Error querying cache: {type(query_error).__name__}: {str(query_error)}")
+                    logger.error(f"❌ Error querying cache: {type(query_error).__name__}: {str(query_error)}")
+                    existing = None
+                    existing_data = None
+                
+                # Safely convert price to float
+                try:
+                    if price:
+                        price_str = str(price).strip()
+                        price_float = float(price_str) if price_str else 0
+                    else:
+                        price_float = 0
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"⚠️ Could not convert price '{price}' to float: {e}, using 0")
+                    price_float = 0
+                
+                # Prepare cache data - ensure all required fields are present
+                # NOTE: Only include columns that exist in api_lookup_cache table
+                # Table columns: fnsku, asin, product_name, description, price, category, upc, image_url, source, scan_task_id, task_state, asin_found, lookup_count, last_accessed, created_at, updated_at
+                # NOTE: 'brand' column does NOT exist in the table, so we don't include it
+                cache_data = {
+                    'fnsku': code,  # REQUIRED
+                    'asin': asin,  # REQUIRED
+                    'product_name': (product_name[:500] if product_name else f"Product {code}") or f"Product {code}",  # Ensure not None
+                    'description': (description[:2000] if description else product_name) or '',  # Can be empty
+                    'price': price_float,
+                    'category': (category[:200] if category else 'External API') or 'External API',
+                    'image_url': image_url[:500] if image_url else None,
+                    'upc': scan_data.get('upc') if (scan_data and scan_data.get('upc')) else None,
+                    'source': 'rainforest_api' if rainforest_data else 'fnskutoasin.com',
+                    'scan_task_id': str(task_id) if task_id else None,
+                    'task_state': str(scan_data.get('taskState', '')) if (scan_data and scan_data.get('taskState')) else None,
+                    'asin_found': True,
+                    'last_accessed': now,
+                    'updated_at': now
+                    # 'brand' column does NOT exist in api_lookup_cache table - removed
+                }
+                
+                print(f"💾 Step 2: Cache data prepared - fnsku={cache_data['fnsku']}, asin={cache_data['asin']}, price={cache_data['price']}, has_image={bool(cache_data['image_url'])}")
+                logger.info(f"💾 Step 2: Cache data prepared - fnsku={cache_data['fnsku']}, asin={cache_data['asin']}, price={cache_data['price']}, has_image={bool(cache_data['image_url'])}")
+                
+                # Check if we have existing data
+                if existing_data:
+                    print(f"💾 Step 3: UPDATING existing cache entry (id: {existing_data['id']})")
+                    logger.info(f"💾 Step 3: UPDATING existing cache entry (id: {existing_data['id']})")
+                    current_count = existing_data.get('lookup_count') or 0
+                    cache_data['lookup_count'] = current_count + 1
+                    print(f"💾 Step 4: Executing UPDATE query...")
+                    logger.info(f"💾 Step 4: Executing UPDATE query...")
+                    result = supabase_admin.table('api_lookup_cache').update(cache_data).eq('id', existing_data['id']).execute()
+                    if result and hasattr(result, 'data') and result.data:
+                        print(f"✅✅✅ SUCCESS: Updated cache for FNSKU {code} - ID: {existing_data['id']}, ASIN: {asin}")
+                        print(f"✅ Update result: {result.data}")
+                        logger.info(f"✅✅✅ SUCCESS: Updated cache for FNSKU {code} - ID: {existing_data['id']}, ASIN: {asin}")
+                        logger.info(f"✅ Update result: {result.data}")
+                    else:
+                        print(f"⚠️ Update executed but no data returned - may have succeeded")
+                        logger.warning(f"⚠️ Update executed but no data returned - may have succeeded")
+                    response_data["saved_to_cache"] = True
+                else:
+                    print(f"💾 Step 3: CREATING new cache entry for FNSKU {code}")
+                    logger.info(f"💾 Step 3: CREATING new cache entry for FNSKU {code}")
+                    cache_data['created_at'] = now
+                    cache_data['lookup_count'] = 1
+                    print(f"💾 Step 4: Executing INSERT query...")
+                    logger.info(f"💾 Step 4: Executing INSERT query...")
+                    result = supabase_admin.table('api_lookup_cache').insert(cache_data).execute()
+                    if result and hasattr(result, 'data') and result.data:
+                        print(f"✅✅✅ SUCCESS: Saved new cache entry for FNSKU {code} - ASIN: {asin}")
+                        print(f"✅ Insert result: {result.data}")
+                        logger.info(f"✅✅✅ SUCCESS: Saved new cache entry for FNSKU {code} - ASIN: {asin}")
+                        logger.info(f"✅ Insert result: {result.data}")
+                    else:
+                        print(f"⚠️ Insert executed but no data returned - may have succeeded anyway")
+                        logger.warning(f"⚠️ Insert executed but no data returned - may have succeeded anyway")
+                        # Still mark as saved since the query executed without error
+                    response_data["saved_to_cache"] = True
+                
+                print(f"✅✅✅ SAVE COMPLETE - saved_to_cache set to: {response_data['saved_to_cache']}")
+                logger.info(f"✅✅✅ SAVE COMPLETE - saved_to_cache set to: {response_data['saved_to_cache']}")
+                
+            except Exception as save_error:
+                error_msg = f"❌❌❌ CRITICAL ERROR saving to api_lookup_cache: {type(save_error).__name__}: {str(save_error)}"
+                print(f"\n{error_msg}")
+                import traceback
+                print(f"❌ Full traceback:\n{traceback.format_exc()}\n")
+                logger.error(error_msg)
+                logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
+                response_data["saved_to_cache"] = False
+                # Don't fail the request - just log the error
+        
+        # Log scan event for Stripe usage tracking (if user_id provided)
+        if user_id and supabase_admin:
+            try:
+                supabase_admin.table('api_scan_logs').insert({
+                    'user_id': user_id,
+                    'fnsku_scanned': code,
+                    'asin_retrieved': asin,
+                    'api_source': 'fnskutoasin.com',
+                    'is_charged_call': True,
+                    'created_at': datetime.now(timezone.utc).isoformat()
+                }).execute()
+            except Exception as log_error:
+                logger.warning(f"Failed to log scan event: {log_error}")
+        
+        # Log final response status
+        print("\n" + "=" * 60)
+        print(f"📤 FINAL RESPONSE STATUS:")
+        print(f"   - saved_to_cache: {response_data.get('saved_to_cache', 'NOT SET')}")
+        print(f"   - cached: {response_data.get('cached', False)}")
+        print(f"   - asin: {asin}")
+        print(f"   - fnsku: {code}")
+        print(f"   - supabase_admin exists: {supabase_admin is not None}")
+        print("=" * 60 + "\n")
+        
+        logger.info(f"📤 FINAL RESPONSE STATUS:")
+        logger.info(f"   - saved_to_cache: {response_data.get('saved_to_cache', 'NOT SET')}")
+        logger.info(f"   - cached: {response_data.get('cached', False)}")
+        logger.info(f"   - asin: {asin}")
+        logger.info(f"   - fnsku: {code}")
+        logger.info(f"   - supabase_admin exists: {supabase_admin is not None}")
+        
+        # CRITICAL: If save failed but we have valid ASIN, log warning
+        if asin and len(asin) >= 10 and not response_data.get('saved_to_cache'):
+            error_msg = f"❌❌❌ WARNING: Valid ASIN '{asin}' but saved_to_cache is False!"
+            print(f"\n{error_msg}")
+            print(f"   This means the save to api_lookup_cache FAILED or was SKIPPED")
+            print(f"   Check logs above for error messages\n")
+            logger.error(error_msg)
+            logger.error(f"   This means the save to api_lookup_cache FAILED or was SKIPPED")
+            logger.error(f"   Check logs above for error messages")
+        
+        return jsonify(response_data)
+        
+    except requests.exceptions.Timeout:
+        return jsonify({
+            "success": False,
+            "error": "FNSKU API timeout",
+            "message": "External API request timed out"
+        }), 408
+    except requests.exceptions.RequestException as e:
+        return jsonify({
+            "success": False,
+            "error": "External API request failed",
+            "message": str(e)
+        }), 500
+    except Exception as e:
+        logger.error(f"Error in scan_product: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            "success": False,
+            "error": "Internal server error",
+            "message": f"Error performing scan: {str(e)}"
+        }), 500
+
 @app.route('/dashboard')
 def dashboard():
     total_products = Product.query.count()
@@ -1071,7 +1680,6 @@ def scan_history_list():
     # Limit to a reasonable number, e.g., last 50 scans, for performance
     history_items = ScanHistory.query.join(Product).order_by(ScanHistory.scanned_at.desc()).limit(50).all()
     return render_template('history.html', history_items=history_items)
->>>>>>> c50ba32bc7ce0bd4ad0a31e0ab8402b70b945444
 
 # ===== MARKETPLACE API ENDPOINTS =====
 
@@ -1795,5 +2403,14 @@ if __name__ == '__main__':
     # from flask_cors import CORS
     # CORS(app, resources={r"/api/*": {"origins": "http://localhost:5173"}}) # Example for specific API routes
 
+    print("=" * 60)
+    print(f"STARTING FLASK BACKEND SERVER")
+    print(f"Port: {port}")
+    print(f"Debug Mode: {debug_mode}")
+    print(f"Host: 0.0.0.0 (accessible from all interfaces)")
+    print("=" * 60)
     logger.info(f"Starting Flask app on port {port} with debug mode: {debug_mode}")
+    print(f"\n✅ Backend server is RUNNING - waiting for requests...")
+    print(f"📡 API Endpoint: http://localhost:{port}/api/scan")
+    print(f"💡 All API requests will be logged below:\n")
     app.run(debug=debug_mode, port=port, host='0.0.0.0') 

@@ -22,6 +22,15 @@ STRIPE_ENTREPRENEUR_USAGE_PRICE_ID=price_xxxxxxxxxxxxx
 # Frontend URL
 FRONTEND_BASE_URL=http://localhost:5173
 
+# External API Keys (REQUIRED for scanning)
+FNSKU_API_KEY=your-fnsku-api-key-here
+RAINFOREST_API_KEY=your-rainforest-api-key-here
+
+# Supabase Configuration (REQUIRED)
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-anon-key-here
+SUPABASE_SERVICE_KEY=your-service-role-key-here
+
 ═══════════════════════════════════════════════════════════════
   IMPORTANT: Replace xxxxxxxxxxxxx with your actual values!
 ═══════════════════════════════════════════════════════════════

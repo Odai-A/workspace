@@ -188,6 +188,7 @@ export const externalApiService = {
       
       let scanData = null;
       let lastError = null;
+      let workingHeaderIndex = 1; // Default to api-key format (index 1)
       
       // Try to get existing scan task by barcode first
       const lookupUrl = `${BASE_URL}/api/v1/ScanTask/GetByBarCode`;
@@ -205,6 +206,7 @@ export const externalApiService = {
             const lookupResult = lookupResponse.data;
             if (lookupResult?.succeeded && lookupResult?.data) {
               scanData = lookupResult.data;
+              workingHeaderIndex = i; // Track which header format worked
               console.log('✅ Found existing scan task:', scanData);
               break;
             }
@@ -240,6 +242,7 @@ export const externalApiService = {
               const addResult = addResponse.data;
               if (addResult?.succeeded && addResult?.data) {
                 scanData = addResult.data;
+                workingHeaderIndex = i; // Track which header format worked
                 console.log('✅ Created new scan task:', scanData);
                 break;
               } else {
@@ -276,9 +279,105 @@ export const externalApiService = {
         throw lastError;
       }
       
-      // Process the scan data
+      // Process the scan data - if ASIN not available, poll for it
       if (scanData) {
-        const asin = scanData.asin || '';
+        let asin = scanData.asin || '';
+        let finalScanData = scanData;
+        
+        // If ASIN is not available, poll for it with retry strategy
+        if (!asin || asin.trim() === '' || asin.length < 10) {
+          console.log('⏳ ASIN not immediately available. Starting polling with retry strategy...');
+          const workingHeaderFormat = headerFormats[workingHeaderIndex];
+          const addScanUrl = `${BASE_URL}/api/v1/ScanTask/AddOrGet`;
+          const payload = { barCode: fnsku, callbackUrl: "" };
+          
+          let pollInterval = 2000; // 2 second intervals
+          let maxPollAttempts = 30; // 30 attempts * 2 seconds = 60 seconds max
+          let retryAddOrGetAfter = 2; // Retry AddOrGet after 2 polls
+          let hasRetriedAddOrGet = false;
+          
+          for (let attempt = 1; attempt <= maxPollAttempts; attempt++) {
+            try {
+              // After 2 polls, retry AddOrGet to trigger processing
+              if (attempt === retryAddOrGetAfter && !hasRetriedAddOrGet) {
+                console.log(`🔄 Retrying AddOrGet (attempt ${attempt}) to trigger API processing...`);
+                try {
+                  const retryResponse = await axios.post(addScanUrl, payload, {
+                    headers: workingHeaderFormat,
+                    timeout: 30000
+                  });
+                  
+                  if (retryResponse.status === 200) {
+                    const retryResult = retryResponse.data;
+                    if (retryResult?.succeeded && retryResult?.data) {
+                      finalScanData = retryResult.data;
+                      asin = finalScanData.asin || '';
+                      console.log(`✅ Retry AddOrGet successful, task state: ${finalScanData.taskState}, ASIN: ${asin || 'not yet'}`);
+                      
+                      // If we got ASIN from retry, we're done!
+                      if (asin && asin.trim() !== '' && asin.length >= 10) {
+                        console.log(`🎉 ASIN found after retry AddOrGet: ${asin}`);
+                        break;
+                      }
+                      
+                      // Wait a bit after retry before continuing to poll
+                      await new Promise(resolve => setTimeout(resolve, pollInterval));
+                    }
+                  }
+                  hasRetriedAddOrGet = true;
+                } catch (retryError) {
+                  console.warn('⚠️ Retry AddOrGet failed, continuing with polling:', retryError.message);
+                  hasRetriedAddOrGet = true; // Don't retry again
+                }
+              }
+              
+              // Normal polling (or continue after retry)
+              console.log(`🔄 Polling attempt ${attempt}/${maxPollAttempts} for ASIN...`);
+              await new Promise(resolve => setTimeout(resolve, pollInterval));
+              
+              const pollResponse = await axios.get(lookupUrl, {
+                params: { BarCode: fnsku },
+                headers: workingHeaderFormat,
+                timeout: 10000
+              });
+              
+              if (pollResponse.status === 200) {
+                const pollResult = pollResponse.data;
+                if (pollResult?.succeeded && pollResult?.data) {
+                  finalScanData = pollResult.data;
+                  asin = finalScanData.asin || '';
+                  const currentTaskState = finalScanData.taskState;
+                  
+                  // If we got an ASIN, we're done!
+                  if (asin && asin.trim() !== '' && asin.length >= 10) {
+                    console.log(`🎉 ASIN found after ${attempt} polling attempt(s): ${asin}`);
+                    break;
+                  }
+                  
+                  // Task state: 0=Pending, 1=In Progress, 2=Completed, 3=Failed
+                  // If task is completed (2) or failed (3) but no ASIN, stop polling
+                  if (currentTaskState === 2 || currentTaskState === 3 || finalScanData.finishedOn) {
+                    if (!asin || asin.trim() === '') {
+                      console.log(`⚠️ Task ${currentTaskState === 2 ? 'completed' : 'failed'} but no ASIN found. Stopping polling.`);
+                      break;
+                    }
+                  }
+                  
+                  // Log progress every 5 attempts
+                  if (attempt % 5 === 0) {
+                    console.log(`📊 Polling progress: Attempt ${attempt}, Task State: ${currentTaskState}, ASIN: ${asin || 'not found'}`);
+                  }
+                }
+              }
+            } catch (pollError) {
+              console.warn(`⚠️ Polling attempt ${attempt} failed:`, pollError.message);
+              // Continue polling unless it's a critical error
+              if (pollError.response?.status === 401 || pollError.response?.status === 403) {
+                throw pollError; // Stop on auth errors
+              }
+            }
+          }
+        }
         
         const productData = {
           fnsku: fnsku,
@@ -291,11 +390,11 @@ export const externalApiService = {
           image_url: '',
           condition: 'New',
           source: 'fnskutoasin.com',
-          scan_task_id: scanData.id || '',
-          task_state: scanData.taskState || (asin ? 'completed' : 'processing'),
-          assignment_date: scanData.assignmentDate || '',
+          scan_task_id: finalScanData.id || '',
+          task_state: finalScanData.taskState || (asin ? 'completed' : 'processing'),
+          assignment_date: finalScanData.assignmentDate || '',
           amazon_url: asin ? `https://www.amazon.com/dp/${asin}` : '',
-          raw_data: scanData,
+          raw_data: finalScanData,
           created_at: new Date().toISOString(),
           asin_found: !!asin && asin.trim() !== '' && asin.length >= 10,
           processing_status: asin ? 'completed' : 'pending_manual_check'
@@ -305,7 +404,7 @@ export const externalApiService = {
           console.log('🎉 ASIN found via FNSKU API:', productData.asin);
           return productData;
         } else {
-          console.log('⏳ ASIN not immediately available. API may need more time.');
+          console.log('⏳ ASIN still not available after polling. API may need more time.');
           return {
             ...productData,
             asin: '',

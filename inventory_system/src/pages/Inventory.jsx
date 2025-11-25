@@ -325,7 +325,7 @@ const Inventory = () => {
           <style>
             @page {
               size: 4in 6in;
-              margin: 0.1in;
+              margin: 0.08in;
             }
             @media print {
               body {
@@ -340,6 +340,14 @@ const Inventory = () => {
                 -webkit-print-color-adjust: exact;
                 print-color-adjust: exact;
               }
+              /* Enhanced dithering for thermal printers */
+              img {
+                image-rendering: -webkit-optimize-contrast !important;
+                image-rendering: crisp-edges !important;
+                image-rendering: pixelated !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+              }
             }
             * {
               box-sizing: border-box;
@@ -351,7 +359,7 @@ const Inventory = () => {
               max-width: 4in;
               max-height: 6in;
               margin: 0;
-              padding: 0.1in;
+              padding: 0.08in;
               overflow: hidden;
               display: flex;
               flex-direction: column;
@@ -384,8 +392,8 @@ const Inventory = () => {
             .label-header {
               text-align: center;
               border-bottom: 2px solid #000;
-              padding-bottom: 0.06in;
-              margin-bottom: 0.08in;
+              padding-bottom: 0.05in;
+              margin-bottom: 0.06in;
               padding-right: 0.85in;
               flex-shrink: 0;
               overflow: hidden;
@@ -407,12 +415,12 @@ const Inventory = () => {
               padding: 0;
             }
             .asin-display {
-              font-size: 10pt;
+              font-size: 9pt;
               font-weight: bold;
               text-align: center;
               background: #f0f0f0;
-              padding: 0.06in;
-              margin: 0.06in 0;
+              padding: 0.04in;
+              margin: 0.04in 0;
               border: 1px solid #000;
               flex-shrink: 0;
             }
@@ -421,19 +429,35 @@ const Inventory = () => {
               align-items: center;
               justify-content: center;
               margin: 0.08in 0;
-              max-height: 1.8in;
-              min-height: 1.2in;
+              max-height: 2.8in;
+              min-height: 2.2in;
               flex-shrink: 1;
               overflow: hidden;
+              padding: 0.05in;
             }
             .product-image {
               max-width: 100%;
-              max-height: 1.8in;
+              max-height: 2.8in;
               width: auto;
               height: auto;
               object-fit: contain;
-              border: 1px solid #ddd;
+              border: 3px solid #000;
               background: white;
+              box-shadow: 0 0 0 2px #000;
+              padding: 0.02in;
+              /* Dithering mode for thermal printer clarity */
+              image-rendering: -webkit-optimize-contrast;
+              image-rendering: crisp-edges;
+              image-rendering: pixelated;
+              /* Enhanced contrast and dithering effect for thermal printers */
+              filter: contrast(1.2) brightness(0.9) grayscale(0%);
+              /* Force high-quality rendering */
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+              /* Dithering effect via CSS */
+              image-rendering: auto;
+              image-rendering: -moz-crisp-edges;
+              image-rendering: crisp-edges;
             }
             .price-section {
               margin-top: auto;
@@ -509,7 +533,9 @@ const Inventory = () => {
 
           ${productInfo.image_url ? `
             <div class="product-image-section">
-              <img src="${productInfo.image_url}" alt="Product Image" class="product-image" onerror="this.style.display='none';" />
+              <img src="${productInfo.image_url}" alt="Product Image" class="product-image" 
+                   onerror="this.style.display='none';"
+                   style="image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; image-rendering: pixelated; filter: contrast(1.2) brightness(0.9);" />
             </div>
           ` : ''}
 

@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef, useContext } from 'react';
-import { ToastContainer, toast } from 'react-toastify';
+import { toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import axios from 'axios';
 import BarcodeReader from './BarcodeReader';
 import MarketplaceListing from './MarketplaceListing';
 import ShopifyListing from './ShopifyListing';
-import { getProductLookup, externalApiService } from '../services/api';
+// Removed: import { getProductLookup, externalApiService } from '../services/api';
+// All API calls now go through backend /api/scan endpoint
 import { productLookupService as dbProductLookupService, apiCacheService } from '../services/databaseService';
 import { inventoryService } from '../config/supabaseClient';
 import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, CheckCircleIcon, CurrencyDollarIcon, ArrowTopRightOnSquareIcon, PrinterIcon, QrCodeIcon } from '@heroicons/react/24/outline';
@@ -317,58 +318,35 @@ const Scanner = () => {
                       source: 'rainforest_api'
                     };
                     
-                    console.log('💾 [1/2] Saving Rainforest data to api_lookup_cache:', cacheData);
+                    console.log('💾 Saving Rainforest data to api_lookup_cache:', cacheData);
                     const savedToCache = await apiCacheService.saveLookup(cacheData);
                     
-                    // STEP 2: Also update manifest_data if product exists there
-                    try {
-                      const { supabase } = await import('../config/supabaseClient');
-                      
-                      // Try to find product in manifest_data by FNSKU
-                      const { data: manifestProduct, error: findError } = await supabase
-                        .from('manifest_data')
-                        .select('id, "Fn Sku", "B00 Asin"')
-                        .eq('Fn Sku', fnskuToSave)
-                        .maybeSingle();
-                      
-                      if (!findError && manifestProduct) {
-                        console.log('💾 [2/2] Found product in manifest_data, updating with image_url...');
-                        
-                        // Update manifest_data with image_url
-                        const updateData = {
-                          image_url: enhancedProduct.image_url || null
-                        };
-                        
-                        // Also update description if available and better
-                        if (enhancedProduct.name && enhancedProduct.name !== `Amazon Product (ASIN: ${enhancedProduct.asin})`) {
-                          updateData['Description'] = enhancedProduct.name;
+                    // Update manifest_data in background (non-blocking)
+                    if (savedToCache && enhancedProduct.image_url) {
+                      (async () => {
+                        try {
+                          const { supabase } = await import('../config/supabaseClient');
+                          const { data: manifestProduct } = await supabase
+                            .from('manifest_data')
+                            .select('id')
+                            .eq('Fn Sku', fnskuToSave)
+                            .maybeSingle();
+                          
+                          if (manifestProduct) {
+                            await supabase
+                              .from('manifest_data')
+                              .update({ image_url: enhancedProduct.image_url })
+                              .eq('id', manifestProduct.id);
+                          }
+                        } catch (err) {
+                          // Silent fail - not critical
                         }
-                        
-                        const { data: updatedManifest, error: updateError } = await supabase
-                          .from('manifest_data')
-                          .update(updateData)
-                          .eq('id', manifestProduct.id)
-                          .select()
-                          .single();
-                        
-                        if (updateError) {
-                          console.error('❌ Failed to update manifest_data:', updateError);
-                        } else {
-                          console.log('✅ Updated manifest_data with image_url:', updatedManifest);
-                        }
-                      } else if (findError && findError.code !== 'PGRST116') {
-                        console.warn('⚠️ Error checking manifest_data:', findError);
-                      } else {
-                        console.log('ℹ️ Product not found in manifest_data (may not be uploaded yet)');
-                      }
-                    } catch (manifestError) {
-                      console.warn('⚠️ Could not update manifest_data:', manifestError);
-                      // Don't fail the whole operation if manifest update fails
+                      })();
                     }
                     
                     if (savedToCache) {
                       console.log('✅ Saved Rainforest API data to cache - future lookups will be free!', savedToCache);
-                      toast.success("💾 Image saved to cache & manifest - future scans will be FREE! 🎉", { autoClose: 3000 });
+                      toast.success("💾 Product data saved - future scans will be FREE! 🎉", { autoClose: 3000 });
                     } else {
                       console.error('❌ Failed to save to cache - saveLookup returned null');
                       toast.warn("⚠️ Could not save image to cache. Next scan may charge again.", { autoClose: 4000 });
@@ -409,371 +387,78 @@ const Scanner = () => {
         //   console.log("[Scanner.jsx] Scan event log result (from DB/Cache):", logResult);
         // }
       } else {
-        // Not found locally - try external API
-        console.log(`Product not found in local DB/Cache by FNSKU or LPN (${code}), trying external API...`);
-        toast.info("💰 Checking external API (this will be charged)...", {
+        // Not found locally - call unified backend scan endpoint
+        console.log(`Product not found in local DB/Cache by FNSKU or LPN (${code}), calling backend /api/scan...`);
+        toast.info("🔍 Scanning product...", {
           autoClose: 2000
         });
         
-        console.log("🚀 [DEBUG] About to call getProductLookup for:", code);
-        const apiResult = await getProductLookup(code, userId);
-        console.log("🚀 [DEBUG] getProductLookup returned:", apiResult);
-        
-        if (apiResult) {
-          console.log("🚀 [DEBUG] API result ASIN:", apiResult.asin);
-          console.log("🚀 [DEBUG] API result FNSKU:", apiResult.fnsku);
-          console.log("🚀 [DEBUG] API result source:", apiResult.source);
+        try {
+          // Get backend URL from environment
+          let backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || 'http://localhost:5000';
           
-          let displayableProduct = null;
-          let productForLogging = apiResult; 
-          
-          // Check if ASIN was found or if API is still processing
-          if (!apiResult.asin && (apiResult.processing_status === 'timeout' || apiResult.processing_status === 'quick_timeout')) {
-            // API is still processing - show processing state
-            setIsApiProcessing(true);
-            setProcessingStartTime(new Date());
-            
-            if (apiResult.processing_status === 'quick_timeout') {
-              toast.warn("⚡ Quick scan complete - no ASIN yet. Click 'Check for Updates' in 2-3 minutes.", {
-                autoClose: 6000
-              });
-            } else {
-              toast.warn("⏳ API is still processing this FNSKU. Click 'Check for Updates' in a few minutes.", {
-                autoClose: 6000
-              });
-            }
+          // Remove trailing /api if present (VITE_API_URL might include it)
+          if (backendUrl.endsWith('/api')) {
+            backendUrl = backendUrl.replace('/api', '');
           }
           
-          // Check if it came from external API or was already saved
-          if (apiResult.source === 'external_api') {
-            toast.success("⚡ Found via external API and saved for future use!", {
-              icon: "💛"
-            });
+          const scanUrl = `${backendUrl}/api/scan`;
+          
+          console.log("🚀 Calling unified scan endpoint:", scanUrl);
+          const response = await axios.post(scanUrl, {
+            code: code,
+            user_id: userId
+          }, {
+            timeout: 60000 // 60 seconds timeout (15 polls * 2s + Rainforest API + buffer)
+          });
+          
+          const apiResult = response.data;
+          console.log("🚀 Backend scan response:", apiResult);
+          
+          if (apiResult && apiResult.success) {
+            // Map backend response to frontend product format
+            const displayableProduct = {
+              fnsku: apiResult.fnsku || code,
+              asin: apiResult.asin || '',
+              name: apiResult.title || '',
+              image_url: apiResult.image || '',
+              price: apiResult.price || '',
+              brand: apiResult.brand || '',
+              category: apiResult.category || '',
+              description: apiResult.description || '',
+              upc: apiResult.upc || '',
+              amazon_url: apiResult.amazon_url || '',
+              source: apiResult.source || 'api',
+              cost_status: apiResult.cost_status || (apiResult.cached ? 'no_charge' : 'charged')
+            };
             
-            console.log("🚀 [DEBUG] Processing external_api result with ASIN:", apiResult.asin);
-          } else if (apiResult.source === 'local_database') {
-            toast.success("✅ Found in local database - No API charge!", {
-              icon: "💚"
-            });
+            // Show appropriate toast based on source
+            if (apiResult.cached) {
+              toast.success("✅ Found in cache - No API charge!", { icon: "💚" });
+            } else if (apiResult.source === 'api') {
+              toast.success("✅ Product scanned successfully!", { icon: "💚" });
+            }
+            
+            // Set product info - backend already handled everything!
+            setProductInfo(displayableProduct);
           } else {
-            toast.info("📝 Using mock data for testing", {
-              icon: "🔵"
-            });
+            // Handle error response
+            const errorMsg = apiResult?.message || apiResult?.error || "Failed to scan product";
+            toast.error(`❌ ${errorMsg}`, { autoClose: 5000 });
+            console.error("Backend scan error:", apiResult);
           }
-          
-          // Save to API cache if it's from external API AND has a real ASIN
-          try {
-            if (apiResult.source === 'external_api') {
-              // ONLY SAVE TO CACHE IF WE HAVE A REAL ASIN!
-              if (apiResult.asin && apiResult.asin.trim() !== '') {
-                console.log('💾 Attempting to save external API result to API cache for future cost savings...');
-                console.log('🔍 API result to save:', apiResult);
-                
-                const savedToCache = await apiCacheService.saveLookup(apiResult); 
-                
-                if (savedToCache) {
-                  console.log('✅ Successfully saved external API result to API cache:', savedToCache);
-                  displayableProduct = apiCacheService.mapCacheToDisplay(savedToCache);
-                  displayableProduct.source = 'api_cache';
-                  displayableProduct.cost_status = 'no_charge';
-                  productForLogging = displayableProduct; 
-                  toast.success("💾 API result saved to cache! Future scans of this item will be FREE! 🎉", {
-                    autoClose: 4000
-                  });
-                } else {
-                  console.error('❌ Failed to save external API result to cache');
-                  toast.warn("⚠️ Product found via API, but failed to save to cache. Next scan will be charged again.", {
-                    autoClose: 5000
-                  });
-                  // Still display the product even if save failed
-                  displayableProduct = apiResult;
-                  displayableProduct.source = 'external_api';
-                  displayableProduct.cost_status = 'charged';
-                  productForLogging = displayableProduct; 
-                }
-              } else {
-                // ASIN is NULL or EMPTY - this means the API is still processing
-                console.log('⏳ API returned null/empty ASIN - Starting auto-refresh ONLY IF NEEDED');
-                
-                // Check if auto-refresh is ALREADY active for this code
-                if (!isAutoRefreshing || autoRefreshCode !== code) {
-                  console.log('🔄 Starting auto-refresh as ASIN is not yet available.');
-                  startAutoRefresh(code);
-                  toast.info("⏳ API processing. Auto-refreshing for ASIN every 45s.", {
-                    autoClose: 6000
-                  });
-                } else {
-                  console.log('🔄 Auto-refresh is already active for this code. No new toast.');
-                }
-                
-                displayableProduct = apiResult; // Show current (null ASIN) state
-                displayableProduct.source = 'external_api';
-                displayableProduct.cost_status = 'charged';
-                productForLogging = displayableProduct;
-              }
-            } else {
-              // For non-external API results, or if ASIN not found by external_api.
-              // Also handles cases where asin_found is false.
-              // Do not save to cache in these scenarios.
-              if (apiResult.source === 'external_api' && (!apiResult.asin || apiResult.asin.trim() === '' || !apiResult.asin_found)) {
-                 toast.warn("ℹ️ ASIN not found or not confirmed by external API for this FNSKU. Not saving to cache.", { icon: "ℹ️", autoClose: 5000 });
-              }
-              displayableProduct = apiResult; // Use the original apiResult
-              // Ensure source and cost_status are correctly set if it was an external lookup without a cache save
-              if (apiResult.source === 'external_api') {
-                displayableProduct.source = 'external_api';
-                displayableProduct.cost_status = 'charged';
-              }
-               productForLogging = displayableProduct;
-            }
-          } catch (saveError) {
-                console.error("❌ Exception saving API result to cache:", saveError);
-                toast.error("⚠️ Product found via API, but error saving to cache. Next scan might be charged again.", { autoClose: 5000 });
-                // Fallback to using the original apiResult for display and logging if save fails
-                displayableProduct = apiResult;
-                if (displayableProduct) { //Ensure apiResult is not null
-                    displayableProduct.source = 'external_api'; 
-                    displayableProduct.cost_status = 'charged';
-                    productForLogging = displayableProduct;
-                }
-          }
-
-          if (apiResult.source === 'api_cache' || apiResult.source === 'fnsku_cache') {
-            // This block might be redundant if already handled by the saveToCache logic,
-            // but ensures correct state if apiResult was directly from cache.
-            displayableProduct = apiResult; // apiResult should already be mapped if from cache
-            toast.success("✅ Found in API cache - No API charge!", { icon: "💚" });
-            if(displayableProduct){
-                 displayableProduct.cost_status = 'no_charge';
-                 productForLogging = displayableProduct; 
-            }
-          } else if (apiResult.source === 'local_database') {
-            // This case should ideally be caught by the initial productFromDb check.
-            // If somehow apiResult indicates local_database, treat as no charge.
-            displayableProduct = apiResult;
-            toast.success("✅ Found in local database - No API charge!", { icon: "💚" });
-             if(displayableProduct){
-                displayableProduct.cost_status = 'no_charge';
-                productForLogging = displayableProduct;
-             }
-          } else if (apiResult.source !== 'external_api' && apiResult.source !== 'api_cache' && apiResult.source !== 'fnsku_cache') { 
-            // Handles mock data or other non-standard sources
-            displayableProduct = apiResult;
-            toast.info("📝 Using mock data or other source.", { icon: "🔵" });
-            productForLogging = displayableProduct;
-          }
-          
-          console.log('🚀 [DEBUG] Final displayableProduct before setProductInfo:', displayableProduct);
-          console.log('🚀 [DEBUG] Final displayableProduct ASIN:', displayableProduct?.asin);
-          
-          // If we have an ASIN, check cache FIRST before calling Rainforest API
-          if (displayableProduct && displayableProduct.asin && displayableProduct.asin.trim() !== '') {
-            // STEP 1: Check cache for image BEFORE calling Rainforest API
-            let cachedImage = null;
-            let shouldCallRainforest = true;
-            
-            try {
-              // Check api_lookup_cache for this ASIN or FNSKU
-              const cacheKey = displayableProduct.fnsku || displayableProduct.asin;
-              const cachedData = await apiCacheService.getCachedLookup(cacheKey);
-              
-              if (cachedData && cachedData.image_url) {
-                console.log('✅ Found image in cache - using cached image (no Rainforest API charge)');
-                cachedImage = cachedData.image_url;
-                shouldCallRainforest = false;
-                
-                // Use cached image and other cached data
-                displayableProduct.image_url = cachedData.image_url;
-                if (cachedData.product_name && cachedData.product_name !== `Product ${cacheKey}`) {
-                  displayableProduct.name = cachedData.product_name;
-                }
-                if (cachedData.price) {
-                  displayableProduct.price = cachedData.price;
-                }
-                
-                toast.success("✅ Using cached image - no API charge!", { autoClose: 2000 });
-                setProductInfo(displayableProduct);
-                return; // Exit early, no need to call Rainforest
-              } else {
-                console.log('❌ No image in cache - will fetch from Rainforest API (will be charged)');
-              }
-            } catch (cacheCheckError) {
-              console.warn('⚠️ Error checking cache:', cacheCheckError);
-              // Continue to Rainforest API if cache check fails
-            }
-            
-            // STEP 2: Only call Rainforest API if image not in cache
-            if (shouldCallRainforest && !displayableProduct.image_url) {
-              console.log('📦 Missing image - fetching from Rainforest API (will be charged)');
-              toast.info("📦 Fetching product image from Rainforest API...", { autoClose: 2000 });
-              
-              try {
-                const rainforestData = await fetchProductDataFromRainforest(displayableProduct.asin);
-                
-                if (rainforestData) {
-                  // Merge Rainforest API data with existing product data
-                  const enhancedProduct = {
-                    ...displayableProduct,
-                    name: rainforestData.title || displayableProduct.name || 'Product',
-                    image_url: rainforestData.image || displayableProduct.image_url || displayableProduct.image || '',
-                    price: rainforestData.price || displayableProduct.price,
-                    rating: rainforestData.rating || displayableProduct.rating || null,
-                    reviews_count: rainforestData.reviews_count || displayableProduct.reviews_count || null,
-                    brand: rainforestData.brand || displayableProduct.brand || '',
-                    category: rainforestData.category || displayableProduct.category || '',
-                    description: rainforestData.description || displayableProduct.description || ''
-                  };
-                  
-                  console.log('✅ Enhanced product data from Rainforest API:', enhancedProduct);
-                  
-                  // Save Rainforest data to cache for future use
-                  try {
-                    // Ensure we have fnsku - use ASIN as fallback if needed (required by table)
-                    const fnskuToSave = enhancedProduct.fnsku || enhancedProduct.sku || enhancedProduct.asin;
-                    
-                    if (!fnskuToSave || !enhancedProduct.asin) {
-                      console.error('❌ Cannot save to cache: Missing fnsku or asin', {
-                        fnsku: enhancedProduct.fnsku,
-                        sku: enhancedProduct.sku,
-                        asin: enhancedProduct.asin,
-                        fullProduct: enhancedProduct
-                      });
-                      toast.warn("⚠️ Cannot save to cache: Missing FNSKU or ASIN", { autoClose: 3000 });
-                    } else {
-                      const cacheData = {
-                        fnsku: fnskuToSave,
-                        asin: enhancedProduct.asin,
-                        name: enhancedProduct.name,
-                        description: enhancedProduct.description,
-                        price: enhancedProduct.price,
-                        category: enhancedProduct.category,
-                        image_url: enhancedProduct.image_url,
-                        source: 'rainforest_api'
-                      };
-                      
-                      console.log('💾 [SAVE] Step 1: Saving Rainforest data to api_lookup_cache');
-                      console.log('💾 [SAVE] Cache data to save:', JSON.stringify(cacheData, null, 2));
-                      
-                      const savedToCache = await apiCacheService.saveLookup(cacheData);
-                      
-                      if (!savedToCache) {
-                        console.error('❌ [SAVE] CRITICAL: saveLookup returned null - save FAILED!');
-                        console.error('❌ [SAVE] This means the data was NOT saved to api_lookup_cache');
-                        toast.error("❌ FAILED to save to cache! Check console for errors.", { autoClose: 6000 });
-                      } else {
-                        console.log('✅ [SAVE] Step 1 SUCCESS: Saved to api_lookup_cache:', savedToCache);
-                        console.log('✅ [SAVE] Cache entry ID:', savedToCache.id);
-                        console.log('✅ [SAVE] Image URL saved:', savedToCache.image_url ? 'YES' : 'NO');
-                      }
-                      
-                      // STEP 2: Also update manifest_data if product exists there
-                      try {
-                        const { supabase } = await import('../config/supabaseClient');
-                        
-                        console.log('💾 [SAVE] Step 2: Checking manifest_data for FNSKU:', fnskuToSave);
-                        
-                        // Try to find product in manifest_data by FNSKU
-                        const { data: manifestProduct, error: findError } = await supabase
-                          .from('manifest_data')
-                          .select('id, "Fn Sku", "B00 Asin"')
-                          .eq('Fn Sku', fnskuToSave)
-                          .maybeSingle();
-                        
-                        if (!findError && manifestProduct) {
-                          console.log('💾 [SAVE] Step 2: Found product in manifest_data (ID:', manifestProduct.id, '), updating with image_url...');
-                          
-                          // Update manifest_data with image_url
-                          const updateData = {
-                            image_url: enhancedProduct.image_url || null
-                          };
-                          
-                          // Also update description if available and better
-                          if (enhancedProduct.name && enhancedProduct.name !== `Amazon Product (ASIN: ${enhancedProduct.asin})`) {
-                            updateData['Description'] = enhancedProduct.name;
-                          }
-                          
-                          console.log('💾 [SAVE] Step 2: Update data:', updateData);
-                          
-                          const { data: updatedManifest, error: updateError } = await supabase
-                            .from('manifest_data')
-                            .update(updateData)
-                            .eq('id', manifestProduct.id)
-                            .select()
-                            .single();
-                          
-                          if (updateError) {
-                            console.error('❌ [SAVE] Step 2 FAILED: Error updating manifest_data:', updateError);
-                            console.error('❌ [SAVE] Error code:', updateError.code);
-                            console.error('❌ [SAVE] Error message:', updateError.message);
-                            toast.warn("⚠️ Saved to cache but failed to update manifest_data", { autoClose: 4000 });
-                          } else {
-                            console.log('✅ [SAVE] Step 2 SUCCESS: Updated manifest_data with image_url');
-                            console.log('✅ [SAVE] Updated manifest entry:', updatedManifest);
-                          }
-                        } else if (findError && findError.code !== 'PGRST116') {
-                          console.warn('⚠️ [SAVE] Step 2: Error checking manifest_data:', findError);
-                        } else {
-                          console.log('ℹ️ [SAVE] Step 2: Product not found in manifest_data (may not be uploaded yet)');
-                        }
-                      } catch (manifestError) {
-                        console.error('❌ [SAVE] Step 2: Exception updating manifest_data:', manifestError);
-                        // Don't fail the whole operation if manifest update fails
-                      }
-                      
-                      if (savedToCache) {
-                        console.log('✅ [SAVE] COMPLETE: Rainforest data saved to cache - future lookups will be free!');
-                        toast.success("💾 Image saved to cache & manifest - future scans will be FREE! 🎉", { autoClose: 3000 });
-                      } else {
-                        console.error('❌ [SAVE] CRITICAL ERROR: saveLookup returned null - data NOT saved!');
-                        toast.error("❌ CRITICAL: Failed to save to cache! Next scan WILL charge again!", { autoClose: 6000 });
-                      }
-                    }
-                  } catch (cacheError) {
-                    console.error('❌ Error saving Rainforest data:', cacheError);
-                    console.error('Error details:', {
-                      message: cacheError.message,
-                      code: cacheError.code,
-                      details: cacheError.details,
-                      hint: cacheError.hint
-                    });
-                    toast.error("❌ Failed to save to cache. Check console for details.", { autoClose: 5000 });
-                  }
-                  
-                  toast.success("✅ Product details loaded with image!", { autoClose: 2000 });
-                  setProductInfo(enhancedProduct);
-                } else {
-                  // No Rainforest data, use what we have
-                  console.log('⚠️ No Rainforest API data available, using existing product data');
-                  setProductInfo(displayableProduct);
-                }
-              } catch (error) {
-                console.error("Error fetching Rainforest API data:", error);
-                // Continue with existing data even if Rainforest API fails
-                setProductInfo(displayableProduct);
-              }
-            } else {
-              // We have the data we need, no need to call Rainforest
-              setProductInfo(displayableProduct);
-            }
+        } catch (error) {
+          console.error("Error calling backend scan endpoint:", error);
+          if (error.response) {
+            const errorMsg = error.response.data?.message || error.response.data?.error || "Backend error";
+            toast.error(`❌ ${errorMsg}`, { autoClose: 5000 });
+          } else if (error.code === 'ECONNABORTED') {
+            toast.error("❌ Request timeout - the scan is taking longer than expected", { autoClose: 5000 });
           } else {
-            // No ASIN available, just set the product info as is
-            console.log('⚠️ No ASIN found in displayableProduct, cannot fetch Rainforest data');
-            console.log('⚠️ displayableProduct:', displayableProduct);
-            if (displayableProduct) {
-              setProductInfo(displayableProduct);
-            } else {
-              toast.error("❌ Could not retrieve product information. Please check the FNSKU and try again.", { autoClose: 5000 });
-            }
+            toast.error("❌ Failed to connect to backend. Please ensure the backend server is running.", { autoClose: 5000 });
           }
-          
-          // Removed scan history logging to avoid database issues
-          // if (productForLogging) {
-          //   console.log("[Scanner.jsx] Attempting to log scan event. Code:", code, "Product Details for Logging:", productForLogging);
-          //   const logResult = await dbProductLookupService.logScanEvent(code, productForLogging);
-          //   console.log("[Scanner.jsx] Scan event log result (from API path):", logResult);
-          // }
-        } else {
-          toast.error("❌ Product not found in database or via external API.", { icon: "❌" });
+        } finally {
+          setLoading(false);
         }
       }
     } catch (error) {
@@ -947,7 +632,7 @@ const Scanner = () => {
           <style>
             @page {
               size: 4in 6in;
-              margin: 0.1in;
+              margin: 0.08in;
             }
             @media print {
               body {
@@ -962,6 +647,15 @@ const Scanner = () => {
                 -webkit-print-color-adjust: exact;
                 print-color-adjust: exact;
               }
+              /* Enhanced dithering for thermal printers */
+              img.product-image {
+                image-rendering: -webkit-optimize-contrast !important;
+                image-rendering: crisp-edges !important;
+                image-rendering: pixelated !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+                filter: contrast(1.2) brightness(0.9) !important;
+              }
             }
             * {
               box-sizing: border-box;
@@ -973,7 +667,7 @@ const Scanner = () => {
               max-width: 4in;
               max-height: 6in;
               margin: 0;
-              padding: 0.1in;
+              padding: 0.08in;
               overflow: hidden;
               display: flex;
               flex-direction: column;
@@ -1006,8 +700,8 @@ const Scanner = () => {
             .label-header {
               text-align: center;
               border-bottom: 2px solid #000;
-              padding-bottom: 0.06in;
-              margin-bottom: 0.08in;
+              padding-bottom: 0.05in;
+              margin-bottom: 0.06in;
               padding-right: 0.85in;
               flex-shrink: 0;
               overflow: hidden;
@@ -1029,12 +723,12 @@ const Scanner = () => {
               padding: 0;
             }
             .asin-display {
-              font-size: 10pt;
+              font-size: 9pt;
               font-weight: bold;
               text-align: center;
               background: #f0f0f0;
-              padding: 0.06in;
-              margin: 0.06in 0;
+              padding: 0.04in;
+              margin: 0.04in 0;
               border: 1px solid #000;
               flex-shrink: 0;
             }
@@ -1043,19 +737,35 @@ const Scanner = () => {
               align-items: center;
               justify-content: center;
               margin: 0.08in 0;
-              max-height: 1.8in;
-              min-height: 1.2in;
+              max-height: 2.8in;
+              min-height: 2.2in;
               flex-shrink: 1;
               overflow: hidden;
+              padding: 0.05in;
             }
             .product-image {
               max-width: 100%;
-              max-height: 1.8in;
+              max-height: 2.8in;
               width: auto;
               height: auto;
               object-fit: contain;
-              border: 1px solid #ddd;
+              border: 3px solid #000;
               background: white;
+              box-shadow: 0 0 0 2px #000;
+              padding: 0.02in;
+              /* Dithering mode for thermal printer clarity */
+              image-rendering: -webkit-optimize-contrast;
+              image-rendering: crisp-edges;
+              image-rendering: pixelated;
+              /* Enhanced contrast and dithering effect for thermal printers */
+              filter: contrast(1.2) brightness(0.9) grayscale(0%);
+              /* Force high-quality rendering */
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+              /* Dithering effect via CSS */
+              image-rendering: auto;
+              image-rendering: -moz-crisp-edges;
+              image-rendering: crisp-edges;
             }
             .price-section {
               margin-top: auto;
@@ -1137,7 +847,9 @@ const Scanner = () => {
 
           ${productInfo.image_url ? `
             <div class="product-image-section">
-              <img src="${productInfo.image_url}" alt="Product Image" class="product-image" onerror="this.style.display='none';" />
+              <img src="${productInfo.image_url}" alt="Product Image" class="product-image" 
+                   onerror="this.style.display='none';"
+                   style="image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; image-rendering: pixelated; filter: contrast(1.2) brightness(0.9);" />
             </div>
           ` : ''}
 
@@ -1604,7 +1316,16 @@ const Scanner = () => {
       console.log('🔄 Auto-refresh attempt for code:', code);
       try {
         // Retry the API lookup
-        const result = await getProductLookup(code, userId);
+        // Use backend scan endpoint instead
+        let backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || 'http://localhost:5000';
+        if (backendUrl.endsWith('/api')) {
+          backendUrl = backendUrl.replace('/api', '');
+        }
+        const response = await axios.post(`${backendUrl}/api/scan`, {
+          code: code,
+          user_id: userId
+        }, { timeout: 120000 });
+        const result = response.data;
         
         if (result && result.asin && result.asin.trim() !== '') {
           console.log('✅ Auto-refresh found ASIN!', result.asin);
@@ -1848,7 +1569,6 @@ const Scanner = () => {
 
   return (
     <div className="p-4 md:p-6 lg:p-8">
-      <ToastContainer />
 
       {/* Top Search Bar and Import Button */}
       <div className="mb-6 flex flex-col md:flex-row items-center justify-between gap-4">
