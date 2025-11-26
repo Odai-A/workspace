@@ -46,6 +46,12 @@ const Scanner = () => {
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [exactMatch, setExactMatch] = useState(false);
   const searchDebounceTimer = useRef(null);
+  const searchInputRef = useRef(null);
+
+  // Batch scanning mode - collect multiple scans and print all at once
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchQueue, setBatchQueue] = useState([]);
+  const [isPrintingBatch, setIsPrintingBatch] = useState(false);
 
   // State for manual barcode input (from existing code)
   const [manualBarcode, setManualBarcode] = useState('');
@@ -174,7 +180,11 @@ const Scanner = () => {
     // Clean the code by removing whitespace and tab characters
     const cleanedCode = code.trim().replace(/\s+/g, '');
     console.log("Detected code via Camera:", cleanedCode);
-    setIsCameraActive(false);
+    
+    // Keep camera active for continuous scanning in batch mode
+    if (!batchMode) {
+      setIsCameraActive(false);
+    }
     
     setScannedCodes(prev => {
       const newHistory = [
@@ -187,10 +197,47 @@ const Scanner = () => {
     lookupProductByCode(cleanedCode);
   }
 
+  // Helper function to handle product info - adds to batch queue or sets productInfo based on mode
+  const handleProductFound = (product, code) => {
+    if (batchMode) {
+      // Add to batch queue instead of displaying
+      const queueItem = {
+        id: Date.now() + Math.random(), // Unique ID
+        code: code,
+        product: product,
+        timestamp: new Date().toISOString()
+      };
+      setBatchQueue(prev => {
+        // Check if product already exists in queue (by code)
+        const exists = prev.some(item => item.code === code);
+        if (exists) {
+          toast.info(`Product ${code} already in batch queue`);
+          return prev;
+        }
+        const newQueue = [...prev, queueItem];
+        toast.success(`✅ Added to batch queue (${newQueue.length} items)`, { autoClose: 1500 });
+        return newQueue;
+      });
+      
+      // Clear search bar and refocus for continuous scanning
+      setSearchQuery('');
+      setTimeout(() => {
+        if (searchInputRef.current) {
+          searchInputRef.current.focus();
+        }
+      }, 100);
+    } else {
+      // Normal mode - set product info
+      setProductInfo(product);
+    }
+  };
+
   async function lookupProductByCode(code) {
-    console.log(`🔍 Looking up product by code: ${code}, UserID: ${userId || 'N/A'}`);
+    console.log(`🔍 Looking up product by code: ${code}, UserID: ${userId || 'N/A'}, Batch Mode: ${batchMode}`);
     setLoading(true);
-    setProductInfo(null); // Clear previous product info
+    if (!batchMode) {
+      setProductInfo(null); // Clear previous product info only in normal mode
+    }
     setIsApiProcessing(false); // Reset processing state
     setLastScannedCode(code); // Track the last scanned code
 
@@ -263,7 +310,8 @@ const Scanner = () => {
               
               imageFoundInCache = true;
               toast.success("✅ Using cached image - no API charge!", { autoClose: 2000 });
-              setProductInfo(displayProduct);
+              handleProductFound(displayProduct, code);
+              setLoading(false);
               return; // Exit early - no need to call Rainforest
             } else {
               console.log('❌ [LOCAL DB] No image in cache for key:', cacheKey);
@@ -363,21 +411,21 @@ const Scanner = () => {
                   toast.error("❌ Failed to save to cache. Check console for details.", { autoClose: 5000 });
                 }
                 
-                setProductInfo(enhancedProduct);
+                handleProductFound(enhancedProduct, code);
               } else {
-                setProductInfo(displayProduct);
+                handleProductFound(displayProduct, code);
               }
             } catch (error) {
               console.error("Error fetching Rainforest API data:", error);
-              setProductInfo(displayProduct);
+              handleProductFound(displayProduct, code);
             }
           } else {
             // Already has complete data, no need for Rainforest
-            setProductInfo(displayProduct);
+            handleProductFound(displayProduct, code);
           }
         } else {
           // No ASIN, can't enhance
-          setProductInfo(displayProduct);
+          handleProductFound(displayProduct, code);
         }
         
         // Removed scan history logging to avoid database issues  
@@ -440,7 +488,7 @@ const Scanner = () => {
             }
             
             // Set product info - backend already handled everything!
-            setProductInfo(displayableProduct);
+            handleProductFound(displayableProduct, code);
           } else {
             // Handle error response
             const errorMsg = apiResult?.message || apiResult?.error || "Failed to scan product";
@@ -482,6 +530,12 @@ const Scanner = () => {
       }
     } finally {
       setLoading(false);
+      // In batch mode, refocus search bar after scan completes for continuous scanning
+      if (batchMode && searchInputRef.current) {
+        setTimeout(() => {
+          searchInputRef.current?.focus();
+        }, 200);
+      }
     }
   }
 
@@ -921,6 +975,22 @@ const Scanner = () => {
     setShowShopifyListing(false);
   };
 
+  // Handle Enter key in search bar for continuous scanning
+  const handleSearchKeyDown = (e) => {
+    if (e.key === 'Enter' && searchQuery.trim()) {
+      e.preventDefault();
+      const code = searchQuery.trim();
+      setSearchQuery(''); // Clear immediately for next scan
+      lookupProductByCode(code);
+      // Refocus after a brief delay to ensure smooth scanning
+      setTimeout(() => {
+        if (searchInputRef.current) {
+          searchInputRef.current.focus();
+        }
+      }, 100);
+    }
+  };
+
   // Handle search input change with debounce
   const handleSearchChange = (e) => {
     const query = e.target.value;
@@ -963,12 +1033,27 @@ const Scanner = () => {
   
   // Select product from search results
   const selectProduct = (product) => {
-    setProductInfo(product);
-    setLastScannedCode(product.sku || product.asin || product.fnsku);
+    const code = product.sku || product.asin || product.fnsku;
+    
+    // In batch mode, add to queue; otherwise set product info
+    if (batchMode) {
+      handleProductFound(product, code);
+    } else {
+      setProductInfo(product);
+    }
+    
+    setLastScannedCode(code);
     setShowSearchResults(false);
     setSearchQuery('');
+    
+    // Refocus search bar for continuous scanning in batch mode
+    if (batchMode && searchInputRef.current) {
+      setTimeout(() => {
+        searchInputRef.current?.focus();
+      }, 100);
+    }
+    
     // Add to scanned codes history with product info
-    const code = product.sku || product.asin || product.fnsku;
     setScannedCodes(prev => {
       const newHistory = [
         { 
@@ -1432,6 +1517,76 @@ const Scanner = () => {
     }
   };
 
+  // Handle printing all labels in batch queue
+  const handlePrintAllBatch = async () => {
+    if (batchQueue.length === 0) {
+      toast.error("Batch queue is empty");
+      return;
+    }
+
+    setIsPrintingBatch(true);
+    toast.info(`🖨️ Printing ${batchQueue.length} labels...`, { autoClose: 2000 });
+
+    try {
+      // Print each label one by one with a small delay
+      for (let i = 0; i < batchQueue.length; i++) {
+        const item = batchQueue[i];
+        if (!item.product || !item.product.asin) {
+          console.warn(`Skipping item ${item.code} - no ASIN available`);
+          continue;
+        }
+
+        const amazonUrl = `https://www.amazon.com/dp/${item.product.asin}`;
+        const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(amazonUrl)}`;
+        
+        const labelContent = createLabelHTML(item.product, amazonUrl, qrApiUrl);
+        const printWindow = window.open('', '_blank');
+        
+        if (printWindow) {
+          printWindow.document.write(labelContent);
+          printWindow.document.close();
+          
+          // Wait for content to load, then trigger print
+          await new Promise(resolve => setTimeout(resolve, 800));
+          printWindow.focus();
+          printWindow.print();
+          
+          // Close window after a delay
+          setTimeout(() => {
+            printWindow.close();
+          }, 1000);
+        }
+
+        // Small delay between prints to avoid overwhelming the print dialog
+        if (i < batchQueue.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
+
+      toast.success(`✅ Successfully printed ${batchQueue.length} labels!`, { autoClose: 3000 });
+      
+      // Optionally clear the queue after printing
+      // setBatchQueue([]);
+    } catch (error) {
+      console.error("Error printing batch:", error);
+      toast.error("❌ Error printing batch labels", { autoClose: 3000 });
+    } finally {
+      setIsPrintingBatch(false);
+    }
+  };
+
+  // Remove item from batch queue
+  const handleRemoveFromBatch = (itemId) => {
+    setBatchQueue(prev => prev.filter(item => item.id !== itemId));
+    toast.success("Removed from batch queue", { autoClose: 1500 });
+  };
+
+  // Clear entire batch queue
+  const handleClearBatchQueue = () => {
+    setBatchQueue([]);
+    toast.success("Batch queue cleared", { autoClose: 1500 });
+  };
+
   // Handle printing label from recent scan
   const handlePrintLabelFromScan = async (scanItem) => {
     if (!scanItem.productInfo || !scanItem.productInfo.asin) {
@@ -1570,18 +1725,122 @@ const Scanner = () => {
   return (
     <div className="p-4 md:p-6 lg:p-8">
 
+      {/* Batch Mode Toggle */}
+      <div className="mb-4 flex items-center justify-between bg-blue-50 border border-blue-200 rounded-lg p-4">
+        <div className="flex items-center space-x-3">
+          <input
+            type="checkbox"
+            id="batchMode"
+            checked={batchMode}
+            onChange={(e) => {
+              setBatchMode(e.target.checked);
+              if (!e.target.checked) {
+                // When turning off batch mode, clear the queue or show a message
+                if (batchQueue.length > 0) {
+                  toast.info(`Batch mode disabled. ${batchQueue.length} items in queue.`, { autoClose: 3000 });
+                }
+              } else {
+                toast.success("Batch mode enabled - scans will be added to queue", { autoClose: 2000 });
+                // Auto-focus search bar when batch mode is enabled for continuous scanning
+                setTimeout(() => {
+                  if (searchInputRef.current) {
+                    searchInputRef.current.focus();
+                  }
+                }, 200);
+              }
+            }}
+            className="h-5 w-5 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+          />
+          <label htmlFor="batchMode" className="text-lg font-semibold text-gray-800 cursor-pointer">
+            Batch Scan Mode
+          </label>
+          {batchMode && (
+            <span className="px-3 py-1 bg-blue-600 text-white text-sm font-medium rounded-full">
+              {batchQueue.length} items in queue
+            </span>
+          )}
+        </div>
+        {batchMode && batchQueue.length > 0 && (
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={handlePrintAllBatch}
+              disabled={isPrintingBatch}
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-50"
+            >
+              <PrinterIcon className="-ml-1 mr-2 h-5 w-5" />
+              {isPrintingBatch ? `Printing...` : `Print All (${batchQueue.length})`}
+            </button>
+            <button
+              type="button"
+              onClick={handleClearBatchQueue}
+              className="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md shadow-sm text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+            >
+              Clear Queue
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Batch Queue Display */}
+      {batchMode && batchQueue.length > 0 && (
+        <div className="mb-6 bg-white border border-gray-200 rounded-lg shadow-md p-4">
+          <h3 className="text-lg font-semibold text-gray-800 mb-3">Batch Queue ({batchQueue.length} items)</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-64 overflow-y-auto">
+            {batchQueue.map((item) => (
+              <div key={item.id} className="border border-gray-200 rounded-lg p-3 bg-gray-50 hover:bg-gray-100">
+                <div className="flex justify-between items-start mb-2">
+                  <div className="flex-1">
+                    <p className="font-mono text-xs text-gray-600 mb-1">{item.code}</p>
+                    <p className="text-sm font-medium text-gray-900 line-clamp-2">
+                      {item.product?.name || 'Loading...'}
+                    </p>
+                    {item.product?.asin && (
+                      <p className="text-xs text-gray-500 mt-1">ASIN: {item.product.asin}</p>
+                    )}
+                    {item.product?.price && (
+                      <p className="text-xs text-green-600 font-semibold mt-1">
+                        ${parseFloat(item.product.price).toFixed(2)}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => handleRemoveFromBatch(item.id)}
+                    className="ml-2 text-red-600 hover:text-red-800 hover:bg-red-50 p-1 rounded flex-shrink-0"
+                    title="Remove from queue"
+                  >
+                    <XMarkIcon className="h-4 w-4" />
+                  </button>
+                </div>
+                {item.product?.image_url && (
+                  <img
+                    src={item.product.image_url}
+                    alt={item.product.name || 'Product'}
+                    className="mt-2 h-16 w-16 object-contain border border-gray-200 rounded mx-auto"
+                    onError={(e) => { e.target.style.display = 'none'; }}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Top Search Bar and Import Button */}
       <div className="mb-6 flex flex-col md:flex-row items-center justify-between gap-4">
         <div className="flex-grow w-full md:w-auto">
           <label htmlFor="productSearchTop" className="sr-only">Search by LPN, FNSKU, or ASIN</label>
           <input
+            ref={searchInputRef}
             type="text"
             name="productSearchTop"
             id="productSearchTop"
             className="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md p-3"
-            placeholder="Search by LPN, FNSKU, or ASIN"
+            placeholder={batchMode ? "Scan FNSKU (Enter to scan, keeps scanning)" : "Search by LPN, FNSKU, or ASIN"}
             value={searchQuery}
-            onChange={handleSearchChange} // Make sure handleSearchChange updates searchQuery state
+            onChange={handleSearchChange}
+            onKeyDown={handleSearchKeyDown}
+            autoFocus={batchMode}
           />
         </div>
         <div className="flex items-center space-x-2 flex-shrink-0">
