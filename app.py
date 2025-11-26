@@ -1242,13 +1242,18 @@ def scan_product():
                 asin = str(potential_asin).strip()
         
         task_id = scan_data.get('id') if scan_data else None
-        max_polls = 15  # Reduced to 15 polls = 30 seconds max to avoid timeout
-        poll_interval = 2000  # 2 seconds
+        max_polls = 20  # Increased to 20 polls but with faster intervals
+        # Adaptive polling: start fast (500ms), then slow down if needed (up to 1.5s)
+        # This reduces average wait time from ~15-30s to ~5-10s
         retry_add_or_get_after = 2
+        
+        # Initialize polling state variables BEFORE the loop to prevent crashes
+        task_state = -1  # -1 = unknown, 0 = pending, 1 = processing, 2 = completed, 3 = failed
+        task_result = None
         
         # If ASIN not available, poll for it
         if not asin or len(asin) < 10:
-            logger.info(f"⏳ ASIN not immediately available. Polling for task {task_id} (max {max_polls} attempts, ~{max_polls * 2}s)...")
+            logger.info(f"⏳ ASIN not immediately available. Polling for task {task_id} (max {max_polls} attempts, adaptive intervals ~5-15s total)...")
             import time
             
             for attempt in range(1, max_polls + 1):
@@ -1258,37 +1263,59 @@ def scan_product():
                     try:
                         retry_response = requests.post(add_scan_url, headers=headers, json=payload, timeout=30)
                         if retry_response.status_code == 200:
-                            retry_result = retry_response.json()
-                            if retry_result.get('succeeded') and retry_result.get('data'):
-                                scan_data = retry_result['data']
-                                # Get ASIN properly
-                                potential_asin = scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or ''
-                                if potential_asin:
-                                    asin = str(potential_asin).strip()
-                                else:
-                                    asin = ''
-                                # Check if ASIN is valid (at least 10 characters, usually starts with B)
-                                if asin and len(asin) >= 10:
-                                    logger.info(f"🎉 ASIN found after retry: {asin}")
-                                    break
+                            try:
+                                retry_result = retry_response.json()
+                                if retry_result.get('succeeded') and retry_result.get('data'):
+                                    scan_data = retry_result['data']
+                                    # Get ASIN properly
+                                    potential_asin = scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or ''
+                                    if potential_asin:
+                                        asin = str(potential_asin).strip()
+                                    else:
+                                        asin = ''
+                                    # Check if ASIN is valid (at least 10 characters, usually starts with B)
+                                    if asin and len(asin) >= 10:
+                                        logger.info(f"🎉 ASIN found after retry: {asin}")
+                                        task_state = scan_data.get('taskState') or scan_data.get('task_state', 2)  # Assume completed if ASIN found
+                                        task_result = scan_data
+                                        break
+                            except (ValueError, KeyError, TypeError) as json_error:
+                                logger.warning(f"Retry AddOrGet JSON parse failed: {json_error} - continuing polling")
+                                # Continue polling - don't exit early
                     except Exception as e:
-                        logger.warning(f"Retry AddOrGet failed: {e}")
+                        logger.warning(f"Retry AddOrGet request failed: {e} - continuing polling")
+                        # Continue polling - don't exit early
                 
-                # Poll for ASIN - check immediately on first attempt, then wait between polls
-                # Only wait if this isn't the first attempt and we haven't just done a retry
+                # Adaptive polling: start fast, gradually slow down if task is still processing
+                # This reduces average wait time significantly
                 if attempt > 1 and attempt != retry_add_or_get_after + 1:
-                    # Wait before polling (except first attempt and right after retry)
-                    if attempt == 2:
-                        time.sleep(1)  # Short initial wait
+                    # Exponential backoff: 0.5s → 0.75s → 1s → 1.25s → 1.5s (max)
+                    if attempt <= 3:
+                        time.sleep(0.5)  # Fast initial polls (500ms)
+                    elif attempt <= 6:
+                        time.sleep(0.75)  # Medium speed (750ms)
+                    elif attempt <= 10:
+                        time.sleep(1.0)  # Normal speed (1 second)
                     else:
-                        time.sleep(poll_interval / 1000)  # 2 seconds between polls
+                        time.sleep(1.5)  # Slower if still processing (1.5 seconds max)
                 
+                # Poll for task status - fully tolerant to bad/empty JSON
+                # Reduced timeout to 3s for faster failure recovery
                 try:
-                    poll_response = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=5)  # Reduced timeout
+                    poll_response = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=3)
                     if poll_response.status_code == 200:
-                        poll_result = poll_response.json()
+                        # Wrap JSON parsing in try/except to handle bad/empty JSON
+                        try:
+                            poll_result = poll_response.json()
+                        except (ValueError, KeyError, TypeError) as json_error:
+                            logger.warning(f"Poll {attempt}/{max_polls}: Invalid JSON response - {json_error}. Continuing polling...")
+                            # Continue the loop normally - don't exit early
+                            continue
+                        
                         if poll_result.get('succeeded') and poll_result.get('data'):
                             scan_data = poll_result['data']
+                            task_result = scan_data  # Store latest result
+                            
                             # Get ASIN - check multiple possible fields and handle None/empty
                             potential_asin = scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or ''
                             if potential_asin:
@@ -1296,6 +1323,7 @@ def scan_product():
                             else:
                                 asin = ''
                             
+                            # Safely get task_state with fallback
                             task_state = scan_data.get('taskState') or scan_data.get('task_state', 0)
                             
                             # Log what we found (every attempt for debugging)
@@ -1306,63 +1334,97 @@ def scan_product():
                                 logger.info(f"🎉🎉🎉 ASIN FOUND after {attempt} polls: '{asin}' - BREAKING POLLING LOOP NOW!")
                                 break  # Exit polling loop immediately - this should work!
                             
-                            # If task completed/failed but no ASIN, stop
+                            # If task completed/failed but no ASIN, continue polling (don't stop)
                             if task_state in [2, 3] or scan_data.get('finishedOn'):
                                 if not asin or len(asin) < 10:
-                                    logger.warning(f"⚠️ Task {task_state} completed but no ASIN found. Stopping.")
-                                    break
+                                    logger.warning(f"⚠️ Task {task_state} completed but no ASIN found. Continuing to poll...")
+                                    # Continue polling - don't break
                             
                             if attempt % 3 == 0:  # Log every 3 attempts
                                 logger.info(f"📊 Polling progress: Attempt {attempt}/{max_polls}, State: {task_state}, ASIN: '{asin or 'not found'}'")
+                        else:
+                            logger.warning(f"Poll {attempt}/{max_polls}: Response not succeeded or missing data. Continuing...")
+                    else:
+                        logger.warning(f"Poll {attempt}/{max_polls}: HTTP {poll_response.status_code}. Continuing...")
+                except requests.exceptions.RequestException as poll_error:
+                    logger.warning(f"Poll attempt {attempt} request failed: {poll_error} - continuing polling")
+                    # Continue the loop normally - don't exit early
                 except Exception as poll_error:
-                    logger.warning(f"Poll attempt {attempt} failed: {poll_error}")
-                    # Don't slow down - keep trying fast
+                    logger.warning(f"Poll attempt {attempt} unexpected error: {poll_error} - continuing polling")
+                    # Continue the loop normally - don't exit early
                 
                 # Double-check ASIN after each iteration (in case it was set in retry)
                 if asin and isinstance(asin, str) and len(asin.strip()) >= 10:
                     logger.info(f"✅ ASIN confirmed available: {asin} - exiting polling immediately")
                     break
                 
-                # Early exit if we've been polling for a while and task seems stuck
+                # Early warning if we've been polling for a while and task seems stuck
                 if attempt >= 10 and task_state == 0:  # Still pending after 10 attempts
-                    logger.warning(f"⚠️ Task still pending after {attempt} attempts. May need more time.")
+                    logger.warning(f"⚠️ Task still pending after {attempt} attempts. May need more time. Continuing...")
                     # Continue polling but log warning
             
-            # After polling loop, verify we have ASIN
-            if not asin or not isinstance(asin, str) or len(asin.strip()) < 10:
-                logger.warning(f"⚠️ Polling completed but no valid ASIN found. ASIN value: '{asin}'")
-                # Try one final lookup to see if ASIN is now available
+            # After polling loop, if task_state is still pending or unknown, perform ONE FINAL forced fetch
+            if (not asin or len(asin) < 10) and (task_state == -1 or task_state == 0):
+                logger.info(f"🔄 Polling completed but ASIN not found (state={task_state}). Performing final forced fetch...")
                 try:
                     final_response = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=10)
                     if final_response.status_code == 200:
-                        final_result = final_response.json()
-                        if final_result.get('succeeded') and final_result.get('data'):
-                            final_scan_data = final_result['data']
-                            potential_asin = final_scan_data.get('asin') or final_scan_data.get('ASIN') or final_scan_data.get('Asin') or ''
-                            if potential_asin:
-                                final_asin = str(potential_asin).strip()
-                                if final_asin and len(final_asin) >= 10:
-                                    asin = final_asin
-                                    logger.info(f"🎉 ASIN found in final check: {asin}")
+                        try:
+                            final_result = final_response.json()
+                            if final_result.get('succeeded') and final_result.get('data'):
+                                final_scan_data = final_result['data']
+                                task_result = final_scan_data  # Update with final result
+                                
+                                potential_asin = final_scan_data.get('asin') or final_scan_data.get('ASIN') or final_scan_data.get('Asin') or ''
+                                if potential_asin:
+                                    final_asin = str(potential_asin).strip()
+                                    if final_asin and len(final_asin) >= 10:
+                                        asin = final_asin
+                                        task_state = final_scan_data.get('taskState') or final_scan_data.get('task_state', 2)
+                                        scan_data = final_scan_data  # Update scan_data with final result
+                                        logger.info(f"🎉 ASIN found in final forced fetch: {asin}")
+                                    else:
+                                        logger.warning(f"Final fetch returned invalid ASIN: '{final_asin}' (len={len(final_asin) if final_asin else 0})")
+                                else:
+                                    logger.warning(f"Final fetch returned no ASIN field")
+                        except (ValueError, KeyError, TypeError) as json_error:
+                            logger.warning(f"Final fetch JSON parse failed: {json_error}")
                 except Exception as e:
-                    logger.warning(f"Final ASIN check failed: {e}")
+                    logger.warning(f"Final forced fetch failed: {e}")
+            
+            # Update scan_data with latest task_result if we have it
+            if task_result and not scan_data:
+                scan_data = task_result
+            elif task_result:
+                # Merge task_result into scan_data to ensure we have latest data
+                scan_data.update(task_result)
         
-        # Final ASIN validation
+        # Final ASIN validation - only return error if even the final forced fetch failed
         if not asin or not isinstance(asin, str) or len(asin.strip()) < 10:
-            logger.warning(f"⚠️ No valid ASIN found after polling. Returning partial data - user can retry.")
-            # Return partial response so user can see progress and retry
-            return jsonify({
-                "success": True,  # Still success so frontend can show partial data
-                "fnsku": code,
-                "asin": "",
-                "title": scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}",
-                "price": "",
-                "image": scan_data.get('imageUrl') or scan_data.get('image') or '',
-                "brand": "",
-                "category": "External API",
-                "message": "ASIN is still being processed. Please scan again in a few moments.",
-                "processing": True
-            }), 200
+            logger.error(f"❌ No valid ASIN found after all polling attempts and final fetch. Task state: {task_state}")
+            # Only return 500 if we truly failed - otherwise return partial data
+            if task_state == -1 and not task_result:
+                # Complete failure - no data retrieved at all
+                return jsonify({
+                    "success": False,
+                    "error": "Task retrieval failed",
+                    "message": "Unable to retrieve scan task data. Please try again."
+                }), 500
+            else:
+                # We have some data but no ASIN - return partial response
+                logger.warning(f"⚠️ Returning partial data - ASIN still processing (state={task_state})")
+                return jsonify({
+                    "success": True,  # Still success so frontend can show partial data
+                    "fnsku": code,
+                    "asin": "",
+                    "title": scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}" if scan_data else f"FNSKU: {code}",
+                    "price": "",
+                    "image": scan_data.get('imageUrl') or scan_data.get('image') or '' if scan_data else '',
+                    "brand": "",
+                    "category": "External API",
+                    "message": "ASIN is still being processed. Please scan again in a few moments.",
+                    "processing": True
+                }), 200
         
         # STEP 4: If we have ASIN, fetch from Rainforest API
         rainforest_data = None
