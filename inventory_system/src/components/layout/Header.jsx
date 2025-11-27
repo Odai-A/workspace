@@ -42,19 +42,25 @@ const Header = () => {
 
   return (
     <header 
-      className={`fixed top-0 right-0 h-16 bg-white border-b border-gray-200 z-20 transition-all duration-300 ${
+      className={`fixed top-0 right-0 h-16 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 z-20 transition-all duration-300 ${
         sidebarCollapsed ? 'left-16' : 'left-64'
       } md:left-auto md:w-auto w-full`}
     >
       <div className="flex items-center justify-between h-full px-4">
-        <h1 className="md:hidden text-lg font-bold text-blue-600">Inventory MS</h1>
+        <Link to="/dashboard" className="flex items-center space-x-2">
+          <img 
+            src="/assets/images/logo.png" 
+            alt="Logo" 
+            className="h-8 w-8 object-contain"
+          />
+        </Link>
         
         <div className="flex items-center space-x-4">
           {/* Notifications */}
           <div className="relative">
             <button 
               onClick={toggleNotifications}
-              className="relative p-2 rounded-full text-gray-500 hover:bg-gray-100"
+              className="relative p-2 rounded-full text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700"
             >
               <BellIcon className="h-5 w-5" />
               {notifications.some(n => !n.read) && (
@@ -63,29 +69,29 @@ const Header = () => {
             </button>
             
             {notificationsOpen && (
-              <div className="absolute right-0 mt-2 w-80 bg-white rounded-lg shadow-xl py-2 border border-gray-200 z-50">
-                <div className="px-4 py-2 border-b border-gray-200">
-                  <h3 className="text-sm font-medium">Notifications</h3>
+              <div className="absolute right-0 mt-2 w-80 bg-white dark:bg-gray-800 rounded-lg shadow-xl py-2 border border-gray-200 dark:border-gray-700 z-50">
+                <div className="px-4 py-2 border-b border-gray-200 dark:border-gray-700">
+                  <h3 className="text-sm font-medium text-gray-900 dark:text-gray-200">Notifications</h3>
                 </div>
                 {notifications.length > 0 ? (
                   <div className="max-h-60 overflow-y-auto">
                     {notifications.map(notification => (
                       <div 
                         key={notification.id}
-                        className={`px-4 py-3 hover:bg-gray-50 cursor-pointer ${
-                          !notification.read ? 'bg-blue-50' : ''
+                        className={`px-4 py-3 hover:bg-gray-50 dark:hover:bg-gray-700 cursor-pointer ${
+                          !notification.read ? 'bg-blue-50 dark:bg-blue-900' : ''
                         }`}
                       >
-                        <p className="text-sm text-gray-800">{notification.message}</p>
-                        <p className="text-xs text-gray-500 mt-1">{notification.time}</p>
+                        <p className="text-sm text-gray-800 dark:text-gray-200">{notification.message}</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{notification.time}</p>
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <div className="px-4 py-3 text-sm text-gray-500">No notifications</div>
+                  <div className="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">No notifications</div>
                 )}
-                <div className="px-4 py-2 border-t border-gray-200">
-                  <button className="text-xs text-blue-600 hover:text-blue-800">
+                <div className="px-4 py-2 border-t border-gray-200 dark:border-gray-700">
+                  <button className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300">
                     Mark all as read
                   </button>
                 </div>
@@ -99,23 +105,23 @@ const Header = () => {
               onClick={toggleDropdown}
               className="flex items-center space-x-2 rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
-              <UserCircleIcon className="h-8 w-8 text-gray-500" />
+              <UserCircleIcon className="h-8 w-8 text-gray-500 dark:text-gray-400" />
               <div className="hidden md:block text-left">
-                <p className="text-sm font-medium text-gray-700">
+                <p className="text-sm font-medium text-gray-700 dark:text-gray-300">
                   {currentUser?.username || 'User'}
                 </p>
-                <p className="text-xs text-gray-500">
+                <p className="text-xs text-gray-500 dark:text-gray-400">
                   {currentUser?.role || 'User'}
                 </p>
               </div>
-              <ChevronDownIcon className="hidden md:block h-4 w-4 text-gray-500" />
+              <ChevronDownIcon className="hidden md:block h-4 w-4 text-gray-500 dark:text-gray-400" />
             </button>
             
             {dropdownOpen && (
-              <div className="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-xl py-2 border border-gray-200 z-50">
+              <div className="absolute right-0 mt-2 w-48 bg-white dark:bg-gray-800 rounded-lg shadow-xl py-2 border border-gray-200 dark:border-gray-700 z-50">
                 <Link 
                   to="/profile" 
-                  className="flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                  className="flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
                   onClick={() => setDropdownOpen(false)}
                 >
                   <UserIcon className="h-4 w-4 mr-2" />
@@ -123,16 +129,16 @@ const Header = () => {
                 </Link>
                 <Link 
                   to="/settings" 
-                  className="flex items-center px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                  className="flex items-center px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
                   onClick={() => setDropdownOpen(false)}
                 >
                   <Cog6ToothIcon className="h-4 w-4 mr-2" />
                   Settings
                 </Link>
-                <hr className="my-1 border-gray-200" />
+                <hr className="my-1 border-gray-200 dark:border-gray-700" />
                 <button 
                   onClick={handleLogout} 
-                  className="flex w-full items-center px-4 py-2 text-sm text-red-600 hover:bg-gray-100"
+                  className="flex w-full items-center px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-700"
                 >
                   <ArrowRightOnRectangleIcon className="h-4 w-4 mr-2" />
                   Logout

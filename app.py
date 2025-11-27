@@ -141,8 +141,15 @@ STRIPE_ENTREPRENEUR_USAGE_PRICE_ID = os.environ.get('STRIPE_ENTREPRENEUR_USAGE_P
 
 if not STRIPE_API_KEY or not STRIPE_WEBHOOK_SECRET:
     logger.error("Stripe API Key or Webhook Secret not found in .env. Stripe integration will fail.")
+    logger.error(f"STRIPE_API_KEY: {'SET' if STRIPE_API_KEY else 'MISSING'} (length: {len(STRIPE_API_KEY) if STRIPE_API_KEY else 0})")
+    logger.error(f"STRIPE_WEBHOOK_SECRET: {'SET' if STRIPE_WEBHOOK_SECRET else 'MISSING'} (length: {len(STRIPE_WEBHOOK_SECRET) if STRIPE_WEBHOOK_SECRET else 0})")
+else:
+    logger.info("✅ Stripe API Key and Webhook Secret found in .env")
 if STRIPE_API_KEY:
     stripe.api_key = STRIPE_API_KEY
+    logger.info(f"✅ Stripe API key configured (starts with: {STRIPE_API_KEY[:10]}...)")
+else:
+    logger.error("❌ STRIPE_API_KEY is empty or None - Stripe will not work!")
 
 # --- Supabase Configuration ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -614,6 +621,55 @@ def stripe_webhook():
 
     return jsonify({'status': 'received'}), 200
 
+
+@app.route('/api/subscription-status', methods=['GET', 'OPTIONS'])
+def get_subscription_status():
+    """Get the current user's subscription status"""
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        user_id, tenant_id = get_ids_from_request()
+        
+        if not tenant_id:
+            return jsonify({
+                'subscription_status': 'incomplete',
+                'has_active_subscription': False
+            }), 200
+        
+        # Get tenant subscription status
+        if not supabase_admin:
+            return jsonify({'error': 'Server configuration error.'}), 500
+        
+        tenant_res = supabase_admin.table('tenants').select(
+            'subscription_status, stripe_subscription_id, stripe_customer_id'
+        ).eq('id', tenant_id).single().execute()
+        
+        if hasattr(tenant_res, 'error') and tenant_res.error:
+            logger.error(f"Error fetching tenant {tenant_id} status: {tenant_res.error.message}")
+            return jsonify({
+                'subscription_status': 'incomplete',
+                'has_active_subscription': False
+            }), 200
+        
+        subscription_status = tenant_res.data.get('subscription_status', 'incomplete') if tenant_res.data else 'incomplete'
+        has_active_subscription = subscription_status in ['active', 'trialing']
+        
+        return jsonify({
+            'subscription_status': subscription_status,
+            'has_active_subscription': has_active_subscription,
+            'stripe_subscription_id': tenant_res.data.get('stripe_subscription_id') if tenant_res.data else None,
+            'stripe_customer_id': tenant_res.data.get('stripe_customer_id') if tenant_res.data else None
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting subscription status: {str(e)}")
+        return jsonify({
+            'subscription_status': 'incomplete',
+            'has_active_subscription': False,
+            'error': str(e)
+        }), 200
 
 @app.route('/api/create-customer-portal-session/', methods=['POST'])
 def customer_portal():

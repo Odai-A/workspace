@@ -254,7 +254,7 @@ const PricingPage = () => {
       
       {/* Show simplified error to all users */}
       {configError && !isAdmin && (
-        <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 px-4 py-3 rounded mb-6" role="alert">
+        <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 text-yellow-800 dark:text-yellow-300 px-4 py-3 rounded mb-6" role="alert">
           <p className="font-bold">⚠️ Plans Coming Soon</p>
           <p>Subscription plans are being set up. Please check back soon or contact support for early access.</p>
         </div>
@@ -262,13 +262,13 @@ const PricingPage = () => {
       
       {/* Show admin configuration message */}
       {configError && isAdmin && (
-        <div className="bg-blue-50 border border-blue-200 text-blue-800 px-4 py-3 rounded mb-6" role="alert">
+        <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-800 dark:text-blue-300 px-4 py-3 rounded mb-6" role="alert">
           <p className="font-bold">🔧 Admin: Stripe Configuration Required</p>
           <p className="text-sm mt-1">
-            To enable subscriptions, add Stripe Price IDs to <code className="bg-blue-100 px-1 rounded">inventory_system/.env</code>
+            To enable subscriptions, add Stripe Price IDs to <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">inventory_system/.env</code>
           </p>
           <p className="text-sm mt-2">
-            See <code className="bg-blue-100 px-1 rounded">STRIPE_PRICING_SETUP.md</code> for instructions.
+            See <code className="bg-blue-100 dark:bg-blue-900 px-1 rounded">STRIPE_PRICING_SETUP.md</code> for instructions.
           </p>
         </div>
       )}
@@ -277,24 +277,24 @@ const PricingPage = () => {
         {plans.map((plan) => (
           <div
             key={plan.id}
-            className={`border rounded-lg p-6 shadow-lg flex flex-col ${
-              plan.popular ? 'border-blue-500 ring-2 ring-blue-500' : 'border-gray-300'
+            className={`border rounded-lg p-6 shadow-lg flex flex-col bg-white dark:bg-gray-800 ${
+              plan.popular ? 'border-blue-500 dark:border-blue-400 ring-2 ring-blue-500 dark:ring-blue-400' : 'border-gray-300 dark:border-gray-600'
             }`}
           >
             {plan.popular && (
-              <div className="text-xs text-blue-600 bg-blue-100 px-2 py-1 rounded-full self-start mb-3 font-semibold">
+              <div className="text-xs text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-900 px-2 py-1 rounded-full self-start mb-3 font-semibold">
                 POPULAR
               </div>
             )}
-            <h2 className="text-2xl font-semibold mb-2">{plan.name}</h2>
-            <p className="text-4xl font-bold mb-1">{plan.price}<span className="text-lg font-normal">/mo</span></p>
-            <p className="text-sm text-gray-500 mb-2">Billed monthly.</p>
+            <h2 className="text-2xl font-semibold mb-2 text-gray-900 dark:text-white">{plan.name}</h2>
+            <p className="text-4xl font-bold mb-1 text-gray-900 dark:text-white">{plan.price}<span className="text-lg font-normal">/mo</span></p>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">Billed monthly.</p>
             {plan.monthlyScans && (
-              <div className="mb-4 p-3 bg-blue-50 rounded-lg">
-                <p className="text-sm font-semibold text-blue-900">
+              <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+                <p className="text-sm font-semibold text-blue-900 dark:text-blue-300">
                   {plan.monthlyScans.toLocaleString()} scans/month included
                 </p>
-                <p className="text-xs text-blue-700 mt-1">
+                <p className="text-xs text-blue-700 dark:text-blue-400 mt-1">
                   ${plan.overageRate} per additional scan
                 </p>
               </div>
@@ -302,10 +302,10 @@ const PricingPage = () => {
             <ul className="space-y-2 mb-8 flex-grow">
               {plan.features.map((feature, index) => (
                 <li key={index} className="flex items-start">
-                  <svg className="w-5 h-5 text-green-500 mr-2 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                  <svg className="w-5 h-5 text-green-500 dark:text-green-400 mr-2 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                   </svg>
-                  <span className="text-sm">{feature}</span>
+                  <span className="text-sm text-gray-700 dark:text-gray-300">{feature}</span>
                 </li>
               ))}
             </ul>
@@ -323,7 +323,7 @@ const PricingPage = () => {
               {isLoading ? 'Processing...' : plan.cta}
             </button>
             {!plan.price_id && (
-              <p className="text-xs text-red-500 mt-2 text-center">
+              <p className="text-xs text-red-500 dark:text-red-400 mt-2 text-center">
                 Price ID not configured. Please contact the administrator.
               </p>
             )}

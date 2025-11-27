@@ -77,8 +77,8 @@ const Sidebar = () => {
           to={item.path}
           className={`flex items-center py-3 px-3 rounded-lg transition-colors ${
             isActive 
-              ? 'bg-blue-600 text-white' 
-              : 'text-gray-600 hover:bg-gray-100'
+              ? 'bg-blue-600 dark:bg-blue-700 text-white' 
+              : 'text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700'
           } ${sidebarCollapsed ? 'justify-center' : 'justify-start'}`}
           onClick={() => setCurrentRoute(item.path)}
         >
@@ -99,17 +99,22 @@ const Sidebar = () => {
     <>
       {/* Desktop Sidebar */}
       <aside
-        className={`hidden md:flex flex-col h-screen bg-white border-r border-gray-200 transition-all duration-300 ${
+        className={`hidden md:flex flex-col h-screen bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 transition-all duration-300 ${
           sidebarCollapsed ? 'w-16' : 'w-64'
         } fixed top-0 left-0 z-10`}
       >
-        <div className="flex items-center justify-between h-16 px-4 border-b border-gray-200">
-          <div className={`overflow-hidden ${sidebarCollapsed ? 'w-0' : 'w-full'}`}>
-            <h1 className="text-lg font-bold text-blue-600">Inventory MS</h1>
-          </div>
+        <div className="flex items-center justify-between h-16 px-4 border-b border-gray-200 dark:border-gray-700">
+          <Link to="/dashboard" className={`flex items-center ${sidebarCollapsed ? 'justify-center w-full' : 'space-x-3'}`}>
+            {/* Logo Image - will show text fallback if image not found */}
+            <img 
+              src="/assets/images/logo.png" 
+              alt="Logo" 
+              className={`${sidebarCollapsed ? 'h-8 w-8' : 'h-10 w-10'} object-contain`}
+            />
+          </Link>
           <button
             onClick={toggleSidebar}
-            className="p-1 rounded-md text-gray-500 hover:bg-gray-100"
+            className="p-1 rounded-md text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700"
           >
             {sidebarCollapsed ? (
               <Bars3Icon className="h-5 w-5" />
@@ -121,9 +126,9 @@ const Sidebar = () => {
         <nav className="flex-1 p-3 space-y-2 overflow-y-auto">
           {renderNavItems()}
         </nav>
-        <div className="p-3 border-t border-gray-200">
+        <div className="p-3 border-t border-gray-200 dark:border-gray-700">
           {!sidebarCollapsed && user && (
-            <div className="text-xs text-gray-500">
+            <div className="text-xs text-gray-500 dark:text-gray-400">
               <div className="font-medium">Logged in as:</div>
               <div>{user.email || 'User'}</div>
             </div>
@@ -136,7 +141,7 @@ const Sidebar = () => {
         {/* Mobile menu button */}
         <button
           onClick={toggleMobileNav}
-          className="fixed top-4 left-4 z-50 p-2 rounded-md text-gray-500 bg-white shadow-md"
+          className="fixed top-4 left-4 z-50 p-2 rounded-md text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 shadow-md"
         >
           <Bars3Icon className="h-6 w-6" />
         </button>
@@ -151,15 +156,22 @@ const Sidebar = () => {
 
         {/* Mobile sidebar */}
         <aside
-          className={`fixed inset-y-0 left-0 z-50 w-64 bg-white shadow-lg transform ${
+          className={`fixed inset-y-0 left-0 z-50 w-64 bg-white dark:bg-gray-800 shadow-lg transform ${
             mobileNavOpen ? 'translate-x-0' : '-translate-x-full'
           } transition-transform duration-300 ease-in-out`}
         >
           <div className="flex items-center justify-between h-16 px-4 border-b border-gray-200">
-            <h1 className="text-lg font-bold text-blue-600">Inventory MS</h1>
+            <Link to="/dashboard" className="flex items-center space-x-3">
+              <img 
+                src="/assets/images/logo.png" 
+                alt="Logo" 
+                className="h-10 w-10 object-contain"
+              />
+              <h1 className="text-lg font-bold text-blue-600 dark:text-blue-400">Inventory MS</h1>
+            </Link>
             <button
               onClick={toggleMobileNav}
-              className="p-1 rounded-md text-gray-500 hover:bg-gray-100"
+              className="p-1 rounded-md text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700"
             >
               <XMarkIcon className="h-5 w-5" />
             </button>
@@ -169,7 +181,7 @@ const Sidebar = () => {
           </nav>
           <div className="p-3 border-t border-gray-200">
             {user && (
-              <div className="text-xs text-gray-500">
+              <div className="text-xs text-gray-500 dark:text-gray-400">
                 <div className="font-medium">Logged in as:</div>
                 <div>{user.email || 'User'}</div>
               </div>

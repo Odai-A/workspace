@@ -4,6 +4,21 @@ import { AuthProvider } from './contexts/AuthContext'
 import App from './App.jsx'
 import './index.css'
 
+// Initialize dark mode from localStorage or system preference
+const initializeDarkMode = () => {
+  const savedTheme = localStorage.getItem('theme');
+  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  
+  if (savedTheme === 'dark' || (!savedTheme && prefersDark)) {
+    document.documentElement.classList.add('dark');
+  } else {
+    document.documentElement.classList.remove('dark');
+  }
+};
+
+// Apply dark mode immediately before React renders
+initializeDarkMode();
+
 console.log('Main.jsx is loading the App with AuthProvider...')
 
 // Add error handling for React rendering

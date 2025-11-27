@@ -931,9 +931,9 @@ const Inventory = () => {
             )}
             <div className="flex-1 min-w-0">
               <div className="font-medium truncate max-w-xs" title={rowData.Description}>{rowData.Description || 'N/A'}</div>
-              <div className="text-xs text-gray-500 mt-1">LPN: {rowData['X-Z ASIN'] || 'N/A'}</div>
-              <div className="text-xs text-gray-500">FNSKU: {rowData['Fn Sku'] || 'N/A'}</div>
-              <div className="text-xs text-gray-500">ASIN: {rowData['B00 Asin'] || 'N/A'}</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">LPN: {rowData['X-Z ASIN'] || 'N/A'}</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">FNSKU: {rowData['Fn Sku'] || 'N/A'}</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">ASIN: {rowData['B00 Asin'] || 'N/A'}</div>
             </div>
           </div>
         );
@@ -1081,8 +1081,8 @@ const Inventory = () => {
     <div>
       <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-6 gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Inventory</h1>
-          <p className="text-gray-600">
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Inventory</h1>
+          <p className="text-gray-600 dark:text-gray-400">
             Track and manage stock levels across all locations
           </p>
         </div>
@@ -1138,7 +1138,7 @@ const Inventory = () => {
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
             </div>
         ) : !loading && products.length === 0 && !error ? (
-            <div className="text-center py-8 text-gray-500">
+            <div className="text-center py-8 text-gray-500 dark:text-gray-400">
                 No inventory items found. Try a different search.
             </div>
         ) : (

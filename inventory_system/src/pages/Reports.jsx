@@ -411,14 +411,14 @@ function Reports() {
     <div className="space-y-6 p-4 md:p-6">
       <div className="flex flex-col md:flex-row md:items-center md:justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Reports & Analytics</h1>
-          <p className="text-gray-600 mt-1">Track performance, costs, and scale your operations</p>
+          <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Reports & Analytics</h1>
+          <p className="text-gray-600 dark:text-gray-400 mt-1">Track performance, costs, and scale your operations</p>
         </div>
         <div className="mt-4 md:mt-0 flex items-center space-x-3">
           <select
             value={dateRange}
             onChange={(e) => setDateRange(e.target.value)}
-            className="rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
+            className="rounded-md border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white shadow-sm focus:border-indigo-500 focus:ring-indigo-500"
           >
             <option value="7d">Last 7 Days</option>
             <option value="30d">Last 30 Days</option>
@@ -437,7 +437,7 @@ function Reports() {
       </div>
 
       {/* Report tabs */}
-      <div className="border-b border-gray-200">
+      <div className="border-b border-gray-200 dark:border-gray-700">
         <nav className="-mb-px flex space-x-8 overflow-x-auto" aria-label="Tabs">
           {reportTypes.map((report) => {
             const Icon = report.icon;
@@ -448,8 +448,8 @@ function Reports() {
                 className={`
                   whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center space-x-2
                   ${activeTab === report.id
-                    ? 'border-indigo-500 text-indigo-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}
+                    ? 'border-indigo-500 text-indigo-600 dark:text-indigo-400'
+                    : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 hover:border-gray-300 dark:hover:border-gray-600'}
                 `}
               >
                 <Icon className="h-5 w-5" />
@@ -467,8 +467,8 @@ function Reports() {
           {activeTab === 'activity' && scanActivity && (
             <div>
               <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-xl font-semibold text-gray-900">Scan Activity Trends</h2>
-                <div className="text-sm text-gray-600">
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Scan Activity Trends</h2>
+                <div className="text-sm text-gray-600 dark:text-gray-400">
                   <span className="font-medium">Total: {scanActivity.total}</span> | 
                   <span className="ml-2">Avg/Day: {scanActivity.average}</span>
                 </div>
@@ -483,7 +483,7 @@ function Reports() {
           {activeTab === 'users' && userPerformance && (
             <div>
               <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-xl font-semibold text-gray-900">User Performance</h2>
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-white">User Performance</h2>
                 <div className="text-sm text-gray-600">
                   <span className="font-medium">Total Scans: {userPerformance.totalScans}</span>
                 </div>
@@ -491,7 +491,7 @@ function Reports() {
               {userPerformance.topPerformer && (
                 <div className="mb-4 p-4 bg-blue-50 rounded-lg">
                   <p className="text-sm text-gray-600">Top Performer</p>
-                  <p className="text-lg font-semibold text-gray-900">
+                  <p className="text-lg font-semibold text-gray-900 dark:text-white">
                     {userPerformance.topPerformer.name} - {userPerformance.topPerformer.scanCount} scans
                   </p>
                 </div>
@@ -518,12 +518,12 @@ function Reports() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Scans</th>
                     </tr>
                   </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
+                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                     {userPerformance.users.map((user) => (
                       <tr key={user.id}>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">{user.name}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{user.email}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{user.scanCount}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{user.name}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{user.email}</td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">{user.scanCount}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -535,12 +535,12 @@ function Reports() {
           {/* API Cost Tracking */}
           {activeTab === 'costs' && apiCosts && (
             <div>
-              <h2 className="text-xl font-semibold text-gray-900 mb-4">API Cost Tracking & Cache Performance</h2>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">API Cost Tracking & Cache Performance</h2>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
                 <Card>
                   <div className="p-4">
                     <p className="text-sm text-gray-600">Total Cache Lookups</p>
-                    <p className="text-2xl font-bold text-gray-900">{apiCosts.totalLookups.toLocaleString()}</p>
+                    <p className="text-2xl font-bold text-gray-900 dark:text-white">{apiCosts.totalLookups.toLocaleString()}</p>
                   </div>
                 </Card>
                 <Card>
@@ -580,7 +580,7 @@ function Reports() {
           {activeTab === 'products' && productPopularity && (
             <div>
               <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-xl font-semibold text-gray-900">Most Scanned Products</h2>
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Most Scanned Products</h2>
                 <div className="text-sm text-gray-600">
                   <span className="font-medium">Unique Products: {productPopularity.totalUnique}</span>
                 </div>
@@ -604,24 +604,24 @@ function Reports() {
           {/* Inventory Analytics */}
           {activeTab === 'inventory' && inventoryStats && (
             <div>
-              <h2 className="text-xl font-semibold text-gray-900 mb-4">Inventory Statistics</h2>
+              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Inventory Statistics</h2>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
                 <Card>
                   <div className="p-4">
                     <p className="text-sm text-gray-600">Total Items</p>
-                    <p className="text-2xl font-bold text-gray-900">{inventoryStats.totalItems.toLocaleString()}</p>
+                    <p className="text-2xl font-bold text-gray-900 dark:text-white">{inventoryStats.totalItems.toLocaleString()}</p>
                   </div>
                 </Card>
                 <Card>
                   <div className="p-4">
                     <p className="text-sm text-gray-600">Total Quantity</p>
-                    <p className="text-2xl font-bold text-gray-900">{inventoryStats.totalQuantity.toLocaleString()}</p>
+                    <p className="text-2xl font-bold text-gray-900 dark:text-white">{inventoryStats.totalQuantity.toLocaleString()}</p>
                   </div>
                 </Card>
                 <Card>
                   <div className="p-4">
                     <p className="text-sm text-gray-600">Total Value</p>
-                    <p className="text-2xl font-bold text-gray-900">${inventoryStats.totalValue.toLocaleString()}</p>
+                    <p className="text-2xl font-bold text-gray-900 dark:text-white">${inventoryStats.totalValue.toLocaleString()}</p>
                   </div>
                 </Card>
                 <Card>
@@ -639,7 +639,7 @@ function Reports() {
                 <Card>
                   <div className="p-4">
                     <p className="text-sm text-gray-600">Average Item Value</p>
-                    <p className="text-2xl font-bold text-gray-900">${inventoryStats.averageValue}</p>
+                    <p className="text-2xl font-bold text-gray-900 dark:text-white">${inventoryStats.averageValue}</p>
                   </div>
                 </Card>
               </div>
@@ -650,7 +650,7 @@ function Reports() {
           {activeTab === 'time' && timeAnalytics && (
             <div>
               <div className="mb-4">
-                <h2 className="text-xl font-semibold text-gray-900">Time-Based Analytics</h2>
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Time-Based Analytics</h2>
                 <div className="mt-2 flex space-x-4 text-sm text-gray-600">
                   <span>Peak Hour: <span className="font-medium">{timeAnalytics.peakHour}:00</span></span>
                   <span>Peak Day: <span className="font-medium">{timeAnalytics.peakDay}</span></span>
@@ -658,7 +658,7 @@ function Reports() {
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
-                  <h3 className="text-lg font-medium text-gray-900 mb-2">Scans by Hour</h3>
+                  <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">Scans by Hour</h3>
                   <div className="h-64">
                     <Bar
                       data={{
@@ -674,7 +674,7 @@ function Reports() {
                   </div>
                 </div>
                 <div>
-                  <h3 className="text-lg font-medium text-gray-900 mb-2">Scans by Day of Week</h3>
+                  <h3 className="text-lg font-medium text-gray-900 dark:text-white mb-2">Scans by Day of Week</h3>
                   <div className="h-64">
                     <Bar
                       data={{

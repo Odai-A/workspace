@@ -197,8 +197,83 @@ const Scanner = () => {
     lookupProductByCode(cleanedCode);
   }
 
+  // Helper function to automatically add product to inventory (used by auto-process feature)
+  const autoAddToInventory = async (product) => {
+    try {
+      // Check if auto-process is enabled
+      const autoScanEnabled = localStorage.getItem('autoScan') === 'true';
+      if (!autoScanEnabled) {
+        return false; // Auto-process is disabled
+      }
+
+      // First, check if product exists in product lookup database
+      let productId = null;
+      const existingProduct = await dbProductLookupService.getProductByFnsku(product.fnsku || product.sku);
+      
+      if (existingProduct) {
+        productId = existingProduct.id;
+      } else {
+        // Try to create a new product lookup entry (optional - may fail due to RLS)
+        try {
+          const productData = {
+            name: product.name || 'Unknown Product',
+            sku: product.fnsku || product.sku || product.asin,
+            fnsku: product.fnsku,
+            asin: product.asin,
+            lpn: product.lpn,
+            upc: product.upc,
+            price: product.price,
+            category: product.category || 'Uncategorized',
+            description: product.description || product.name,
+            condition: 'New',
+            source: 'Scanner (Auto)',
+            created_at: new Date().toISOString()
+          };
+          
+          const savedProduct = await dbProductLookupService.saveProductToManifest(productData, { conflictKey: 'fnsku' });
+          productId = savedProduct?.id;
+        } catch (manifestError) {
+          // If saving to manifest_data fails (e.g., RLS policy), continue without product_id
+          console.warn('Could not save to manifest_data (may be RLS restricted):', manifestError);
+        }
+      }
+
+      // Check if inventory item already exists
+      const existingInventory = await inventoryService.getInventoryBySku(product.fnsku || product.sku || product.asin);
+      
+      // Prepare inventory item with default values
+      const inventoryItem = {
+        sku: product.fnsku || product.sku || product.asin,
+        name: product.name || 'Unknown Product',
+        quantity: 1, // Default quantity for auto-process
+        location: 'Default', // Default location
+        condition: 'New',
+        price: product.price || 0,
+        cost: product.price ? (product.price / 2) : 0 // Our price (50% of retail)
+      };
+      
+      // Only add product_id if it exists
+      if (productId) {
+        inventoryItem.product_id = productId;
+      }
+
+      const result = await inventoryService.addOrUpdateInventory(inventoryItem);
+      
+      if (result) {
+        toast.success(`✅ Auto-added to inventory${existingInventory ? ' (quantity updated)' : ''}`, { autoClose: 2000 });
+        return true;
+      } else {
+        return false;
+      }
+    } catch (error) {
+      console.error("Error auto-adding to inventory:", error);
+      // Don't show error toast for auto-process to avoid spam - just log it
+      return false;
+    }
+  };
+
   // Helper function to handle product info - adds to batch queue or sets productInfo based on mode
-  const handleProductFound = (product, code) => {
+  const handleProductFound = async (product, code) => {
     if (batchMode) {
       // Add to batch queue instead of displaying
       const queueItem = {
@@ -229,6 +304,9 @@ const Scanner = () => {
     } else {
       // Normal mode - set product info
       setProductInfo(product);
+      
+      // Auto-process: automatically add to inventory if enabled
+      await autoAddToInventory(product);
     }
   };
 
@@ -1726,7 +1804,7 @@ const Scanner = () => {
     <div className="p-4 md:p-6 lg:p-8">
 
       {/* Batch Mode Toggle */}
-      <div className="mb-4 flex items-center justify-between bg-blue-50 border border-blue-200 rounded-lg p-4">
+      <div className="mb-4 flex items-center justify-between bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
         <div className="flex items-center space-x-3">
           <input
             type="checkbox"
@@ -1751,7 +1829,7 @@ const Scanner = () => {
             }}
             className="h-5 w-5 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
           />
-          <label htmlFor="batchMode" className="text-lg font-semibold text-gray-800 cursor-pointer">
+          <label htmlFor="batchMode" className="text-lg font-semibold text-gray-800 dark:text-gray-200 cursor-pointer">
             Batch Scan Mode
           </label>
           {batchMode && (
@@ -1774,7 +1852,7 @@ const Scanner = () => {
             <button
               type="button"
               onClick={handleClearBatchQueue}
-              className="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md shadow-sm text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+              className="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 text-sm font-medium rounded-md shadow-sm text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
             >
               Clear Queue
             </button>
@@ -1784,29 +1862,29 @@ const Scanner = () => {
 
       {/* Batch Queue Display */}
       {batchMode && batchQueue.length > 0 && (
-        <div className="mb-6 bg-white border border-gray-200 rounded-lg shadow-md p-4">
-          <h3 className="text-lg font-semibold text-gray-800 mb-3">Batch Queue ({batchQueue.length} items)</h3>
+        <div className="mb-6 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-md p-4">
+          <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-3">Batch Queue ({batchQueue.length} items)</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-64 overflow-y-auto">
             {batchQueue.map((item) => (
-              <div key={item.id} className="border border-gray-200 rounded-lg p-3 bg-gray-50 hover:bg-gray-100">
+              <div key={item.id} className="border border-gray-200 dark:border-gray-700 rounded-lg p-3 bg-gray-50 dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600">
                 <div className="flex justify-between items-start mb-2">
                   <div className="flex-1">
-                    <p className="font-mono text-xs text-gray-600 mb-1">{item.code}</p>
-                    <p className="text-sm font-medium text-gray-900 line-clamp-2">
+                    <p className="font-mono text-xs text-gray-600 dark:text-gray-400 mb-1">{item.code}</p>
+                    <p className="text-sm font-medium text-gray-900 dark:text-white line-clamp-2">
                       {item.product?.name || 'Loading...'}
                     </p>
                     {item.product?.asin && (
-                      <p className="text-xs text-gray-500 mt-1">ASIN: {item.product.asin}</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">ASIN: {item.product.asin}</p>
                     )}
                     {item.product?.price && (
-                      <p className="text-xs text-green-600 font-semibold mt-1">
+                      <p className="text-xs text-green-600 dark:text-green-400 font-semibold mt-1">
                         ${parseFloat(item.product.price).toFixed(2)}
                       </p>
                     )}
                   </div>
                   <button
                     onClick={() => handleRemoveFromBatch(item.id)}
-                    className="ml-2 text-red-600 hover:text-red-800 hover:bg-red-50 p-1 rounded flex-shrink-0"
+                    className="ml-2 text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20 p-1 rounded flex-shrink-0"
                     title="Remove from queue"
                   >
                     <XMarkIcon className="h-4 w-4" />
@@ -1835,8 +1913,8 @@ const Scanner = () => {
             type="text"
             name="productSearchTop"
             id="productSearchTop"
-            className="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md p-3"
-            placeholder={batchMode ? "Scan FNSKU (Enter to scan, keeps scanning)" : "Search by LPN, FNSKU, or ASIN"}
+            className="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-md p-3"
+            placeholder={batchMode ? "Scan FNSKU (Enter to scan, keeps scanning)" : "Scan or search by LPN, FNSKU, or ASIN (Press Enter to scan)"}
             value={searchQuery}
             onChange={handleSearchChange}
             onKeyDown={handleSearchKeyDown}
@@ -1852,7 +1930,7 @@ const Scanner = () => {
             checked={exactMatch} 
             onChange={(e) => setExactMatch(e.target.checked)} 
           />
-          <label htmlFor="exactMatch" className="text-sm text-gray-700">Exact Match</label>
+          <label htmlFor="exactMatch" className="text-sm text-gray-700 dark:text-gray-300">Exact Match</label>
         </div>
         <button
           type="button"
@@ -1869,7 +1947,7 @@ const Scanner = () => {
       {showSearchResults && (
         <div className="mb-6 relative">
             {searchResults.length > 0 ? (
-                <ul className="absolute w-full bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-y-auto z-20">
+                <ul className="absolute w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md shadow-lg max-h-60 overflow-y-auto z-20">
                     {searchResults.map((product) => (
                         <li 
                             key={product.id || product.sku} 
@@ -1882,7 +1960,7 @@ const Scanner = () => {
                 </ul>
             ) : (
                 searchQuery.length >=2 && !searchLoading && (
-                     <div className="absolute w-full bg-white border border-gray-300 rounded-md shadow-lg p-3 text-sm text-gray-500 z-20">
+                     <div className="absolute w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md shadow-lg p-3 text-sm text-gray-500 dark:text-gray-400 z-20">
                         No products found for "{searchQuery}".
                     </div>
                 )
@@ -1892,8 +1970,8 @@ const Scanner = () => {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Left Column: Barcode Scanner */}
-        <div className="bg-white p-6 rounded-lg shadow-md">
-          <h2 className="text-xl font-semibold mb-4 text-gray-800">Barcode Scanner</h2>
+        <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
+          <h2 className="text-xl font-semibold mb-4 text-gray-800 dark:text-white">Barcode Scanner</h2>
           <button
             type="button"
             className="w-full mb-4 inline-flex items-center justify-center px-4 py-3 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
@@ -1932,41 +2010,19 @@ const Scanner = () => {
             </div>
           )}
 
-          <div>
-            <label htmlFor="manualBarcodeEntry" className="block text-sm font-medium text-gray-700 mb-1">
-              Manual Barcode Entry
-            </label>
-            <div className="flex items-center space-x-2">
-              <input
-                type="text"
-                name="manualBarcodeEntry"
-                id="manualBarcodeEntry"
-                className="shadow-sm focus:ring-indigo-500 focus:border-indigo-500 block w-full sm:text-sm border-gray-300 rounded-md p-3"
-                placeholder="Enter barcode manually"
-                value={manualBarcode}
-                onChange={(e) => setManualBarcode(e.target.value)}
-                onKeyPress={(e) => { if (e.key === 'Enter') handleManualScan(manualBarcode); }}
-              />
-              <button
-                type="button"
-                className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-500 hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 whitespace-nowrap p-3" // Ensure padding makes it look like screenshot
-                onClick={() => handleManualScan(manualBarcode)}
-                disabled={loading || isManualScanning}
-              >
-                Lookup
-              </button>
-            </div>
-          </div>
+          {/* Manual Barcode Entry section removed - use the top search bar instead */}
+          {/* The top search bar supports both searching existing products and direct barcode lookup */}
+          {/* Simply type a barcode and press Enter, or use the search dropdown for existing products */}
         </div>
 
         {/* Right Column: Product Information */}
-        <div className="bg-white p-6 rounded-lg shadow-md">
+        <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
           <div className="flex justify-between items-center mb-4">
-            <h2 className="text-xl font-semibold text-gray-800">Product Information</h2>
+            <h2 className="text-xl font-semibold text-gray-800 dark:text-white">Product Information</h2>
             <div>
               <button 
                 type="button" 
-                className="mr-2 inline-flex items-center px-3 py-1.5 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                className="mr-2 inline-flex items-center px-3 py-1.5 border border-gray-300 dark:border-gray-600 shadow-sm text-xs font-medium rounded text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
                 onClick={() => setProductInfo(null)} // Reset button
                 disabled={!productInfo || loading}
               >
@@ -1985,13 +2041,13 @@ const Scanner = () => {
 
           {loading && (
             <div className="text-center py-10">
-              <p className="text-gray-500 animate-pulse">Loading product information...</p>
+              <p className="text-gray-500 dark:text-gray-400 animate-pulse">Loading product information...</p>
             </div>
           )}
 
           {!loading && !productInfo && (
-            <div className="text-center py-10 border-2 border-dashed border-gray-300 rounded-md">
-              <p className="text-gray-500">Scan a barcode, use manual lookup, or search for a product to view details.</p>
+            <div className="text-center py-10 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-md">
+              <p className="text-gray-500 dark:text-gray-400">Scan a barcode, use manual lookup, or search for a product to view details.</p>
             </div>
           )}
 
@@ -1999,22 +2055,22 @@ const Scanner = () => {
             <div>
               {/* Auto-refreshing and API processing messages */}
               {isAutoRefreshing && (
-                <div className="mb-3 p-3 bg-blue-50 border border-blue-200 rounded-md flex items-center justify-between">
+                <div className="mb-3 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md flex items-center justify-between">
                     <div className="flex items-center">
-                        <CheckCircleIcon className="h-5 w-5 text-blue-500 mr-2 animate-spin" /> {/* Using CheckCircleIcon for consistency, or a spinner icon */}
-                        <p className="text-sm text-blue-700">Auto-Refreshing: {autoRefreshCode}. Next check in: {autoRefreshCountdown}s</p>
+                        <CheckCircleIcon className="h-5 w-5 text-blue-500 dark:text-blue-400 mr-2 animate-spin" /> {/* Using CheckCircleIcon for consistency, or a spinner icon */}
+                        <p className="text-sm text-blue-700 dark:text-blue-300">Auto-Refreshing: {autoRefreshCode}. Next check in: {autoRefreshCountdown}s</p>
                     </div>
                   <button 
                     onClick={stopAutoRefresh} 
-                    className="ml-2 px-2 py-1 text-xs font-medium text-blue-700 bg-blue-100 rounded hover:bg-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="ml-2 px-2 py-1 text-xs font-medium text-blue-700 dark:text-blue-300 bg-blue-100 dark:bg-blue-900 rounded hover:bg-blue-200 dark:hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     Stop Auto-Refresh
                   </button>
                 </div>
               )}
               {isApiProcessing && !isAutoRefreshing && (
-                <div className="mb-3 p-3 bg-yellow-50 border border-yellow-300 rounded-md">
-                    <p className="text-sm text-yellow-700">API is processing FNSKU: {lastScannedCode}. Use 'Check for Updates' or wait.</p>
+                <div className="mb-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-800 rounded-md">
+                    <p className="text-sm text-yellow-700 dark:text-yellow-300">API is processing FNSKU: {lastScannedCode}. Use 'Check for Updates' or wait.</p>
                      <button
                         onClick={handleCheckForUpdates}
                         disabled={isCheckingDatabase}
@@ -2025,13 +2081,13 @@ const Scanner = () => {
                 </div>
               )}
                {(productInfo.source === 'fnskutoasin.com' || productInfo.cost_status === 'charged') && (
-                <div className="mb-3 p-3 bg-yellow-100 border border-yellow-400 rounded-md text-sm text-yellow-800 flex items-center">
-                  <CurrencyDollarIcon className="h-5 w-5 text-yellow-600 mr-2" />
+                <div className="mb-3 p-3 bg-yellow-100 dark:bg-yellow-900/20 border border-yellow-400 dark:border-yellow-800 rounded-md text-sm text-yellow-800 dark:text-yellow-300 flex items-center">
+                  <CurrencyDollarIcon className="h-5 w-5 text-yellow-600 dark:text-yellow-400 mr-2" />
                   Retrieved from fnskutoasin.com API - Charged lookup
                 </div>
               )}
-              <div className="mb-2 p-2 bg-gray-50 border border-gray-200 rounded-md">
-                  <span className="text-xs font-medium text-gray-600">Code Type: {productInfo.code_type || 'N/A'} ({productInfo.code_type === 'FNSKU' ? 'Fulfillment Network Stock Keeping Unit' : productInfo.code_type})</span>
+              <div className="mb-2 p-2 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-md">
+                  <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Code Type: {productInfo.code_type || 'N/A'} ({productInfo.code_type === 'FNSKU' ? 'Fulfillment Network Stock Keeping Unit' : productInfo.code_type})</span>
               </div>
 
               {/* Product Image */}
@@ -2040,7 +2096,7 @@ const Scanner = () => {
                   <img 
                     src={productInfo.image_url} 
                     alt={productInfo.name || 'Product'} 
-                    className="max-w-full h-48 w-auto object-contain border border-gray-200 rounded-lg bg-white shadow-sm"
+                    className="max-w-full h-48 w-auto object-contain border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 shadow-sm"
                     onError={(e) => {
                       e.target.style.display = 'none';
                     }}
@@ -2048,10 +2104,10 @@ const Scanner = () => {
                 </div>
               )}
 
-              <h3 className="text-lg font-bold text-gray-900 mb-1">{productInfo.name || 'N/A'}</h3>
-              <p className="text-sm text-gray-600 mb-1">FNSKU: {productInfo.fnsku || 'N/A'} {productInfo.asin_found === false && productInfo.source ==='fnskutoasin.com' ? '(No ASIN found)' : ''}</p>
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-1">{productInfo.name || 'N/A'}</h3>
+              <p className="text-sm text-gray-600 dark:text-gray-400 mb-1">FNSKU: {productInfo.fnsku || 'N/A'} {productInfo.asin_found === false && productInfo.source ==='fnskutoasin.com' ? '(No ASIN found)' : ''}</p>
               
-              <div className="text-sm space-y-0.5 text-gray-700 mb-3">
+              <div className="text-sm space-y-0.5 text-gray-700 dark:text-gray-300 mb-3">
                 <p>LPN (X-Z ASIN): {productInfo.lpn || 'N/A'}</p>
                 <p>FNSKU: {productInfo.fnsku || 'N/A'}</p> {/* Repeated from above for specific layout, can be removed if redundant */}
                 <p>ASIN (B00): {productInfo.asin || 'N/A'}</p>
@@ -2098,13 +2154,13 @@ const Scanner = () => {
       </div>
 
       {/* Bottom Section: Recent Scans */}
-      <div className="mt-6 bg-white p-6 rounded-lg shadow-md">
+      <div className="mt-6 bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
         <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-semibold text-gray-800">Recent Scans</h2>
+          <h2 className="text-xl font-semibold text-gray-800 dark:text-white">Recent Scans</h2>
           {scannedCodes.length > 0 && (
             <button
               onClick={handleClearAllScans}
-              className="text-sm text-red-600 hover:text-red-800 font-medium"
+              className="text-sm text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 font-medium"
             >
               Clear All
             </button>
@@ -2113,39 +2169,39 @@ const Scanner = () => {
         {scannedCodes.length > 0 ? (
           <div className="space-y-4 max-h-96 overflow-y-auto">
             {scannedCodes.map((item, index) => (
-              <div key={`${item.code}-${item.timestamp}-${index}`} className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50">
+              <div key={`${item.code}-${item.timestamp}-${index}`} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:bg-gray-50 dark:hover:bg-gray-700">
                 <div className="flex justify-between items-start mb-2">
                   <div className="flex-1">
                     <div className="flex items-center gap-2 mb-1">
-                      <span className="font-mono text-sm font-semibold text-gray-800">{item.code}</span>
-                      <span className="capitalize text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded">({item.type})</span>
-                      <span className="text-xs text-gray-400">{new Date(item.timestamp).toLocaleString()}</span>
+                      <span className="font-mono text-sm font-semibold text-gray-800 dark:text-gray-200">{item.code}</span>
+                      <span className="capitalize text-xs text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded">({item.type})</span>
+                      <span className="text-xs text-gray-400 dark:text-gray-500">{new Date(item.timestamp).toLocaleString()}</span>
                     </div>
                     {item.productInfo ? (
                       <div className="mt-2 space-y-1">
-                        <p className="text-sm font-medium text-gray-900">{item.productInfo.name || 'Product Name'}</p>
-                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600">
+                        <p className="text-sm font-medium text-gray-900 dark:text-white">{item.productInfo.name || 'Product Name'}</p>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-400">
                           {item.productInfo.asin && <span>ASIN: <span className="font-mono">{item.productInfo.asin}</span></span>}
                           {item.productInfo.fnsku && <span>FNSKU: <span className="font-mono">{item.productInfo.fnsku}</span></span>}
                           {item.productInfo.lpn && <span>LPN: <span className="font-mono">{item.productInfo.lpn}</span></span>}
-                          {item.productInfo.price != null && <span>Price: <span className="font-semibold text-green-600">${parseFloat(item.productInfo.price).toFixed(2)}</span></span>}
+                          {item.productInfo.price != null && <span>Price: <span className="font-semibold text-green-600 dark:text-green-400">${parseFloat(item.productInfo.price).toFixed(2)}</span></span>}
                         </div>
                         {item.productInfo.image_url && (
                           <img 
                             src={item.productInfo.image_url} 
                             alt={item.productInfo.name || 'Product'} 
-                            className="mt-2 h-16 w-16 object-contain border border-gray-200 rounded"
+                            className="mt-2 h-16 w-16 object-contain border border-gray-200 dark:border-gray-600 rounded"
                             onError={(e) => { e.target.style.display = 'none'; }}
                           />
                         )}
                       </div>
                     ) : (
-                      <p className="text-xs text-gray-500 italic mt-1">Loading product details...</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 italic mt-1">Loading product details...</p>
                     )}
                   </div>
                   <button
                     onClick={() => handleDeleteScan(index)}
-                    className="ml-2 text-red-600 hover:text-red-800 hover:bg-red-50 p-1 rounded flex-shrink-0"
+                    className="ml-2 text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20 p-1 rounded flex-shrink-0"
                     title="Delete this scan"
                   >
                     <XMarkIcon className="h-4 w-4" />

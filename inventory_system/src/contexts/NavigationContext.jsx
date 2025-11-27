@@ -1,5 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
+import { useAuth } from './AuthContext';
+import { getSubscriptionStatus } from '../services/subscriptionService';
 
 // Create the navigation context
 const NavigationContext = createContext();
@@ -19,12 +21,38 @@ export const NavigationProvider = ({ children }) => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [activeRoute, setActiveRoute] = useState('/dashboard');
+  const [hasActiveSubscription, setHasActiveSubscription] = useState(false);
+  const [subscriptionLoading, setSubscriptionLoading] = useState(true);
   
   // Get location for active route tracking
   const location = useLocation();
+  const { user, isAuthenticated } = useAuth();
 
-  // Navigation items configuration
-  const navigationItems = [
+  // Fetch subscription status
+  useEffect(() => {
+    const fetchSubscriptionStatus = async () => {
+      if (!isAuthenticated || !user) {
+        setHasActiveSubscription(false);
+        setSubscriptionLoading(false);
+        return;
+      }
+
+      try {
+        const { hasActiveSubscription: hasActive } = await getSubscriptionStatus();
+        setHasActiveSubscription(hasActive);
+      } catch (error) {
+        console.error('Error fetching subscription status:', error);
+        setHasActiveSubscription(false);
+      } finally {
+        setSubscriptionLoading(false);
+      }
+    };
+
+    fetchSubscriptionStatus();
+  }, [user, isAuthenticated]);
+
+  // Base navigation items configuration
+  const baseNavigationItems = [
     {
       name: 'Dashboard',
       path: '/dashboard',
@@ -56,12 +84,6 @@ export const NavigationProvider = ({ children }) => {
       permission: 'view_reports'
     },
     {
-      name: 'Pricing',
-      path: '/pricing',
-      icon: 'CurrencyDollarIcon',
-      permission: null
-    },
-    {
       name: 'Users',
       path: '/users',
       icon: 'UsersIcon',
@@ -74,6 +96,19 @@ export const NavigationProvider = ({ children }) => {
       icon: 'Cog6ToothIcon',
       permission: 'manage_settings'
     }
+  ];
+
+  // Conditionally add Pricing tab - only show if user doesn't have active subscription
+  const navigationItems = [
+    ...baseNavigationItems.slice(0, 5), // Dashboard through Reports
+    // Only show Pricing if user doesn't have active subscription (trial/incomplete users)
+    ...(!hasActiveSubscription && !subscriptionLoading ? [{
+      name: 'Pricing',
+      path: '/pricing',
+      icon: 'CurrencyDollarIcon',
+      permission: null
+    }] : []),
+    ...baseNavigationItems.slice(5) // Users and Settings
   ];
 
   // Set current active route
@@ -132,6 +167,8 @@ export const NavigationProvider = ({ children }) => {
     navigationItems,
     activeRoute,
     setCurrentRoute,
+    hasActiveSubscription,
+    subscriptionLoading,
   };
 
   // Provide the navigation context to children

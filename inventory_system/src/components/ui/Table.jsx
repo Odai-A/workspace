@@ -37,26 +37,26 @@ const Table = ({
   });
 
   // Styles configuration
-  const tableClasses = `min-w-full divide-y divide-gray-200 ${className}`;
-  const headerClasses = 'bg-gray-50';
-  const headerCellClasses = 'px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider';
-  const bodyClasses = 'divide-y divide-gray-200 bg-white';
+  const tableClasses = `min-w-full divide-y divide-gray-200 dark:divide-gray-700 ${className}`;
+  const headerClasses = 'bg-gray-50 dark:bg-gray-700';
+  const headerCellClasses = 'px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider';
+  const bodyClasses = 'divide-y divide-gray-200 dark:divide-gray-700 bg-white dark:bg-gray-800';
   
   const rowClasses = (index) => {
     let classes = '';
-    if (striped && index % 2 !== 0) classes += 'bg-gray-50 ';
-    if (hover) classes += 'hover:bg-gray-100 ';
+    if (striped && index % 2 !== 0) classes += 'bg-gray-50 dark:bg-gray-700 ';
+    if (hover) classes += 'hover:bg-gray-100 dark:hover:bg-gray-700 ';
     if (onRowClick) classes += 'cursor-pointer ';
     return classes;
   };
 
-  const cellClasses = `px-6 ${compact ? 'py-2' : 'py-4'} text-sm text-gray-500`;
-  const borderClasses = bordered ? 'border border-gray-200' : '';
+  const cellClasses = `px-6 ${compact ? 'py-2' : 'py-4'} text-sm text-gray-500 dark:text-gray-400`;
+  const borderClasses = bordered ? 'border border-gray-200 dark:border-gray-700' : '';
   
   // Loading and empty state components
   const LoadingState = () => (
     <tr>
-      <td colSpan={columns.length} className="px-6 py-4 text-center text-sm text-gray-500">
+      <td colSpan={columns.length} className="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
         <div className="flex items-center justify-center">
           <svg className="animate-spin h-5 w-5 mr-3 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
@@ -70,7 +70,7 @@ const Table = ({
 
   const EmptyState = () => (
     <tr>
-      <td colSpan={columns.length} className="px-6 py-4 text-center text-sm text-gray-500">
+      <td colSpan={columns.length} className="px-6 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
         {noDataMessage}
       </td>
     </tr>
@@ -141,10 +141,10 @@ const Table = ({
 
       {/* Pagination Controls */}
       {pagination && data.length > 0 && (
-        <div className="flex items-center justify-between px-4 py-3 bg-white border-t border-gray-200 sm:px-6">
+        <div className="flex items-center justify-between px-4 py-3 bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 sm:px-6">
           <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
             <div>
-              <p className="text-sm text-gray-700">
+              <p className="text-sm text-gray-700 dark:text-gray-300">
                 Showing{' '}
                 <span className="font-medium">
                   {table.getState().pagination.pageIndex * table.getState().pagination.pageSize + 1}
@@ -162,7 +162,7 @@ const Table = ({
             <div>
               <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
                 <button
-                  className={`relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 ${
+                  className={`relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-600 ${
                     !table.getCanPreviousPage() ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
                   }`}
                   onClick={() => table.previousPage()}
@@ -171,7 +171,7 @@ const Table = ({
                   Previous
                 </button>
                 <button
-                  className={`relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 ${
+                  className={`relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-600 ${
                     !table.getCanNextPage() ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
                   }`}
                   onClick={() => table.nextPage()}

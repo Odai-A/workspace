@@ -660,15 +660,76 @@ export const productLookupService = {
 
   async getRecentScanEvents(limit = 5) {
     try {
-      const { data, error } = await supabase
+      // Try with explicit foreign key syntax first
+      let { data, error } = await supabase
         .from('scan_history') 
         .select(`
-          id, scanned_code, scanned_at, product_description,
-          manifest_entry:manifest_data_id ( ${columnMap.name}, ${columnMap.lpn}, ${columnMap.asin}, ${columnMap.price} ),
-          cached_lookup:api_lookup_cache_id ( product_name, asin, price, image_url, api_source )
+          id, scanned_code, scanned_at, product_description, manifest_data_id, api_lookup_cache_id,
+          manifest_data!manifest_data_id ( ${columnMap.name}, ${columnMap.lpn}, ${columnMap.asin}, ${columnMap.price} ),
+          api_lookup_cache!api_lookup_cache_id ( product_name, asin, price, image_url, api_source )
         `)
         .order('scanned_at', { ascending: false })
         .limit(limit);
+
+      // If the join fails due to multiple relationships, fetch without joins and join manually
+      if (error && error.code === 'PGRST201') {
+        console.warn('[DB Service] Multiple relationships detected, fetching data separately...');
+        
+        // Fetch scan history without joins
+        const { data: scanData, error: scanError } = await supabase
+          .from('scan_history')
+          .select('id, scanned_code, scanned_at, product_description, manifest_data_id, api_lookup_cache_id')
+          .order('scanned_at', { ascending: false })
+          .limit(limit);
+
+        if (scanError) {
+          console.error('[DB Service] Error fetching scan history:', scanError);
+          return [];
+        }
+
+        // Fetch related data separately
+        const manifestIds = scanData.filter(s => s.manifest_data_id).map(s => s.manifest_data_id);
+        const cacheIds = scanData.filter(s => s.api_lookup_cache_id).map(s => s.api_lookup_cache_id);
+
+        let manifestDataMap = {};
+        let cacheDataMap = {};
+
+        if (manifestIds.length > 0) {
+          const { data: manifestData } = await supabase
+            .from('manifest_data')
+            .select(`id, ${columnMap.name}, ${columnMap.lpn}, ${columnMap.asin}, ${columnMap.price}`)
+            .in('id', manifestIds);
+          
+          if (manifestData) {
+            manifestDataMap = manifestData.reduce((acc, item) => {
+              acc[item.id] = item;
+              return acc;
+            }, {});
+          }
+        }
+
+        if (cacheIds.length > 0) {
+          const { data: cacheData } = await supabase
+            .from('api_lookup_cache')
+            .select('id, product_name, asin, price, image_url, api_source')
+            .in('id', cacheIds);
+          
+          if (cacheData) {
+            cacheDataMap = cacheData.reduce((acc, item) => {
+              acc[item.id] = item;
+              return acc;
+            }, {});
+          }
+        }
+
+        // Combine the data
+        data = scanData.map(scan => ({
+          ...scan,
+          manifest_data: scan.manifest_data_id ? manifestDataMap[scan.manifest_data_id] : null,
+          api_lookup_cache: scan.api_lookup_cache_id ? cacheDataMap[scan.api_lookup_cache_id] : null
+        }));
+        error = null;
+      }
 
       if (error) {
         console.error('[DB Service] Error fetching recent scan events:', error);
@@ -678,7 +739,8 @@ export const productLookupService = {
 
       // Transform data to a more usable format for the UI
       const mappedData = (data || []).map(scan => {
-        const details = scan.cached_lookup || scan.manifest_entry;
+        // The joined data will be under manifest_data and api_lookup_cache keys
+        const details = scan.api_lookup_cache || scan.manifest_data;
         return {
             id: scan.id,
             scanned_code: scan.scanned_code,
@@ -688,7 +750,7 @@ export const productLookupService = {
             asin: details?.asin || details?.[columnMap.asin] || 'N/A',
             price: details?.price != null ? parseFloat(details.price).toFixed(2) : (details?.[columnMap.price] != null ? parseFloat(details[columnMap.price]).toFixed(2) : 'N/A'),
             image_url: details?.image_url || '',
-            source: scan.cached_lookup ? `Cache (${scan.cached_lookup.api_source || 'fnskutoasin.com'})` : (scan.manifest_entry ? 'Local DB' : 'Scan Event')
+            source: scan.api_lookup_cache ? `Cache (${scan.api_lookup_cache.api_source || 'fnskutoasin.com'})` : (scan.manifest_data ? 'Local DB' : 'Scan Event')
         };
       });
       console.log("[DB Service] Mapped scan_history data:", mappedData);
