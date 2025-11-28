@@ -1008,6 +1008,271 @@ const Scanner = () => {
     return div.innerHTML;
   };
 
+  // Helper function to create a single label body (without HTML wrapper)
+  const createLabelBody = (productInfo, amazonUrl, qrCodeHtml) => {
+    const retailPrice = productInfo.price != null ? parseFloat(productInfo.price) : 0;
+    const ourPrice = retailPrice / 2;
+    const productName = productInfo.name || 'Product';
+
+    return `
+      <div class="label-page">
+        <div class="qr-code-top-right">
+          <div class="qr-code">
+            <img src="${qrCodeHtml}" alt="QR Code" onerror="this.style.display='none'; this.parentElement.innerHTML='<div style=\\'text-align:center; padding:5px; font-size:6pt;\\'>QR<br/>Code</div>';" />
+          </div>
+        </div>
+        
+        <div class="label-header">
+          <h1 class="label-title">${escapeHtml(productName)}</h1>
+          <p class="label-subtitle">Amazon Product Label</p>
+        </div>
+
+        <div class="asin-display">
+          ASIN: ${productInfo.asin}
+        </div>
+
+        ${productInfo.image_url ? `
+          <div class="product-image-section">
+            <img src="${productInfo.image_url}" alt="Product Image" class="product-image" 
+                 onerror="this.style.display='none';"
+                 style="image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; image-rendering: pixelated; filter: contrast(1.2) brightness(0.9);" />
+          </div>
+        ` : ''}
+
+        ${retailPrice > 0 ? `
+          <div class="price-section">
+            <div class="retail-price">
+              <span class="retail-price-label">RETAIL:</span> $${retailPrice.toFixed(2)}
+            </div>
+            <div class="our-price-label">OUR PRICE:</div>
+            <div class="our-price">
+              $${ourPrice.toFixed(2)}
+            </div>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  };
+
+  // Helper function to create combined batch label HTML (all labels in one document)
+  const createBatchLabelHTML = (batchItems) => {
+    const labelsHTML = batchItems
+      .filter(item => item.product && item.product.asin)
+      .map(item => {
+        const amazonUrl = `https://www.amazon.com/dp/${item.product.asin}`;
+        const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(amazonUrl)}`;
+        return createLabelBody(item.product, amazonUrl, qrApiUrl);
+      })
+      .join('');
+
+    return `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Batch Labels - ${batchItems.length} items</title>
+          <style>
+            @page {
+              size: 4in 6in;
+              margin: 0.08in;
+            }
+            @media print {
+              body {
+                margin: 0;
+                padding: 0;
+              }
+              .no-print {
+                display: none;
+              }
+              .label-page {
+                page-break-after: always;
+                break-after: page;
+              }
+              .label-page:last-child {
+                page-break-after: auto;
+                break-after: auto;
+              }
+              * {
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+              }
+              img.product-image {
+                image-rendering: -webkit-optimize-contrast !important;
+                image-rendering: crisp-edges !important;
+                image-rendering: pixelated !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+                filter: contrast(1.2) brightness(0.9) !important;
+              }
+            }
+            * {
+              box-sizing: border-box;
+            }
+            body {
+              font-family: Arial, sans-serif;
+              margin: 0;
+              padding: 0;
+            }
+            .label-page {
+              width: 4in;
+              height: 6in;
+              max-width: 4in;
+              max-height: 6in;
+              margin: 0;
+              padding: 0.08in;
+              overflow: hidden;
+              display: flex;
+              flex-direction: column;
+              position: relative;
+              page-break-after: always;
+              break-after: page;
+            }
+            .qr-code-top-right {
+              position: absolute;
+              top: 0.1in;
+              right: 0.1in;
+              z-index: 10;
+              width: 0.75in;
+              height: 0.75in;
+            }
+            .qr-code {
+              border: 1px solid #000;
+              padding: 0.02in;
+              background: white;
+              width: 100%;
+              height: 100%;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+            }
+            .qr-code img {
+              display: block;
+              width: 100%;
+              height: 100%;
+              object-fit: contain;
+            }
+            .label-header {
+              text-align: center;
+              border-bottom: 2px solid #000;
+              padding-bottom: 0.05in;
+              margin-bottom: 0.06in;
+              padding-right: 0.85in;
+              flex-shrink: 0;
+              overflow: hidden;
+            }
+            .label-title {
+              font-size: 9pt;
+              font-weight: bold;
+              margin: 0;
+              padding: 0;
+              line-height: 1.2;
+              word-wrap: break-word;
+              overflow-wrap: break-word;
+              overflow: hidden;
+            }
+            .label-subtitle {
+              font-size: 7pt;
+              color: #666;
+              margin: 0.02in 0 0 0;
+              padding: 0;
+            }
+            .asin-display {
+              font-size: 9pt;
+              font-weight: bold;
+              text-align: center;
+              background: #f0f0f0;
+              padding: 0.04in;
+              margin: 0.04in 0;
+              border: 1px solid #000;
+              flex-shrink: 0;
+            }
+            .product-image-section {
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              margin: 0.08in 0;
+              max-height: 2.8in;
+              min-height: 2.2in;
+              flex-shrink: 1;
+              overflow: hidden;
+              padding: 0.05in;
+            }
+            .product-image {
+              max-width: 100%;
+              max-height: 2.8in;
+              width: auto;
+              height: auto;
+              object-fit: contain;
+              border: 3px solid #000;
+              background: white;
+              box-shadow: 0 0 0 2px #000;
+              padding: 0.02in;
+              image-rendering: -webkit-optimize-contrast;
+              image-rendering: crisp-edges;
+              image-rendering: pixelated;
+              filter: contrast(1.2) brightness(0.9) grayscale(0%);
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
+            }
+            .price-section {
+              margin-top: auto;
+              margin-bottom: 0.05in;
+              text-align: center;
+              flex-shrink: 0;
+              padding-top: 0.05in;
+            }
+            .retail-price {
+              font-size: 10pt;
+              font-weight: bold;
+              color: #666;
+              margin-bottom: 0.03in;
+              line-height: 1.2;
+            }
+            .retail-price-label {
+              font-size: 8pt;
+              color: #666;
+              margin-right: 0.08in;
+            }
+            .our-price {
+              font-size: 18pt;
+              font-weight: bold;
+              color: #059669;
+              margin-top: 0.03in;
+              line-height: 1.2;
+            }
+            .our-price-label {
+              font-size: 10pt;
+              font-weight: bold;
+              color: #059669;
+              margin-bottom: 0.02in;
+            }
+            .print-button {
+              position: fixed;
+              top: 20px;
+              right: 20px;
+              padding: 10px 20px;
+              background: #3b82f6;
+              color: white;
+              border: none;
+              border-radius: 5px;
+              cursor: pointer;
+              font-size: 14px;
+              z-index: 1000;
+            }
+            .print-button:hover {
+              background: #2563eb;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="no-print">
+            <button class="print-button" onclick="window.print()">Print All Labels</button>
+          </div>
+          ${labelsHTML}
+        </body>
+      </html>
+    `;
+  };
+
   // Handle marketplace listing creation
   const handleCreateListing = () => {
     if (productInfo) {
@@ -1602,49 +1867,40 @@ const Scanner = () => {
       return;
     }
 
+    // Filter out items without ASIN
+    const validItems = batchQueue.filter(item => item.product && item.product.asin);
+    
+    if (validItems.length === 0) {
+      toast.error("No valid items with ASIN to print");
+      return;
+    }
+
     setIsPrintingBatch(true);
-    toast.info(`🖨️ Printing ${batchQueue.length} labels...`, { autoClose: 2000 });
+    toast.info(`🖨️ Preparing ${validItems.length} labels for printing...`, { autoClose: 2000 });
 
     try {
-      // Print each label one by one with a small delay
-      for (let i = 0; i < batchQueue.length; i++) {
-        const item = batchQueue[i];
-        if (!item.product || !item.product.asin) {
-          console.warn(`Skipping item ${item.code} - no ASIN available`);
-          continue;
-        }
-
-        const amazonUrl = `https://www.amazon.com/dp/${item.product.asin}`;
-        const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(amazonUrl)}`;
-        
-        const labelContent = createLabelHTML(item.product, amazonUrl, qrApiUrl);
-        const printWindow = window.open('', '_blank');
-        
-        if (printWindow) {
-          printWindow.document.write(labelContent);
-          printWindow.document.close();
-          
-          // Wait for content to load, then trigger print
-          await new Promise(resolve => setTimeout(resolve, 800));
-          printWindow.focus();
-          printWindow.print();
-          
-          // Close window after a delay
-          setTimeout(() => {
-            printWindow.close();
-          }, 1000);
-        }
-
-        // Small delay between prints to avoid overwhelming the print dialog
-        if (i < batchQueue.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 500));
-        }
-      }
-
-      toast.success(`✅ Successfully printed ${batchQueue.length} labels!`, { autoClose: 3000 });
+      // Create a single combined document with all labels
+      const combinedLabelHTML = createBatchLabelHTML(validItems);
+      const printWindow = window.open('', '_blank');
       
-      // Optionally clear the queue after printing
-      // setBatchQueue([]);
+      if (printWindow) {
+        printWindow.document.write(combinedLabelHTML);
+        printWindow.document.close();
+        
+        // Wait for content to load, then trigger print dialog
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        printWindow.focus();
+        printWindow.print();
+        
+        toast.success(`✅ Print dialog opened for ${validItems.length} labels. Click Print once to print all!`, { autoClose: 4000 });
+        
+        // Close window after a longer delay to allow printing
+        setTimeout(() => {
+          printWindow.close();
+        }, 5000);
+      } else {
+        toast.error("❌ Could not open print window. Please check popup blocker settings.");
+      }
     } catch (error) {
       console.error("Error printing batch:", error);
       toast.error("❌ Error printing batch labels", { autoClose: 3000 });
