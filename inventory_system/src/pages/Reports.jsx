@@ -32,7 +32,6 @@ function Reports() {
   const [userPerformance, setUserPerformance] = useState(null);
   const [apiCosts, setApiCosts] = useState(null);
   const [productPopularity, setProductPopularity] = useState(null);
-  const [inventoryStats, setInventoryStats] = useState(null);
   const [timeAnalytics, setTimeAnalytics] = useState(null);
   const [selectedEmployee, setSelectedEmployee] = useState(null);
 
@@ -41,7 +40,6 @@ function Reports() {
     { id: 'activity', name: 'Scan Activity', icon: ChartBarIcon },
     { id: 'users', name: 'Employee Scanning', icon: UserGroupIcon },
     { id: 'products', name: 'Product Popularity', icon: CubeIcon },
-    { id: 'inventory', name: 'Inventory Analytics', icon: CubeIcon },
     { id: 'time', name: 'Time Analytics', icon: ClockIcon },
   ];
 
@@ -234,47 +232,6 @@ function Reports() {
     }
   };
 
-  // Fetch inventory statistics
-  const fetchInventoryStats = async () => {
-    try {
-      const { data: inventory, error: inventoryError } = await supabase
-        .from('manifest_data')
-        .select('Quantity, MSRP');
-
-      if (inventoryError) throw inventoryError;
-
-      const totalItems = inventory?.length || 0;
-      const totalQuantity = inventory?.reduce((sum, item) => sum + (parseInt(item.Quantity) || 0), 0) || 0;
-      const totalValue = inventory?.reduce((sum, item) => {
-        const qty = parseInt(item.Quantity) || 0;
-        const price = parseFloat(item.MSRP) || 0;
-        return sum + (qty * price);
-      }, 0) || 0;
-      
-      const lowStock = inventory?.filter(item => {
-        const qty = parseInt(item.Quantity) || 0;
-        return qty > 0 && qty < 10;
-      }).length || 0;
-
-      const outOfStock = inventory?.filter(item => {
-        const qty = parseInt(item.Quantity) || 0;
-        return qty === 0;
-      }).length || 0;
-
-      setInventoryStats({
-        totalItems,
-        totalQuantity,
-        totalValue,
-        lowStock,
-        outOfStock,
-        averageValue: totalItems > 0 ? (totalValue / totalItems).toFixed(2) : 0,
-      });
-    } catch (error) {
-      console.error('Error fetching inventory stats:', error);
-      toast.error('Failed to load inventory statistics');
-    }
-  };
-
   // Fetch time-based analytics
   const fetchTimeAnalytics = async () => {
     try {
@@ -332,7 +289,6 @@ function Reports() {
           fetchUserPerformance(),
           // fetchApiCosts(), // API cost tracking removed
           fetchProductPopularity(),
-          fetchInventoryStats(),
           fetchTimeAnalytics(),
         ]);
       } finally {
@@ -636,51 +592,6 @@ function Reports() {
                   }}
                   options={chartOptions}
                 />
-              </div>
-            </div>
-          )}
-
-          {/* Inventory Analytics */}
-          {activeTab === 'inventory' && inventoryStats && (
-            <div>
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">Inventory Statistics</h2>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                <Card>
-                  <div className="p-4">
-                    <p className="text-sm text-gray-600">Total Items</p>
-                    <p className="text-2xl font-bold text-gray-900 dark:text-white">{inventoryStats.totalItems.toLocaleString()}</p>
-                  </div>
-                </Card>
-                <Card>
-                  <div className="p-4">
-                    <p className="text-sm text-gray-600">Total Quantity</p>
-                    <p className="text-2xl font-bold text-gray-900 dark:text-white">{inventoryStats.totalQuantity.toLocaleString()}</p>
-                  </div>
-                </Card>
-                <Card>
-                  <div className="p-4">
-                    <p className="text-sm text-gray-600">Total Value</p>
-                    <p className="text-2xl font-bold text-gray-900 dark:text-white">${inventoryStats.totalValue.toLocaleString()}</p>
-                  </div>
-                </Card>
-                <Card>
-                  <div className="p-4">
-                    <p className="text-sm text-gray-600">Low Stock Items</p>
-                    <p className="text-2xl font-bold text-yellow-600">{inventoryStats.lowStock}</p>
-                  </div>
-                </Card>
-                <Card>
-                  <div className="p-4">
-                    <p className="text-sm text-gray-600">Out of Stock</p>
-                    <p className="text-2xl font-bold text-red-600">{inventoryStats.outOfStock}</p>
-                  </div>
-                </Card>
-                <Card>
-                  <div className="p-4">
-                    <p className="text-sm text-gray-600">Average Item Value</p>
-                    <p className="text-2xl font-bold text-gray-900 dark:text-white">${inventoryStats.averageValue}</p>
-                  </div>
-                </Card>
               </div>
             </div>
           )}

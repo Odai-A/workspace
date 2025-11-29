@@ -165,6 +165,102 @@ def tenant_has_paid_subscription(tenant_id):
         logger.error(f"Error checking paid subscription for tenant {tenant_id}: {e}")
         return False
 
+def log_scan_to_history(user_id, tenant_id, code, asin, supabase_client):
+    """
+    Log a scan to scan_history, but only if this user hasn't already scanned this exact code.
+    Returns True if the scan was logged (new scan), False if it was a duplicate.
+    """
+    import sys
+    logger.info(f"{'='*60}")
+    logger.info(f"🔍 LOG_SCAN_TO_HISTORY CALLED")
+    logger.info(f"   user_id: {user_id}")
+    logger.info(f"   tenant_id: {tenant_id}")
+    logger.info(f"   code: {code}")
+    logger.info(f"   supabase_client: {supabase_client is not None}")
+    logger.info(f"{'='*60}")
+    
+    print(f"\n{'='*60}", flush=True)
+    print(f"🔍 LOG_SCAN_TO_HISTORY CALLED", flush=True)
+    print(f"   user_id: {user_id}", flush=True)
+    print(f"   tenant_id: {tenant_id}", flush=True)
+    print(f"   code: {code}", flush=True)
+    print(f"   supabase_client: {supabase_client is not None}", flush=True)
+    print(f"{'='*60}\n", flush=True)
+    sys.stdout.flush()
+    
+    if not supabase_client:
+        error_msg = f"❌❌❌ Cannot log scan: supabase_client is None"
+        logger.error(error_msg)
+        print(error_msg, flush=True)
+        return False
+    
+    if not user_id:
+        error_msg = f"❌❌❌ Cannot log scan: user_id is None or empty (user_id={user_id})"
+        logger.error(error_msg)
+        print(error_msg, flush=True)
+        return False
+    
+    try:
+        # Check if this user has already scanned this exact code
+        logger.info(f"🔍 Checking for duplicate scan: user_id={user_id}, code={code}, tenant_id={tenant_id}")
+        print(f"🔍 Checking duplicates: user_id={user_id}, code={code}, tenant_id={tenant_id}")
+        
+        # Build query to check for existing scan
+        # Use scanned_code column (this is the actual column name in scan_history table)
+        query = supabase_client.from_('scan_history').select('id, user_id, scanned_code, tenant_id').eq('user_id', user_id).eq('scanned_code', code)
+        if tenant_id:
+            query = query.eq('tenant_id', tenant_id)
+            print(f"   Query: user_id={user_id} AND scanned_code={code} AND tenant_id={tenant_id}")
+        else:
+            # If no tenant_id, check for null tenant_id to avoid duplicates
+            query = query.is_('tenant_id', 'null')
+            print(f"   Query: user_id={user_id} AND scanned_code={code} AND tenant_id IS NULL")
+        
+        existing = query.limit(1).execute()
+        print(f"   Duplicate check result: {existing.data if hasattr(existing, 'data') else 'No data'}")
+        
+        # If already scanned, don't count it again
+        if existing.data and len(existing.data) > 0:
+            logger.info(f"⏭️ Skipping duplicate scan: user {user_id} already scanned code {code} (found {len(existing.data)} existing record(s))")
+            print(f"⏭️ DUPLICATE SCAN - NOT COUNTING: code={code}")
+            print(f"   Existing record: {existing.data[0]}")
+            return False
+        else:
+            logger.info(f"✅ New scan detected: user {user_id}, code {code} (no duplicates found)")
+            print(f"✅ NEW SCAN - WILL COUNT: code={code}")
+        
+        # This is a new scan - log it
+        # Note: scan_history table uses 'scanned_code' column, not 'code' or 'fnsku'
+        # The table does NOT have 'asin' column - only: scanned_code, scanned_at, user_id, tenant_id, etc.
+        scan_insert = {
+            'user_id': user_id,
+            'scanned_code': code,
+            'scanned_at': datetime.now(timezone.utc).isoformat()
+        }
+        if tenant_id:
+            scan_insert['tenant_id'] = tenant_id
+        
+        print(f"📝 Inserting scan: {scan_insert}")
+        result = supabase_client.table('scan_history').insert(scan_insert).execute()
+        
+        logger.info(f"✅ Logged new scan to scan_history: user {user_id}, code {code}, tenant_id={tenant_id}")
+        logger.info(f"   Insert result: {result.data if hasattr(result, 'data') else 'No data'}")
+        print(f"✅✅✅ SCAN LOGGED: user={user_id}, code={code}, tenant={tenant_id}")
+        print(f"   Insert result: {result.data if hasattr(result, 'data') else 'No data'}")
+        
+        # Small delay to ensure database commit completes before counting
+        import time
+        time.sleep(0.3)  # 300ms delay to allow DB commit to complete
+        
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to log scan to scan_history: {e}")
+        import traceback
+        logger.error(f"   Traceback: {traceback.format_exc()}")
+        print(f"❌❌❌ SCAN LOG FAILED: {e}")
+        print(f"   Traceback: {traceback.format_exc()}")
+        return False
+
 if not STRIPE_API_KEY or not STRIPE_WEBHOOK_SECRET:
     logger.error("Stripe API Key or Webhook Secret not found in .env. Stripe integration will fail.")
     logger.error(f"STRIPE_API_KEY: {'SET' if STRIPE_API_KEY else 'MISSING'} (length: {len(STRIPE_API_KEY) if STRIPE_API_KEY else 0})")
@@ -949,6 +1045,13 @@ def external_lookup():
                         'updated_at': now
                     }).eq('id', cached['id']).execute()
                     
+                    # Log scan to history (even if cached, it counts toward trial limit)
+                    # But only count unique scans per user
+                    # Note: This endpoint might not have user_id, so check first
+                    user_id_from_req, tenant_id_from_req = get_ids_from_request()
+                    if user_id_from_req:
+                        log_scan_to_history(user_id_from_req, tenant_id_from_req, fnsku, cached.get('asin', ''), supabase_admin)
+                    
                     # Return cached data
                     product_data = {
                         "success": True,
@@ -1403,8 +1506,80 @@ def scan_product():
                         
                         # If cache is fresh (<30 days), return immediately
                         if age_days < 30:
-                            logger.info(f"✅ Returning cached UPC data for {code} (age: {age_days} days)")
-                            return jsonify({
+                            # Log scan to history (even if cached, it counts toward trial limit)
+                            # But only count unique scans per user
+                            print(f"\n🔵🔵🔵 ABOUT TO CALL log_scan_to_history (UPC)")
+                            print(f"   user_id: {user_id}")
+                            print(f"   tenant_id: {tenant_id}")
+                            print(f"   code: {code}")
+                            print(f"   supabase_admin: {supabase_admin is not None}")
+                            logger.info(f"🔵 Calling log_scan_to_history (UPC): user_id={user_id}, tenant_id={tenant_id}, code={code}")
+                            scan_was_logged = log_scan_to_history(user_id, tenant_id, code, cached.get('asin', ''), supabase_admin)
+                            print(f"🔵🔵🔵 log_scan_to_history RETURNED (UPC): {scan_was_logged}")
+                            logger.info(f"🔵 log_scan_to_history returned (UPC): {scan_was_logged}")
+                            
+                            # Get updated scan count for response (always calculate, not just if logged)
+                            scan_count_data = None
+                            if supabase_admin and user_id:
+                                try:
+                                    is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
+                                    if not is_paid:
+                                        # Retry count query up to 5 times if scan was just logged (to account for DB commit delay)
+                                        used_scans = 0
+                                        max_retries = 5 if scan_was_logged else 1
+                                        print(f"\n📊 CALCULATING SCAN COUNT (UPC cached, was_logged={scan_was_logged}, max_retries={max_retries})")
+                                        print(f"   user_id: {user_id}")
+                                        print(f"   tenant_id: {tenant_id}")
+                                        
+                                        for attempt in range(max_retries):
+                                            print(f"   Attempt {attempt + 1}/{max_retries}...")
+                                            if tenant_id:
+                                                print(f"   Query: tenant_id={tenant_id}")
+                                                scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                                    .eq('tenant_id', tenant_id).execute()
+                                            else:
+                                                # Match the insert logic: if no tenant_id, count by user_id only
+                                                print(f"   Query: user_id={user_id} (no tenant_id)")
+                                                scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                                    .eq('user_id', user_id).execute()
+                                            
+                                            used_scans = getattr(scan_res, 'count', None)
+                                            if used_scans is None:
+                                                used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
+                                            
+                                            print(f"   Count result: {used_scans} scans found")
+                                            if hasattr(scan_res, 'data') and scan_res.data:
+                                                print(f"   Sample records: {scan_res.data[:3]}")
+                                            
+                                            # If scan was logged and count is still 0, wait a bit and retry
+                                            if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
+                                                import time
+                                                wait_time = 0.3 * (attempt + 1)  # Increasing wait time
+                                                print(f"   ⏳ Waiting {wait_time}s before retry...")
+                                                time.sleep(wait_time)
+                                                logger.info(f"   Retry {attempt + 1}/{max_retries}: count was 0, retrying...")
+                                            else:
+                                                break
+                                        
+                                        logger.info(f"📊 UPC cached scan count: used={used_scans}, was_logged={scan_was_logged}")
+                                        print(f"📊📊📊 FINAL SCAN COUNT (UPC): {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
+                                        scan_count_data = {
+                                            'used': used_scans,
+                                            'limit': FREE_TRIAL_SCAN_LIMIT,
+                                            'remaining': max(0, FREE_TRIAL_SCAN_LIMIT - used_scans),
+                                            'is_paid': False
+                                        }
+                                    else:
+                                        scan_count_data = {
+                                            'used': 0,
+                                            'limit': None,
+                                            'remaining': None,
+                                            'is_paid': True
+                                        }
+                                except Exception as count_error:
+                                    logger.error(f"❌ Failed to get scan count for cached UPC response: {count_error}")
+                            
+                            response_data = {
                                 "success": True,
                                 "fnsku": cached.get('fnsku', ''),
                                 "asin": cached.get('asin', ''),
@@ -1421,7 +1596,22 @@ def scan_product():
                                 "cached": True,
                                 "code_type": "UPC",
                                 "raw": cached
-                            })
+                            }
+                            # Always include scan_count, even if calculation failed (use fallback)
+                            if scan_count_data:
+                                response_data['scan_count'] = scan_count_data
+                            else:
+                                # Fallback: return basic count info even if calculation failed
+                                logger.warning(f"⚠️ Scan count calculation failed for UPC, using fallback")
+                                response_data['scan_count'] = {
+                                    'used': 0,
+                                    'limit': FREE_TRIAL_SCAN_LIMIT,
+                                    'remaining': FREE_TRIAL_SCAN_LIMIT,
+                                    'is_paid': False
+                                }
+                            
+                            logger.info(f"✅ Returning cached UPC data for {code} (age: {age_days} days)")
+                            return jsonify(response_data)
                 except Exception as cache_error:
                     logger.warning(f"Error checking UPC cache: {cache_error}")
             
@@ -1511,12 +1701,17 @@ def scan_product():
         # Check by FNSKU for FNSKU codes, by UPC for UPC codes
         if supabase_admin:
             try:
+                logger.info(f"🔍 Checking cache for {code_type} code: {code}")
                 if code_type == 'UPC':
                     cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('upc', code).maybe_single().execute()
+                    logger.info(f"   Cache query: looking for UPC={code}")
                 else:
                     cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('fnsku', code).maybe_single().execute()
+                    logger.info(f"   Cache query: looking for FNSKU={code}")
                 
                 if cache_result.data:
+                    logger.info(f"✅✅✅ FOUND IN CACHE! Code: {code}, ASIN: {cache_result.data.get('asin', 'N/A')}")
+                    print(f"✅✅✅ FOUND IN CACHE! Code: {code}")
                     cached = cache_result.data
                     from datetime import timedelta
                     now = datetime.now(timezone.utc)
@@ -1530,10 +1725,84 @@ def scan_product():
                         'lookup_count': current_count + 1
                     }).eq('id', cached['id']).execute()
                     
-                    # If cache is fresh (<30 days) and has complete data, return immediately
-                    if age_days < 30 and cached.get('image_url') and cached.get('product_name'):
-                        logger.info(f"✅ Returning cached data for FNSKU {code} (age: {age_days} days)")
-                        return jsonify({
+                    # If cache is fresh (<30 days), return immediately (even if some fields are missing)
+                    # We'll return cached data if it exists, regardless of completeness
+                    if age_days < 30:
+                        logger.info(f"✅ Found cached data for {code_type} {code} (age: {age_days} days)")
+                        # Log scan to history (even if cached, it counts toward trial limit)
+                        # But only count unique scans per user
+                        print(f"\n🔵🔵🔵 ABOUT TO CALL log_scan_to_history")
+                        print(f"   user_id: {user_id}")
+                        print(f"   tenant_id: {tenant_id}")
+                        print(f"   code: {code}")
+                        print(f"   supabase_admin: {supabase_admin is not None}")
+                        logger.info(f"🔵 Calling log_scan_to_history: user_id={user_id}, tenant_id={tenant_id}, code={code}")
+                        scan_was_logged = log_scan_to_history(user_id, tenant_id, code, cached.get('asin', ''), supabase_admin)
+                        print(f"🔵🔵🔵 log_scan_to_history RETURNED: {scan_was_logged}")
+                        logger.info(f"🔵 log_scan_to_history returned: {scan_was_logged}")
+                        
+                        # Get updated scan count for response (always calculate, not just if logged)
+                        scan_count_data = None
+                        if supabase_admin and user_id:
+                            try:
+                                is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
+                                if not is_paid:
+                                    # Retry count query up to 5 times if scan was just logged (to account for DB commit delay)
+                                    used_scans = 0
+                                    max_retries = 5 if scan_was_logged else 1
+                                    print(f"\n📊 CALCULATING SCAN COUNT (was_logged={scan_was_logged}, max_retries={max_retries})")
+                                    print(f"   user_id: {user_id}")
+                                    print(f"   tenant_id: {tenant_id}")
+                                    
+                                    for attempt in range(max_retries):
+                                        print(f"   Attempt {attempt + 1}/{max_retries}...")
+                                        if tenant_id:
+                                            print(f"   Query: tenant_id={tenant_id}")
+                                            scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                                .eq('tenant_id', tenant_id).execute()
+                                        else:
+                                            # Match the insert logic: if no tenant_id, count by user_id only
+                                            print(f"   Query: user_id={user_id} (no tenant_id)")
+                                            scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                                .eq('user_id', user_id).execute()
+                                        
+                                        used_scans = getattr(scan_res, 'count', None)
+                                        if used_scans is None:
+                                            used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
+                                        
+                                        print(f"   Count result: {used_scans} scans found")
+                                        if hasattr(scan_res, 'data') and scan_res.data:
+                                            print(f"   Sample records: {scan_res.data[:3]}")
+                                        
+                                        # If scan was logged and count is still 0, wait a bit and retry
+                                        if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
+                                            import time
+                                            wait_time = 0.3 * (attempt + 1)  # Increasing wait time
+                                            print(f"   ⏳ Waiting {wait_time}s before retry...")
+                                            time.sleep(wait_time)
+                                            logger.info(f"   Retry {attempt + 1}/{max_retries}: count was 0, retrying...")
+                                        else:
+                                            break
+                                    
+                                    logger.info(f"📊 FNSKU cached scan count: used={used_scans}, was_logged={scan_was_logged}, limit={FREE_TRIAL_SCAN_LIMIT}")
+                                    print(f"📊📊📊 FINAL SCAN COUNT: {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
+                                    scan_count_data = {
+                                        'used': used_scans,
+                                        'limit': FREE_TRIAL_SCAN_LIMIT,
+                                        'remaining': max(0, FREE_TRIAL_SCAN_LIMIT - used_scans),
+                                        'is_paid': False
+                                    }
+                                else:
+                                    scan_count_data = {
+                                        'used': 0,
+                                        'limit': None,
+                                        'remaining': None,
+                                        'is_paid': True
+                                    }
+                            except Exception as count_error:
+                                logger.error(f"❌ Failed to get scan count for cached FNSKU response: {count_error}")
+                        
+                        response_data = {
                             "success": True,
                             "fnsku": cached.get('fnsku', code),
                             "asin": cached.get('asin', ''),
@@ -1549,12 +1818,39 @@ def scan_product():
                             "cost_status": "no_charge",
                             "cached": True,
                             "raw": cached
-                        })
+                        }
+                        # Always include scan_count, even if calculation failed (use fallback)
+                        if scan_count_data:
+                            response_data['scan_count'] = scan_count_data
+                            logger.info(f"✅ Scan count included in response: {scan_count_data}")
+                            print(f"✅✅✅ SCAN COUNT IN RESPONSE: {scan_count_data.get('used', 'N/A')}/{scan_count_data.get('limit', 'N/A')}")
+                        else:
+                            # Fallback: return basic count info even if calculation failed
+                            logger.warning(f"⚠️ Scan count calculation failed, using fallback")
+                            response_data['scan_count'] = {
+                                'used': 0,
+                                'limit': FREE_TRIAL_SCAN_LIMIT,
+                                'remaining': FREE_TRIAL_SCAN_LIMIT,
+                                'is_paid': False
+                            }
+                        
+                        logger.info(f"✅ Returning cached data for {code_type} {code} (age: {age_days} days)")
+                        logger.info(f"   Response includes scan_count: {response_data.get('scan_count', 'MISSING')}")
+                        print(f"✅ Returning cached data - NO API CHARGE")
+                        print(f"📊 Final scan_count in response: {response_data.get('scan_count', {})}")
+                        return jsonify(response_data)
+                else:
+                    logger.info(f"❌ NOT FOUND IN CACHE: {code_type} {code}")
+                    print(f"❌ NOT FOUND IN CACHE: {code}")
             except Exception as cache_error:
-                logger.warning(f"Error checking cache: {cache_error}")
+                logger.error(f"❌ Error checking cache: {cache_error}")
+                import traceback
+                logger.error(f"   Traceback: {traceback.format_exc()}")
+                print(f"❌ Cache check error: {cache_error}")
         
         # STEP 2: Not in cache or cache is stale - call FNSKU API with polling
-        logger.info(f"💰 FNSKU {code} not in cache - calling FNSKU API (will be charged)")
+        logger.info(f"💰 {code_type} {code} not in cache - calling API (will be charged)")
+        print(f"💰💰💰 CALLING EXTERNAL API - THIS WILL BE CHARGED")
         BASE_URL = "https://ato.fnskutoasin.com"
         headers = {
             'api-key': FNSKU_API_KEY,
@@ -1989,23 +2285,11 @@ def scan_product():
         
         # Log scan event for Stripe usage tracking and local analytics
         # Also record the scan in scan_history so free trial limits and reporting work.
+        # Only count unique scans per user (don't count duplicates)
+        scan_was_logged = False
         if supabase_admin and user_id:
-            try:
-                # Insert into scan_history table (tenant-scoped usage)
-                scan_insert = {
-                    'user_id': user_id,
-                    'code': code,
-                    'asin': asin,
-                    'fnsku': code,
-                    'scanned_at': datetime.now(timezone.utc).isoformat()
-                }
-                # Attach tenant if we know it
-                if tenant_id:
-                    scan_insert['tenant_id'] = tenant_id
-
-                supabase_admin.table('scan_history').insert(scan_insert).execute()
-            except Exception as history_error:
-                logger.warning(f"Failed to insert scan into scan_history: {history_error}")
+            # Use the helper function which checks for duplicates
+            scan_was_logged = log_scan_to_history(user_id, tenant_id, code, asin, supabase_admin)
 
             try:
                 # Legacy api_scan_logs for detailed billing/debug
@@ -2019,6 +2303,72 @@ def scan_product():
                 }).execute()
             except Exception as log_error:
                 logger.warning(f"Failed to log scan event in api_scan_logs: {log_error}")
+        
+        # Get updated scan count to include in response (for free trial display)
+        # Always calculate scan count, even if scan wasn't logged (to show current count)
+        if supabase_admin and user_id:
+            try:
+                is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
+                if not is_paid:
+                    # Count scans for free trial users
+                    # Retry count query up to 5 times if scan was just logged (to account for DB commit delay)
+                    used_scans = 0
+                    max_retries = 5 if scan_was_logged else 1
+                    print(f"\n📊 CALCULATING SCAN COUNT (non-cached, was_logged={scan_was_logged}, max_retries={max_retries})")
+                    print(f"   user_id: {user_id}")
+                    print(f"   tenant_id: {tenant_id}")
+                    
+                    for attempt in range(max_retries):
+                        print(f"   Attempt {attempt + 1}/{max_retries}...")
+                        if tenant_id:
+                            print(f"   Query: tenant_id={tenant_id}")
+                            scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                .eq('tenant_id', tenant_id).execute()
+                        else:
+                            # Match the insert logic: if no tenant_id, count by user_id only
+                            print(f"   Query: user_id={user_id} (no tenant_id)")
+                            scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                .eq('user_id', user_id).execute()
+                        
+                        used_scans = getattr(scan_res, 'count', None)
+                        if used_scans is None:
+                            used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
+                        
+                        print(f"   Count result: {used_scans} scans found")
+                        if hasattr(scan_res, 'data') and scan_res.data:
+                            print(f"   Sample records: {scan_res.data[:3]}")
+                        
+                        # If scan was logged and count is still 0, wait a bit and retry
+                        if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
+                            import time
+                            wait_time = 0.3 * (attempt + 1)  # Increasing wait time
+                            print(f"   ⏳ Waiting {wait_time}s before retry...")
+                            time.sleep(wait_time)
+                            logger.info(f"   Retry {attempt + 1}/{max_retries}: count was 0, retrying...")
+                        else:
+                            break
+                    
+                    logger.info(f"📊 Scan count calculated: used={used_scans}, limit={FREE_TRIAL_SCAN_LIMIT}, "
+                               f"was_logged={scan_was_logged}, user_id={user_id}, tenant_id={tenant_id}")
+                    print(f"📊📊📊 FINAL SCAN COUNT (non-cached): {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
+                    
+                    response_data['scan_count'] = {
+                        'used': used_scans,
+                        'limit': FREE_TRIAL_SCAN_LIMIT,
+                        'remaining': max(0, FREE_TRIAL_SCAN_LIMIT - used_scans),
+                        'is_paid': False
+                    }
+                else:
+                    response_data['scan_count'] = {
+                        'used': 0,
+                        'limit': None,
+                        'remaining': None,
+                        'is_paid': True
+                    }
+            except Exception as count_error:
+                logger.error(f"❌ Failed to get scan count for response: {count_error}")
+                import traceback
+                logger.error(f"   Traceback: {traceback.format_exc()}")
         
         # Log final response status
         print("\n" + "=" * 60)

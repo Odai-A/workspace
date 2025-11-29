@@ -377,294 +377,125 @@ const Scanner = () => {
     }
 
     try {
-      // First try the local database (Supabase)
-      let productFromDb = await dbProductLookupService.getProductByFnsku(code);
-
-      if (!productFromDb) {
-        console.log(`Product not found by FNSKU (${code}) in DB/Cache, trying as LPN in DB...`);
-        // getProductByLpn only checks manifest_data, so its result always needs mapping if found.
-        const lpnData = await dbProductLookupService.getProductByLpn(code);
-        if (lpnData) {
-          productFromDb = mapSupabaseProductToDisplay(lpnData); // mapSupabaseProductToDisplay sets source to 'local_database'
-        }
-      }
-
-      if (productFromDb) {
-        let displayProduct;
-        // If productFromDb came from getProductByFnsku, it might already be mapped from api_cache or be raw from manifest_data
-        if (productFromDb.source === 'api_cache' || productFromDb.source === 'fnsku_cache') {
-          console.log('✅ Using directly from API Cache source:', productFromDb);
-          displayProduct = productFromDb; // Already mapped by apiCacheService.mapCacheToDisplay
-          toast.success("✅ Found in API cache - No API charge!", {
-            icon: "💚"
-          });
-        } else if (productFromDb.rawSupabase) { // It came from manifest_data via getProductByFnsku's LPN or FNSKU check, but was mapped by mapSupabaseProductToDisplay
-          console.log('✅ Mapped from local_database (manifest_data via LPN/FNSKU specific mapping pathway):', productFromDb);
-          displayProduct = productFromDb; // Already mapped by mapSupabaseProductToDisplay
-          toast.success("✅ Found in local database - No API charge!", {
-            icon: "💚"
-          });
-        } else {
-          // This case implies productFromDb is raw from manifest_data (e.g., direct return from getProductByFnsku before mapping)
-          console.log('📦 Mapping raw data from manifest_data:', productFromDb);
-          displayProduct = mapSupabaseProductToDisplay(productFromDb);
-          // mapSupabaseProductToDisplay sets source to 'local_database' and cost_status to 'no_charge'
-          toast.success("✅ Found in local database - No API charge!", {
-            icon: "💚"
-          });
+      // Always call backend scan endpoint to ensure scan is logged and counted
+      // Backend will check cache first and return cached data quickly if available
+      // This ensures all scans are properly logged to scan_history for trial tracking
+      console.log(`Calling backend /api/scan to log scan and get updated count for code: ${code}`);
+      toast.info("🔍 Scanning product...", {
+        autoClose: 2000
+      });
+      
+      try {
+        // Get backend URL from environment
+        let backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || 'http://localhost:5000';
+        
+        // Remove trailing /api if present (VITE_API_URL might include it)
+        if (backendUrl.endsWith('/api')) {
+          backendUrl = backendUrl.replace('/api', '');
         }
         
-        // Even if found in local DB, check cache FIRST before calling Rainforest API
-        if (displayProduct && displayProduct.asin && displayProduct.asin.trim() !== '') {
-          // STEP 1: Check api_lookup_cache FIRST before calling Rainforest API
-          let imageFoundInCache = false;
-          
-          try {
-            const cacheKey = displayProduct.fnsku || displayProduct.sku || displayProduct.asin;
-            console.log('🔍 [LOCAL DB] Checking api_lookup_cache for image, key:', cacheKey);
-            
-            const cachedData = await apiCacheService.getCachedLookup(cacheKey);
-            
-            if (cachedData && cachedData.image_url) {
-              console.log('✅ [LOCAL DB] Found image in cache - using cached image (NO Rainforest API charge!)');
-              displayProduct.image_url = cachedData.image_url;
-              
-              // Also use other cached data
-              if (cachedData.product_name && cachedData.product_name !== `Product ${cacheKey}`) {
-                displayProduct.name = cachedData.product_name;
-              }
-              if (cachedData.price) {
-                displayProduct.price = cachedData.price;
-              }
-              
-              imageFoundInCache = true;
-              toast.success("✅ Using cached image - no API charge!", { autoClose: 2000 });
-              handleProductFound(displayProduct, code);
-              setLoading(false);
-              return; // Exit early - no need to call Rainforest
-            } else {
-              console.log('❌ [LOCAL DB] No image in cache for key:', cacheKey);
-            }
-          } catch (cacheCheckError) {
-            console.warn('⚠️ [LOCAL DB] Error checking cache:', cacheCheckError);
-            // Continue to Rainforest API if cache check fails
-          }
-          
-          // STEP 2: Only call Rainforest API if image NOT in cache
-          if (!imageFoundInCache && !displayProduct.image_url) {
-            console.log('📦 [LOCAL DB] Image not in cache - fetching from Rainforest API (will be charged)');
-            toast.info("📦 Fetching product image from Rainforest API...", { autoClose: 2000 });
-            
-            try {
-              const rainforestData = await fetchProductDataFromRainforest(displayProduct.asin);
-              
-              if (rainforestData) {
-                const enhancedProduct = {
-                  ...displayProduct,
-                  name: rainforestData.title || displayProduct.name || 'Product',
-                  image_url: rainforestData.image || displayProduct.image_url || '',
-                  price: rainforestData.price || displayProduct.price,
-                  rating: rainforestData.rating || displayProduct.rating || null,
-                  reviews_count: rainforestData.reviews_count || displayProduct.reviews_count || null,
-                  brand: rainforestData.brand || displayProduct.brand || '',
-                  category: rainforestData.category || displayProduct.category || '',
-                  description: rainforestData.description || displayProduct.description || ''
-                };
-                
-                console.log('✅ Enhanced product data from Rainforest API:', enhancedProduct);
-                
-                // Save Rainforest data to cache for future use
-                try {
-                  const fnskuToSave = enhancedProduct.fnsku || enhancedProduct.sku || enhancedProduct.asin;
-                  
-                  if (!fnskuToSave || !enhancedProduct.asin) {
-                    console.error('❌ Cannot save to cache: Missing fnsku or asin', {
-                      fnsku: enhancedProduct.fnsku,
-                      sku: enhancedProduct.sku,
-                      asin: enhancedProduct.asin
-                    });
-                  } else {
-                    const cacheData = {
-                      fnsku: fnskuToSave,
-                      asin: enhancedProduct.asin,
-                      name: enhancedProduct.name,
-                      description: enhancedProduct.description,
-                      price: enhancedProduct.price,
-                      category: enhancedProduct.category,
-                      image_url: enhancedProduct.image_url,
-                      source: 'rainforest_api'
-                    };
-                    
-                    console.log('💾 Saving Rainforest data to api_lookup_cache:', cacheData);
-                    const savedToCache = await apiCacheService.saveLookup(cacheData);
-                    
-                    // Update manifest_data in background (non-blocking)
-                    if (savedToCache && enhancedProduct.image_url) {
-                      (async () => {
-                        try {
-                          const { supabase } = await import('../config/supabaseClient');
-                          const { data: manifestProduct } = await supabase
-                            .from('manifest_data')
-                            .select('id')
-                            .eq('Fn Sku', fnskuToSave)
-                            .maybeSingle();
-                          
-                          if (manifestProduct) {
-                            await supabase
-                              .from('manifest_data')
-                              .update({ image_url: enhancedProduct.image_url })
-                              .eq('id', manifestProduct.id);
-                          }
-                        } catch (err) {
-                          // Silent fail - not critical
-                        }
-                      })();
-                    }
-                    
-                    if (savedToCache) {
-                      console.log('✅ Saved Rainforest API data to cache - future lookups will be free!', savedToCache);
-                      toast.success("💾 Product data saved - future scans will be FREE! 🎉", { autoClose: 3000 });
-                    } else {
-                      console.error('❌ Failed to save to cache - saveLookup returned null');
-                      toast.warn("⚠️ Could not save image to cache. Next scan may charge again.", { autoClose: 4000 });
-                    }
-                  }
-                } catch (cacheError) {
-                  console.error('❌ Error saving Rainforest data:', cacheError);
-                  console.error('Error details:', {
-                    message: cacheError.message,
-                    code: cacheError.code,
-                    details: cacheError.details,
-                    hint: cacheError.hint
-                  });
-                  toast.error("❌ Failed to save to cache. Check console for details.", { autoClose: 5000 });
-                }
-                
-                handleProductFound(enhancedProduct, code);
-              } else {
-                handleProductFound(displayProduct, code);
-              }
-            } catch (error) {
-              console.error("Error fetching Rainforest API data:", error);
-              handleProductFound(displayProduct, code);
-            }
-          } else {
-            // Already has complete data, no need for Rainforest
-            handleProductFound(displayProduct, code);
-          }
-        } else {
-          // No ASIN, can't enhance
-          handleProductFound(displayProduct, code);
-        }
+        const scanUrl = `${backendUrl}/api/scan`;
         
-        // Removed scan history logging to avoid database issues  
-        // if (displayProduct) {
-        //   console.log("[Scanner.jsx] Attempting to log scan event (from DB/Cache). Code:", code, "Product Details:", displayProduct);
-        //   const logResult = await dbProductLookupService.logScanEvent(code, displayProduct);
-        //   console.log("[Scanner.jsx] Scan event log result (from DB/Cache):", logResult);
-        // }
-      } else {
-        // Not found locally - call unified backend scan endpoint
-        console.log(`Product not found in local DB/Cache by FNSKU or LPN (${code}), calling backend /api/scan...`);
-        toast.info("🔍 Scanning product...", {
-          autoClose: 2000
+        console.log("🚀 Calling unified scan endpoint:", scanUrl);
+        const response = await axios.post(scanUrl, {
+          code: code,
+          user_id: userId
+        }, {
+          timeout: 60000 // 60 seconds timeout
         });
         
-        try {
-          // Get backend URL from environment
-          let backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || 'http://localhost:5000';
+        const apiResult = response.data;
+        console.log("🚀 Backend scan response:", apiResult);
+        
+        if (apiResult && apiResult.success) {
+          // Map backend response to frontend product format
+          const displayableProduct = {
+            fnsku: apiResult.fnsku || code,
+            asin: apiResult.asin || '',
+            name: apiResult.title || '',
+            image_url: apiResult.image || '',
+            price: apiResult.price || '',
+            brand: apiResult.brand || '',
+            category: apiResult.category || '',
+            description: apiResult.description || '',
+            upc: apiResult.upc || '',
+            amazon_url: apiResult.amazon_url || '',
+            source: apiResult.source || 'api',
+            cost_status: apiResult.cost_status || (apiResult.cached ? 'no_charge' : 'charged')
+          };
           
-          // Remove trailing /api if present (VITE_API_URL might include it)
-          if (backendUrl.endsWith('/api')) {
-            backendUrl = backendUrl.replace('/api', '');
+          // Show appropriate toast based on source
+          if (apiResult.cached) {
+            toast.success("✅ Found in cache - No API charge!", { icon: "💚" });
+          } else if (apiResult.source === 'api') {
+            toast.success("✅ Product scanned successfully!", { icon: "💚" });
           }
           
-          const scanUrl = `${backendUrl}/api/scan`;
+          // Set product info - backend already handled everything!
+          handleProductFound(displayableProduct, code);
           
-          console.log("🚀 Calling unified scan endpoint:", scanUrl);
-          const response = await axios.post(scanUrl, {
-            code: code,
-            user_id: userId
-          }, {
-            timeout: 60000 // 60 seconds timeout (15 polls * 2s + Rainforest API + buffer)
-          });
-          
-          const apiResult = response.data;
-          console.log("🚀 Backend scan response:", apiResult);
-          
-          if (apiResult && apiResult.success) {
-            // Map backend response to frontend product format
-            const displayableProduct = {
-              fnsku: apiResult.fnsku || code,
-              asin: apiResult.asin || '',
-              name: apiResult.title || '',
-              image_url: apiResult.image || '',
-              price: apiResult.price || '',
-              brand: apiResult.brand || '',
-              category: apiResult.category || '',
-              description: apiResult.description || '',
-              upc: apiResult.upc || '',
-              amazon_url: apiResult.amazon_url || '',
-              source: apiResult.source || 'api',
-              cost_status: apiResult.cost_status || (apiResult.cached ? 'no_charge' : 'charged')
-            };
-            
-            // Show appropriate toast based on source
-            if (apiResult.cached) {
-              toast.success("✅ Found in cache - No API charge!", { icon: "💚" });
-            } else if (apiResult.source === 'api') {
-              toast.success("✅ Product scanned successfully!", { icon: "💚" });
-            }
-            
-            // Set product info - backend already handled everything!
-            handleProductFound(displayableProduct, code);
-            
-            // Refresh scan count after successful scan
-            fetchScanCount();
-          } else {
-            // Handle error response
-            const errorMsg = apiResult?.message || apiResult?.error || "Failed to scan product";
-            toast.error(`❌ ${errorMsg}`, { autoClose: 5000 });
-            console.error("Backend scan error:", apiResult);
-          }
-        } catch (error) {
-          console.error("Error calling backend scan endpoint:", error);
-          if (error.response) {
-            const status = error.response.status;
-            const data = error.response.data || {};
-
-            // Handle free-trial limit reached
-            if (data.error === 'trial_limit_reached' || status === 402) {
-              const used = data.used_scans ?? 'all';
-              const limit = data.limit ?? 50;
-              toast.error(
-                `🚫 Free trial limit reached: ${used}/${limit} scans used. Redirecting to upgrade...`,
-                { autoClose: 3000 }
-              );
-              // Refresh scan count to show updated count
-              fetchScanCount();
-              // Redirect to pricing page after a short delay to let the toast show
-              setTimeout(() => {
-                navigate('/pricing?upgrade=required', { 
-                  state: { 
-                    message: 'Your free trial of 50 scans has been used. Please upgrade to continue scanning.',
-                    usedScans: used,
-                    limit: limit
-                  } 
+            // Update scan count from response if available, otherwise fetch it
+            console.log("📊 Scan response scan_count:", apiResult.scan_count);
+            if (apiResult.scan_count) {
+                console.log("✅ Updating scan count from response:", apiResult.scan_count);
+                setScanCount({
+                  used: apiResult.scan_count.used || 0,
+                  limit: apiResult.scan_count.limit || null,
+                  remaining: apiResult.scan_count.remaining !== null && apiResult.scan_count.remaining !== undefined 
+                    ? apiResult.scan_count.remaining 
+                    : (apiResult.scan_count.limit ? Math.max(0, apiResult.scan_count.limit - (apiResult.scan_count.used || 0)) : null),
+                  isPaid: apiResult.scan_count.is_paid || false
                 });
-              }, 1500);
             } else {
-              const errorMsg = data.message || data.error || "Backend error";
-              toast.error(`❌ ${errorMsg}`, { autoClose: 5000 });
+                console.log("⚠️ No scan_count in response, fetching...");
+                // Fallback: fetch scan count after a small delay to ensure DB has updated
+                setTimeout(() => {
+                  fetchScanCount();
+                }, 500);
             }
-          } else if (error.code === 'ECONNABORTED') {
-            toast.error("❌ Request timeout - the scan is taking longer than expected", { autoClose: 5000 });
-          } else {
-            toast.error("❌ Failed to connect to backend. Please ensure the backend server is running.", { autoClose: 5000 });
-          }
-        } finally {
-          setLoading(false);
+        } else {
+          // Handle error response
+          const errorMsg = apiResult?.message || apiResult?.error || "Failed to scan product";
+          toast.error(`❌ ${errorMsg}`, { autoClose: 5000 });
+          console.error("Backend scan error:", apiResult);
         }
+      } catch (error) {
+        console.error("Error calling backend scan endpoint:", error);
+        if (error.response) {
+          const status = error.response.status;
+          const data = error.response.data || {};
+
+          // Handle free-trial limit reached
+          if (data.error === 'trial_limit_reached' || status === 402) {
+            const used = data.used_scans ?? 'all';
+            const limit = data.limit ?? 50;
+            toast.error(
+              `🚫 Free trial limit reached: ${used}/${limit} scans used. Redirecting to upgrade...`,
+              { autoClose: 3000 }
+            );
+            // Refresh scan count to show updated count
+            fetchScanCount();
+            // Redirect to pricing page after a short delay to let the toast show
+            setTimeout(() => {
+              navigate('/pricing?upgrade=required', { 
+                state: { 
+                  message: 'Your free trial of 50 scans has been used. Please upgrade to continue scanning.',
+                  usedScans: used,
+                  limit: limit
+                } 
+              });
+            }, 1500);
+          } else {
+            const errorMsg = data.message || data.error || "Backend error";
+            toast.error(`❌ ${errorMsg}`, { autoClose: 5000 });
+          }
+        } else if (error.code === 'ECONNABORTED') {
+          toast.error("❌ Request timeout - the scan is taking longer than expected", { autoClose: 5000 });
+        } else {
+          toast.error("❌ Failed to connect to backend. Please ensure the backend server is running.", { autoClose: 5000 });
+        }
+      } finally {
+        setLoading(false);
       }
     } catch (error) {
       console.error("Error looking up product by code:", error);
