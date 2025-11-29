@@ -43,3 +43,4 @@ export const calculateSellingPrice = (retailPrice, discountPercent = null) => {
   return retail * discountMultiplier;
 };
 
+

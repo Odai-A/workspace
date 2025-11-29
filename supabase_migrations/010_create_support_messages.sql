@@ -51,3 +51,4 @@ BEFORE UPDATE ON support_messages
 FOR EACH ROW
 EXECUTE FUNCTION update_support_messages_updated_at();
 
+

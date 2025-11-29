@@ -70,3 +70,4 @@ END $$;
 -- Add a comment explaining that product_id is optional
 COMMENT ON COLUMN inventory.product_id IS 'Optional reference to manifest_data.id. Can be NULL if product is not in manifest_data.';
 
+
