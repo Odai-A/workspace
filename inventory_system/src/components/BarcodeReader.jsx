@@ -4,37 +4,51 @@ import PropTypes from 'prop-types';
 
 const BarcodeReader = ({ 
   onDetected, 
+  onCodeDetected, // Support both prop names for compatibility
   onError,
   active = false,
   constraints = {},
   className = '',
   showViewFinder = true
 }) => {
+  // Use onCodeDetected if provided, otherwise fall back to onDetected
+  const handleDetectedCallback = onCodeDetected || onDetected;
   const scannerRef = useRef(null);
   const [initialized, setInitialized] = useState(false);
 
-  // Default scanner configuration
+  // Default scanner configuration with high-quality camera settings
   const defaultConfig = {
     inputStream: {
       type: 'LiveStream',
       constraints: {
-        width: { ideal: 1280, min: 640 },
-        height: { ideal: 720, min: 480 },
+        // Higher resolution for better clarity
+        width: { ideal: 1920, min: 1280 },
+        height: { ideal: 1080, min: 720 },
         facingMode: 'environment', // Use back camera on mobile
         aspectRatio: { ideal: 16/9, min: 1, max: 2 },
+        // Focus settings for better clarity
+        focusMode: 'continuous', // Continuous autofocus
+        advanced: [
+          {
+            focusMode: 'continuous', // Keep focus continuous for sharp images
+            exposureMode: 'continuous',
+            whiteBalanceMode: 'continuous',
+            zoom: { ideal: 1.0 } // No zoom for full view
+          }
+        ],
         ...constraints
       },
       area: {
-        // Larger scanning area for better mobile detection
-        top: '15%',
-        right: '15%',
-        left: '15%',
-        bottom: '15%',
+        // Use full area for better scanning
+        top: '10%',
+        right: '10%',
+        left: '10%',
+        bottom: '10%',
       },
     },
     locator: {
-      patchSize: 'medium',
-      halfSample: true,
+      patchSize: 'large', // Larger patch for better detection
+      halfSample: false, // Don't half sample for better quality
     },
     numOfWorkers: Math.min(navigator.hardwareConcurrency || 2, 4), // Limit workers for mobile
     frequency: 10, // Scan frequency - good balance for mobile
@@ -109,8 +123,8 @@ const BarcodeReader = ({
       
       // Only report results with confidence above threshold
       if (confidence >= 65) {
-        if (onDetected) {
-          onDetected({
+        if (handleDetectedCallback) {
+          handleDetectedCallback({
             code,
             format,
             confidence,
@@ -118,7 +132,7 @@ const BarcodeReader = ({
         }
       }
     }
-  }, [onDetected]);
+  }, [handleDetectedCallback]);
 
   useEffect(() => {
     if (!scannerRef.current) {
@@ -151,6 +165,62 @@ const BarcodeReader = ({
           // Set up callbacks
           Quagga.onDetected(handleDetected);
           Quagga.onProcessed(handleProcessed);
+          
+          // Improve video quality after initialization
+          setTimeout(() => {
+            try {
+              const videoElement = scannerRef.current?.querySelector('video');
+              if (videoElement) {
+                // Set video quality attributes
+                videoElement.setAttribute('playsinline', 'true');
+                videoElement.setAttribute('autoplay', 'true');
+                videoElement.setAttribute('muted', 'true');
+                
+                // Try to access camera track for focus settings
+                if (videoElement.srcObject) {
+                  const stream = videoElement.srcObject;
+                  const tracks = stream.getVideoTracks();
+                  
+                  if (tracks.length > 0) {
+                    const track = tracks[0];
+                    const capabilities = track.getCapabilities();
+                    const settings = track.getSettings();
+                    
+                    // Apply focus mode if supported
+                    if (capabilities?.focusMode?.includes('continuous')) {
+                      track.applyConstraints({
+                        advanced: [{ focusMode: 'continuous' }]
+                      }).then(() => {
+                        console.log('✅ Continuous focus enabled');
+                      }).catch(err => {
+                        console.warn('Could not set continuous focus:', err);
+                      });
+                    }
+                    
+                    // Apply exposure mode if supported
+                    if (capabilities?.exposureMode?.includes('continuous')) {
+                      track.applyConstraints({
+                        advanced: [{ exposureMode: 'continuous' }]
+                      }).catch(err => {
+                        console.warn('Could not set exposure mode:', err);
+                      });
+                    }
+                    
+                    // Log current settings for debugging
+                    console.log('📹 Camera settings:', {
+                      width: settings.width,
+                      height: settings.height,
+                      frameRate: settings.frameRate,
+                      focusMode: settings.focusMode,
+                      exposureMode: settings.exposureMode
+                    });
+                  }
+                }
+              }
+            } catch (error) {
+              console.warn('Could not enhance video quality:', error);
+            }
+          }, 500); // Wait a bit for video to initialize
         });
       } catch (error) {
         console.error('Error initializing Quagga:', error);
@@ -189,9 +259,10 @@ const BarcodeReader = ({
         ref={scannerRef} 
         className="barcode-reader relative overflow-hidden rounded-xl shadow-2xl bg-black"
         style={{ 
-          minHeight: "400px",
-          maxHeight: "600px",
-          width: "100%"
+          minHeight: "500px",
+          maxHeight: "800px",
+          width: "100%",
+          aspectRatio: "16/9"
         }}
       >
         {/* Professional Viewfinder Overlay */}
@@ -253,6 +324,8 @@ const BarcodeReader = ({
               <li>Position the barcode within the green frame</li>
               <li>Keep the barcode flat and avoid glare or shadows</li>
               <li>Move closer if the barcode is too small</li>
+              <li>Allow the camera to focus - keep still for 1-2 seconds</li>
+              <li>Ensure the entire barcode is visible in the frame</li>
             </ul>
           </div>
         </div>
@@ -280,17 +353,44 @@ const BarcodeReader = ({
         /* Mobile optimizations */
         @media (max-width: 640px) {
           .barcode-reader {
-            min-height: 350px !important;
-            max-height: 500px !important;
+            min-height: 450px !important;
+            max-height: 600px !important;
           }
         }
         
-        /* Ensure video fills container */
+        /* Prevent blur and improve rendering */
+        .barcode-reader {
+          -webkit-font-smoothing: antialiased;
+          -moz-osx-font-smoothing: grayscale;
+          transform: translateZ(0);
+          -webkit-transform: translateZ(0);
+          backface-visibility: hidden;
+          -webkit-backface-visibility: hidden;
+        }
+        
+        /* Ensure video fills container with high quality */
         .barcode-reader video,
         .barcode-reader canvas {
           width: 100% !important;
           height: 100% !important;
-          object-fit: cover;
+          object-fit: contain !important; /* Show full image without cropping */
+          image-rendering: -webkit-optimize-contrast;
+          image-rendering: crisp-edges;
+          -webkit-transform: scale(1);
+          transform: scale(1);
+        }
+        
+        /* Improve video quality and sharpness */
+        .barcode-reader video {
+          filter: contrast(1.1) brightness(1.05) saturate(1.1);
+          -webkit-filter: contrast(1.1) brightness(1.05) saturate(1.1);
+        }
+        
+        /* Ensure canvas is sharp */
+        .barcode-reader canvas {
+          image-rendering: pixelated;
+          image-rendering: -moz-crisp-edges;
+          image-rendering: crisp-edges;
         }
       `}</style>
     </div>

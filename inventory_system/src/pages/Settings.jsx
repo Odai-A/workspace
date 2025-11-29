@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
-import { FiSave, FiBell, FiSun, FiMoon, FiCreditCard, FiArrowRight, FiUser, FiMail, FiLock, FiRefreshCw } from 'react-icons/fi';
+import { FiSave, FiBell, FiSun, FiMoon, FiCreditCard, FiArrowRight, FiUser, FiMail, FiLock, FiRefreshCw, FiMessageCircle, FiSend } from 'react-icons/fi';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { getSubscriptionStatus } from '../services/subscriptionService';
 import { supabase } from '../config/supabaseClient';
+import axios from 'axios';
 
 // Get API URL from environment
 const getApiUrl = () => {
@@ -56,12 +57,9 @@ const Settings = () => {
   const [subscriptionLoading, setSubscriptionLoading] = useState(true);
   const [isManagingSubscription, setIsManagingSubscription] = useState(false);
   
-  // User profile state
-  const [profileLoading, setProfileLoading] = useState(false);
+  // User profile state (read-only email display)
   const [profileData, setProfileData] = useState({
     email: '',
-    first_name: '',
-    last_name: '',
   });
   
   // App preferences - sync with actual DOM state
@@ -92,51 +90,27 @@ const Settings = () => {
     const saved = localStorage.getItem('activityUpdates');
     return saved ? saved === 'true' : false;
   });
+  
+  // Label printing settings
+  const [labelDiscountPercent, setLabelDiscountPercent] = useState(() => {
+    const saved = localStorage.getItem('labelDiscountPercent');
+    return saved ? parseFloat(saved) : 50; // Default 50% off
+  });
+  
+  // Contact support state
+  const [contactForm, setContactForm] = useState({
+    subject: '',
+    type: 'bug', // 'bug' or 'feature'
+    message: ''
+  });
+  const [isSubmittingContact, setIsSubmittingContact] = useState(false);
 
-  // Load user profile
+  // Load user profile (read-only email from auth user)
   useEffect(() => {
-    const loadUserProfile = async () => {
-      if (!user) return;
-
-      try {
-        const { data, error } = await supabase
-          .from('users')
-          .select('email, first_name, last_name')
-          .eq('id', user.id)
-          .single();
-
-        if (error && error.code !== 'PGRST116') { // PGRST116 = no rows returned
-          console.error('Error loading profile:', error);
-          // Fallback to auth user data
-          setProfileData({
-            email: user.email || '',
-            first_name: '',
-            last_name: '',
-          });
-        } else if (data) {
-          setProfileData({
-            email: data.email || user.email || '',
-            first_name: data.first_name || '',
-            last_name: data.last_name || '',
-          });
-        } else {
-          setProfileData({
-            email: user.email || '',
-            first_name: '',
-            last_name: '',
-          });
-        }
-      } catch (error) {
-        console.error('Error fetching profile:', error);
-        setProfileData({
-          email: user.email || '',
-          first_name: '',
-          last_name: '',
-        });
-      }
-    };
-
-    loadUserProfile();
+    if (!user) return;
+    setProfileData({
+      email: user.email || '',
+    });
   }, [user]);
 
   // Apply dark mode on mount and when it changes
@@ -209,98 +183,7 @@ const Settings = () => {
     }
   };
 
-  // Save user profile
-  const handleSaveProfile = async () => {
-    if (!user) {
-      toast.error('You must be logged in to update your profile');
-      return;
-    }
-
-    // Validate email is not empty
-    if (!profileData.email || !profileData.email.trim()) {
-      toast.error('Email is required');
-      return;
-    }
-
-    setProfileLoading(true);
-    try {
-      // First, check if profile exists
-      const { data: existingProfile, error: checkError } = await supabase
-        .from('users')
-        .select('id')
-        .eq('id', user.id)
-        .maybeSingle();
-
-      if (checkError && checkError.code !== 'PGRST116') {
-        throw checkError;
-      }
-
-      let error;
-      if (existingProfile) {
-        // Profile exists - update it
-        const { error: updateError } = await supabase
-          .from('users')
-          .update({
-            email: profileData.email.trim(),
-            first_name: profileData.first_name?.trim() || null,
-            last_name: profileData.last_name?.trim() || null,
-          })
-          .eq('id', user.id);
-
-        error = updateError;
-      } else {
-        // Profile doesn't exist - try to insert (may fail due to RLS, but worth trying)
-        // If this fails, the trigger should have created it, so we'll try update again
-        const { error: insertError } = await supabase
-          .from('users')
-          .insert({
-            id: user.id,
-            email: profileData.email.trim(),
-            first_name: profileData.first_name?.trim() || null,
-            last_name: profileData.last_name?.trim() || null,
-            role: 'employee' // Default role
-          });
-
-        // If insert fails due to RLS, try update (in case trigger created it in the meantime)
-        if (insertError && insertError.code === '42501') {
-          const { error: updateError } = await supabase
-            .from('users')
-            .update({
-              email: profileData.email.trim(),
-              first_name: profileData.first_name?.trim() || null,
-              last_name: profileData.last_name?.trim() || null,
-            })
-            .eq('id', user.id);
-
-          error = updateError;
-        } else {
-          error = insertError;
-        }
-      }
-
-      if (error) {
-        console.error('Profile save error:', error);
-        throw error;
-      }
-
-      toast.success('Profile updated successfully');
-    } catch (error) {
-      console.error('Error updating profile:', error);
-      const errorMessage = error?.message || 'Unknown error occurred';
-      const errorCode = error?.code;
-      
-      // Provide more specific error messages
-      if (errorCode === '42501') {
-        toast.error('Permission denied. Please contact an administrator to create your profile.');
-      } else if (errorMessage.includes('duplicate') || errorMessage.includes('unique')) {
-        toast.error('Email already in use. Please use a different email.');
-      } else {
-        toast.error(`Failed to update profile: ${errorMessage}`);
-      }
-    } finally {
-      setProfileLoading(false);
-    }
-  };
+  // No profile saving needed (first/last name disabled per user request)
 
   // Toggle dark mode
   const handleDarkModeToggle = () => {
@@ -418,7 +301,7 @@ const Settings = () => {
           </div>
         )}
 
-        {/* User Profile */}
+        {/* User Profile (read-only email) */}
         <div className="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden mb-6">
           <div className="p-6">
             <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4 flex items-center">
@@ -441,56 +324,8 @@ const Settings = () => {
                   />
                 </div>
                 <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  Email cannot be changed. Contact support if you need to update it.
+                  Email is managed by your login. Contact support if you need to change it.
                 </p>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    First Name
-                  </label>
-                  <input
-                    type="text"
-                    value={profileData.first_name}
-                    onChange={(e) => setProfileData({ ...profileData, first_name: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
-                    placeholder="Enter your first name"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                    Last Name
-                  </label>
-                  <input
-                    type="text"
-                    value={profileData.last_name}
-                    onChange={(e) => setProfileData({ ...profileData, last_name: e.target.value })}
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
-                    placeholder="Enter your last name"
-                  />
-                </div>
-              </div>
-
-              <div className="pt-2">
-                <button
-                  onClick={handleSaveProfile}
-                  disabled={profileLoading}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 flex items-center disabled:bg-gray-400 disabled:cursor-not-allowed"
-                >
-                  {profileLoading ? (
-                    <>
-                      <FiRefreshCw className="mr-2 animate-spin" />
-                      Saving...
-                    </>
-                  ) : (
-                    <>
-                      <FiSave className="mr-2" />
-                      Save Profile
-                    </>
-                  )}
-                </button>
               </div>
             </div>
           </div>
@@ -549,6 +384,55 @@ const Settings = () => {
           </div>
         </div>
         
+        {/* Label Printing Settings */}
+        <div className="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden mb-6">
+          <div className="p-6">
+            <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4 flex items-center">
+              <FiSave className="mr-2" />
+              Label Printing Settings
+            </h2>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Discount Percentage Off Retail
+                </label>
+                <div className="flex items-center space-x-4">
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    value={labelDiscountPercent}
+                    onChange={(e) => {
+                      const value = parseFloat(e.target.value) || 0;
+                      const clampedValue = Math.max(0, Math.min(100, value));
+                      setLabelDiscountPercent(clampedValue);
+                    }}
+                    className="w-32 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
+                    placeholder="50"
+                  />
+                  <span className="text-sm text-gray-600 dark:text-gray-400">%</span>
+                  <button
+                    onClick={() => {
+                      localStorage.setItem('labelDiscountPercent', labelDiscountPercent.toString());
+                      toast.success(`Label discount set to ${labelDiscountPercent}% off retail`);
+                    }}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 flex items-center"
+                  >
+                    <FiSave className="mr-2" />
+                    Save
+                  </button>
+                </div>
+                <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                  Set the discount percentage that will be applied to retail prices when printing labels.
+                  Example: {labelDiscountPercent}% off means a $100 retail price will show as ${(100 * (100 - labelDiscountPercent) / 100).toFixed(2)} on the label.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+        
         {/* Notification Settings */}
         <div className="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden mb-6">
           <div className="p-6">
@@ -586,6 +470,131 @@ const Settings = () => {
                 >
                   <FiSave className="mr-2" />
                   Save Notification Settings
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        {/* Contact Support */}
+        <div className="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden mb-6">
+          <div className="p-6">
+            <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4 flex items-center">
+              <FiMessageCircle className="mr-2" />
+              Contact Support
+            </h2>
+            
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+              Found a bug or have a feature request? We'd love to hear from you! Send us a message and we'll get back to you as soon as possible.
+            </p>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Subject
+                </label>
+                <input
+                  type="text"
+                  value={contactForm.subject}
+                  onChange={(e) => setContactForm({ ...contactForm, subject: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
+                  placeholder="Brief description of your issue or request"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Type
+                </label>
+                <select
+                  value={contactForm.type}
+                  onChange={(e) => setContactForm({ ...contactForm, type: e.target.value })}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
+                >
+                  <option value="bug">🐛 Bug Report</option>
+                  <option value="feature">✨ Feature Request</option>
+                  <option value="question">❓ Question</option>
+                  <option value="other">📝 Other</option>
+                </select>
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Message
+                </label>
+                <textarea
+                  value={contactForm.message}
+                  onChange={(e) => setContactForm({ ...contactForm, message: e.target.value })}
+                  rows={6}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
+                  placeholder="Please provide as much detail as possible. For bugs, include steps to reproduce. For features, describe what you'd like to see."
+                />
+              </div>
+              
+              <div className="pt-2">
+                <button
+                  onClick={async () => {
+                    if (!contactForm.subject.trim() || !contactForm.message.trim()) {
+                      toast.error('Please fill in both subject and message');
+                      return;
+                    }
+                    
+                    setIsSubmittingContact(true);
+                    try {
+                      // Get backend URL
+                      let backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || 'http://localhost:5000';
+                      if (backendUrl.endsWith('/api')) {
+                        backendUrl = backendUrl.replace('/api', '');
+                      }
+                      
+                      const { data: { session } } = await supabase.auth.getSession();
+                      
+                      const response = await axios.post(
+                        `${backendUrl}/api/contact-support`,
+                        {
+                          subject: contactForm.subject,
+                          type: contactForm.type,
+                          message: contactForm.message,
+                          user_email: user?.email || 'Unknown',
+                          user_id: user?.id || null,
+                          user_name: profileData.first_name && profileData.last_name 
+                            ? `${profileData.first_name} ${profileData.last_name}`.trim()
+                            : user?.email || 'Unknown User'
+                        },
+                        {
+                          headers: session ? {
+                            'Authorization': `Bearer ${session.access_token}`
+                          } : {}
+                        }
+                      );
+                      
+                      if (response.data.success) {
+                        toast.success('Message sent successfully! We\'ll get back to you soon.');
+                        setContactForm({ subject: '', type: 'bug', message: '' });
+                      } else {
+                        throw new Error(response.data.error || 'Failed to send message');
+                      }
+                    } catch (error) {
+                      console.error('Error sending contact message:', error);
+                      toast.error(error.response?.data?.error || error.message || 'Failed to send message. Please try again.');
+                    } finally {
+                      setIsSubmittingContact(false);
+                    }
+                  }}
+                  disabled={isSubmittingContact || !contactForm.subject.trim() || !contactForm.message.trim()}
+                  className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 flex items-center justify-center disabled:bg-gray-400 disabled:cursor-not-allowed"
+                >
+                  {isSubmittingContact ? (
+                    <>
+                      <FiRefreshCw className="mr-2 animate-spin" />
+                      Sending...
+                    </>
+                  ) : (
+                    <>
+                      <FiSend className="mr-2" />
+                      Send Message
+                    </>
+                  )}
                 </button>
               </div>
             </div>

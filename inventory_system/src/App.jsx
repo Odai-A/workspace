@@ -8,6 +8,7 @@ import './index.css'
 // import InventoryDisplay from './components/InventoryDisplay' // Removed - debug component showing raw JSON
 
 // Pages
+import Home from './pages/Home';
 import Dashboard from './pages/Dashboard';
 import Inventory from './pages/Inventory';
 import Reports from './pages/Reports';
@@ -59,17 +60,16 @@ function App() {
         <NavigationProvider>
           <Routes>
             {/* Public routes */}
+            <Route path="/" element={!isAuthenticated ? <Home /> : <Navigate to="/dashboard" replace />} />
             <Route path="/login" element={!isAuthenticated ? <Login /> : <Navigate to="/dashboard" replace />} />
             <Route path="/register" element={!isAuthenticated ? <Register /> : <Navigate to="/dashboard" replace />} />
             <Route path="/checkout-success" element={<SuccessPage />} />
             <Route path="/checkout-cancel" element={<CancelPage />} />
             
-            {/* Protected routes */}
+            {/* Protected routes - nested under Layout */}
             <Route 
-              path="/" 
               element={isAuthenticated ? <Layout /> : <Navigate to="/login" replace />}
             >
-              <Route index element={<Navigate to="/dashboard" replace />} />
               <Route path="dashboard" element={<Dashboard />} />
               <Route path="inventory" element={<Inventory />} />
               <Route path="reports" element={<Reports />} />
@@ -84,7 +84,7 @@ function App() {
             </Route>
             
             {/* Fallback for unknown routes */}
-            <Route path="*" element={<Navigate to={isAuthenticated ? "/dashboard" : "/login"} replace />} />
+            <Route path="*" element={<Navigate to={isAuthenticated ? "/dashboard" : "/"} replace />} />
           </Routes>
         </NavigationProvider>
       </Router>

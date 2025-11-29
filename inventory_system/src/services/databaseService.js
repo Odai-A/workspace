@@ -4,6 +4,17 @@ import { supabase } from '../config/supabaseClient';
 const PRODUCT_TABLE = 'manifest_data';
 const API_LOOKUP_CACHE_TABLE = 'api_lookup_cache'; // Target table for API caching
 
+// Helper function to get current user ID
+const getCurrentUserId = async () => {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    return user?.id || null;
+  } catch (error) {
+    console.error('Error getting current user:', error);
+    return null;
+  }
+};
+
 // Column mapping for original manifest_data table (PRODUCT_TABLE)
 const columnMap = {
   id: 'id',
@@ -336,19 +347,28 @@ export const productLookupService = {
 
     console.log(`📦 [DB Service] Checking manifest_data table for code: ${code}...`);
     
-    // Try by FNSKU in manifest_data
+    // Get current user ID
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      console.warn('getProductByFnsku: No user ID found - cannot fetch manifest data');
+      return null;
+    }
+    
+    // Try by FNSKU in manifest_data (only current user's data)
     let { data, error } = await supabase
       .from(PRODUCT_TABLE) // PRODUCT_TABLE is 'manifest_data'
       .select('*')
       .eq(columnMap.fnsku, code) // Use mapped column name for FNSKU
+      .eq('user_id', userId) // Only get current user's manifest data
       .limit(1);
 
-    // If not found by FNSKU, try by ASIN in manifest_data
+    // If not found by FNSKU, try by ASIN in manifest_data (only current user's data)
     if ((!data || data.length === 0) && !error) {
       const asinResult = await supabase
         .from(PRODUCT_TABLE)
         .select('*')
         .eq(columnMap.asin, code) // Use mapped column name for ASIN
+        .eq('user_id', userId) // Only get current user's manifest data
         .limit(1);
         
       data = asinResult.data;
@@ -394,6 +414,13 @@ export const productLookupService = {
 
   // getProductByLpn remains similar, searching manifest_data
   async getProductByLpn(lpnValue) {
+    // Get current user ID
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      console.warn('getProductByLpn: No user ID found - cannot fetch manifest data');
+      return null;
+    }
+    
     const lpnColumn = columnMap['lpn'];
     if (!lpnColumn) {
       console.error('getProductByLpn: LPN column name is not mapped correctly.');
@@ -403,6 +430,7 @@ export const productLookupService = {
       .from(PRODUCT_TABLE) // PRODUCT_TABLE is 'manifest_data'
       .select('*')
       .eq(lpnColumn, lpnValue)
+      .eq('user_id', userId) // Only get current user's manifest data
       .maybeSingle();
     if (error) {
       console.error('Error fetching product by LPN from manifest_data:', error);
@@ -468,12 +496,24 @@ export const productLookupService = {
     console.log(`Attempting to save to manifest_data:`, mappedData);
 
     try {
+      // Get current user ID
+      const userId = await getCurrentUserId();
+      if (!userId) {
+        console.error('saveProductToManifest: User must be logged in');
+        return null;
+      }
+      
+      // Always set user_id when saving
+      mappedData.user_id = userId;
+      
       // Check if record exists first (since there may not be a unique constraint)
+      // Only check within current user's data
       const searchValue = mappedData[conflictColumnSupabase];
       const { data: existingData, error: searchError } = await supabase
         .from(PRODUCT_TABLE)
         .select('*')
         .eq(conflictColumnSupabase, searchValue)
+        .eq('user_id', userId) // Only check current user's items
         .limit(1)
         .maybeSingle();
       
@@ -484,11 +524,12 @@ export const productLookupService = {
 
       let result;
       if (existingData) {
-        // Update existing record
+        // Update existing record (only if it belongs to current user)
         const { data, error } = await supabase
           .from(PRODUCT_TABLE)
           .update(mappedData)
           .eq(conflictColumnSupabase, searchValue)
+          .eq('user_id', userId) // Ensure we only update current user's items
           .select()
           .single();
         
@@ -527,6 +568,12 @@ export const productLookupService = {
     // If it's for recent *API lookups*, it should query 'api_lookup_cache' ordered by 'last_check_time'.
     // If it's for recent *manifest entries*, it queries 'manifest_data' by 'id' or a date column.
     // Assuming for now it means recent manifest_data entries:
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      console.warn('getRecentLookups: No user ID found - cannot fetch manifest data');
+      return [];
+    }
+    
     const idColumn = columnMap['id'];
     if (!idColumn) {
         console.error('getRecentLookups: ID column not mapped for ordering manifest_data.');
@@ -535,6 +582,7 @@ export const productLookupService = {
     const { data, error } = await supabase
       .from(PRODUCT_TABLE) // manifest_data
       .select('*')
+      .eq('user_id', userId) // Only get current user's manifest data
       .order(idColumn, { ascending: false })
       .limit(count);
     if (error) {
@@ -546,10 +594,16 @@ export const productLookupService = {
 
   async getProducts({ page = 1, limit = 25, searchQuery = '' }) {
     // This fetches from manifest_data
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      console.warn('getProducts: No user ID found - cannot fetch manifest data');
+      return { data: [], totalCount: 0 };
+    }
+    
     const offset = (page - 1) * limit;
     let query = supabase.from(PRODUCT_TABLE);
 
-    query = query.select('*', { count: 'exact' }); 
+    query = query.select('*', { count: 'exact' }).eq('user_id', userId); // Only get current user's manifest data
 
     if (searchQuery) {
       const searchTerm = `%${searchQuery}%`;
@@ -576,15 +630,24 @@ export const productLookupService = {
 
   async getDashboardStats() {
     try {
+      // Make dashboard stats user-specific instead of global
+      const userId = await getCurrentUserId();
+      if (!userId) {
+        console.warn('getDashboardStats: No user ID found - returning zeros');
+        return { totalProducts: 0, sumOfQuantities: 0 };
+      }
+
       const { count: totalProducts, error: countError } = await supabase
         .from(PRODUCT_TABLE) // manifest_data
-        .select('id', { count: 'exact', head: true });
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId); // Only count current user's products
 
       if (countError) console.error('Error fetching total product count from manifest_data:', countError);
 
       const { data: allProducts, error: allProductsError } = await supabase
         .from(PRODUCT_TABLE) // manifest_data
-        .select(columnMap.quantity);
+        .select(columnMap.quantity)
+        .eq('user_id', userId); // Only get current user's products
 
       let sumOfQuantities = 0;
       if (allProductsError) {
@@ -604,13 +667,52 @@ export const productLookupService = {
     }
   },
 
+  /**
+   * Delete a single product from manifest_data by ID for the current user.
+   * Used by the Inventory page when deleting rows whose source is 'manifest_data'.
+   */
+  async deleteProduct(id) {
+    if (!id) {
+      console.error('deleteProduct: id is required');
+      return { success: false, error: 'ID is required' };
+    }
+
+    try {
+      const userId = await getCurrentUserId();
+      if (!userId) {
+        console.error('deleteProduct: User must be logged in');
+        return { success: false, error: 'User must be logged in' };
+      }
+
+      const { error } = await supabase
+        .from(PRODUCT_TABLE) // manifest_data
+        .delete()
+        .eq('id', id)
+        .eq('user_id', userId); // Only delete current user's products
+
+      if (error) {
+        console.error('Error deleting product from manifest_data:', error);
+        return { success: false, error };
+      }
+
+      return { success: true };
+    } catch (error) {
+      console.error('Exception in deleteProduct:', error);
+      return { success: false, error };
+    }
+  },
+
   async logScanEvent(scannedCode, productDetails = null, userId = null) {
     if (!scannedCode) return null;
     try {
       // Get current user ID if not provided
       if (!userId) {
-        const { data: { user } } = await supabase.auth.getUser();
-        userId = user?.id || null;
+        userId = await getCurrentUserId();
+      }
+      
+      if (!userId) {
+        console.error('logScanEvent: User must be logged in');
+        return null;
       }
 
       let manifestDataId = null;
@@ -660,6 +762,13 @@ export const productLookupService = {
 
   async getRecentScanEvents(limit = 5) {
     try {
+      // Get current user ID
+      const userId = await getCurrentUserId();
+      if (!userId) {
+        console.warn('getRecentScanEvents: No user ID found - cannot fetch scan history');
+        return [];
+      }
+      
       // Try with explicit foreign key syntax first
       let { data, error } = await supabase
         .from('scan_history') 
@@ -668,6 +777,7 @@ export const productLookupService = {
           manifest_data!manifest_data_id ( ${columnMap.name}, ${columnMap.lpn}, ${columnMap.asin}, ${columnMap.price} ),
           api_lookup_cache!api_lookup_cache_id ( product_name, asin, price, image_url, api_source )
         `)
+        .eq('user_id', userId) // Only get current user's scan history
         .order('scanned_at', { ascending: false })
         .limit(limit);
 
@@ -675,10 +785,11 @@ export const productLookupService = {
       if (error && error.code === 'PGRST201') {
         console.warn('[DB Service] Multiple relationships detected, fetching data separately...');
         
-        // Fetch scan history without joins
+        // Fetch scan history without joins (only current user's scans)
         const { data: scanData, error: scanError } = await supabase
           .from('scan_history')
           .select('id, scanned_code, scanned_at, product_description, manifest_data_id, api_lookup_cache_id')
+          .eq('user_id', userId) // Only get current user's scan history
           .order('scanned_at', { ascending: false })
           .limit(limit);
 

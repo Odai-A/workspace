@@ -34,12 +34,12 @@ function Reports() {
   const [productPopularity, setProductPopularity] = useState(null);
   const [inventoryStats, setInventoryStats] = useState(null);
   const [timeAnalytics, setTimeAnalytics] = useState(null);
+  const [selectedEmployee, setSelectedEmployee] = useState(null);
 
-  // Report types
+  // Report types (API Cost Tracking removed per user request)
   const reportTypes = [
     { id: 'activity', name: 'Scan Activity', icon: ChartBarIcon },
-    { id: 'users', name: 'User Performance', icon: UserGroupIcon },
-    { id: 'costs', name: 'API Cost Tracking', icon: CurrencyDollarIcon },
+    { id: 'users', name: 'Employee Scanning', icon: UserGroupIcon },
     { id: 'products', name: 'Product Popularity', icon: CubeIcon },
     { id: 'inventory', name: 'Inventory Analytics', icon: CubeIcon },
     { id: 'time', name: 'Time Analytics', icon: ClockIcon },
@@ -117,24 +117,28 @@ function Reports() {
     try {
       const { startDate, endDate } = getDateRange();
       
-      // Get scan counts per user
+      // Get all scan data with details per user
       const { data: scans, error: scansError } = await supabase
         .from('scan_history')
-        .select('user_id, scanned_at')
+        .select('user_id, scanned_at, scanned_code, product_description')
         .gte('scanned_at', startDate.toISOString())
-        .lte('scanned_at', endDate.toISOString());
+        .lte('scanned_at', endDate.toISOString())
+        .order('scanned_at', { ascending: false });
 
       if (scansError) throw scansError;
 
-      // Count scans per user
-      const userCounts = {};
+      // Group scans by user and calculate statistics
+      const userScansMap = {};
       (scans || []).forEach(scan => {
         const userId = scan.user_id || 'unknown';
-        userCounts[userId] = (userCounts[userId] || 0) + 1;
+        if (!userScansMap[userId]) {
+          userScansMap[userId] = [];
+        }
+        userScansMap[userId].push(scan);
       });
 
       // Get user details
-      const userIds = Object.keys(userCounts);
+      const userIds = Object.keys(userScansMap);
       const { data: users, error: usersError } = await supabase
         .from('users')
         .select('id, email, first_name, last_name')
@@ -142,15 +146,41 @@ function Reports() {
 
       if (usersError) throw usersError;
 
-      // Map user data
+      // Map user data with detailed statistics
       const userData = userIds.map(userId => {
         const user = users?.find(u => u.id === userId);
-        const count = userCounts[userId];
+        const userScans = userScansMap[userId] || [];
+        const scanCount = userScans.length;
+        
+        // Calculate statistics
+        const scanDates = userScans.map(s => new Date(s.scanned_at)).sort((a, b) => a - b);
+        const firstScan = scanDates[0];
+        const lastScan = scanDates[scanDates.length - 1];
+        
+        // Calculate scans per day
+        const daysDiff = Math.max(1, Math.ceil((endDate - startDate) / (1000 * 60 * 60 * 24)));
+        const scansPerDay = (scanCount / daysDiff).toFixed(1);
+        
+        // Group by day to find most active day
+        const dailyCounts = {};
+        userScans.forEach(scan => {
+          const date = new Date(scan.scanned_at).toLocaleDateString();
+          dailyCounts[date] = (dailyCounts[date] || 0) + 1;
+        });
+        const maxScansInDay = Math.max(...Object.values(dailyCounts), 0);
+        const mostActiveDay = Object.entries(dailyCounts).find(([_, count]) => count === maxScansInDay)?.[0] || 'N/A';
+
         return {
           id: userId,
           name: user ? `${user.first_name || ''} ${user.last_name || ''}`.trim() || user.email : 'Unknown User',
           email: user?.email || 'N/A',
-          scanCount: count,
+          scanCount: scanCount,
+          firstScan: firstScan ? firstScan.toLocaleString() : 'N/A',
+          lastScan: lastScan ? lastScan.toLocaleString() : 'N/A',
+          scansPerDay: scansPerDay,
+          mostActiveDay: mostActiveDay,
+          maxScansInDay: maxScansInDay,
+          allScans: userScans, // Store all scans for detailed view
         };
       }).sort((a, b) => b.scanCount - a.scanCount);
 
@@ -165,40 +195,7 @@ function Reports() {
     }
   };
 
-  // Fetch API cost tracking data
-  const fetchApiCosts = async () => {
-    try {
-      const { data: cacheData, error: cacheError } = await supabase
-        .from('api_lookup_cache')
-        .select('source, lookup_count, created_at');
-
-      if (cacheError) throw cacheError;
-
-      // Calculate cache statistics
-      const totalLookups = cacheData?.reduce((sum, item) => sum + (item.lookup_count || 0), 0) || 0;
-      const uniqueItems = cacheData?.length || 0;
-      const sourceBreakdown = {};
-      
-      (cacheData || []).forEach(item => {
-        const source = item.source || 'unknown';
-        sourceBreakdown[source] = (sourceBreakdown[source] || 0) + (item.lookup_count || 0);
-      });
-
-      // Estimate cost savings (assuming $0.01 per API call saved)
-      const estimatedSavings = totalLookups * 0.01;
-
-      setApiCosts({
-        totalLookups,
-        uniqueItems,
-        sourceBreakdown,
-        estimatedSavings,
-        cacheHitRate: uniqueItems > 0 ? ((totalLookups / uniqueItems) * 100).toFixed(1) : 0,
-      });
-    } catch (error) {
-      console.error('Error fetching API costs:', error);
-      toast.error('Failed to load API cost data');
-    }
-  };
+  // (Removed) Fetch API cost tracking data – no longer needed
 
   // Fetch product popularity data
   const fetchProductPopularity = async () => {
@@ -333,7 +330,7 @@ function Reports() {
         await Promise.all([
           fetchScanActivity(),
           fetchUserPerformance(),
-          fetchApiCosts(),
+          // fetchApiCosts(), // API cost tracking removed
           fetchProductPopularity(),
           fetchInventoryStats(),
           fetchTimeAnalytics(),
@@ -372,9 +369,9 @@ function Reports() {
         break;
       case 'users':
         if (userPerformance) {
-          csvContent = 'User,Email,Scans\n';
+          csvContent = 'Employee,Email,Total Scans,Scans Per Day,First Scan,Last Scan,Most Active Day,Max Scans In Day\n';
           userPerformance.users.forEach(user => {
-            csvContent += `"${user.name}","${user.email}",${user.scanCount}\n`;
+            csvContent += `"${user.name}","${user.email}",${user.scanCount},${user.scansPerDay},"${user.firstScan}","${user.lastScan}","${user.mostActiveDay}",${user.maxScansInDay}\n`;
           });
         }
         break;
@@ -479,29 +476,33 @@ function Reports() {
             </div>
           )}
 
-          {/* User Performance */}
+          {/* User Performance / Employee Scanning */}
           {activeTab === 'users' && userPerformance && (
             <div>
               <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-xl font-semibold text-gray-900 dark:text-white">User Performance</h2>
-                <div className="text-sm text-gray-600">
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-white">Employee Scanning Activity</h2>
+                <div className="text-sm text-gray-600 dark:text-gray-400">
                   <span className="font-medium">Total Scans: {userPerformance.totalScans}</span>
+                  <span className="ml-4">Active Employees: {userPerformance.users.length}</span>
                 </div>
               </div>
               {userPerformance.topPerformer && (
-                <div className="mb-4 p-4 bg-blue-50 rounded-lg">
-                  <p className="text-sm text-gray-600">Top Performer</p>
+                <div className="mb-4 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+                  <p className="text-sm text-gray-600 dark:text-gray-400">Top Performer</p>
                   <p className="text-lg font-semibold text-gray-900 dark:text-white">
                     {userPerformance.topPerformer.name} - {userPerformance.topPerformer.scanCount} scans
                   </p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+                    {userPerformance.topPerformer.scansPerDay} scans/day average
+                  </p>
                 </div>
               )}
-              <div className="h-80">
+              <div className="h-80 mb-6">
                 <Bar
                   data={{
-                    labels: userPerformance.users.map(u => u.name),
+                    labels: userPerformance.users.map(u => u.name.length > 15 ? u.name.substring(0, 15) + '...' : u.name),
                     datasets: [{
-                      label: 'Scans',
+                      label: 'Total Scans',
                       data: userPerformance.users.map(u => u.scanCount),
                       backgroundColor: 'rgba(59, 130, 246, 0.5)',
                     }],
@@ -509,72 +510,110 @@ function Reports() {
                   options={chartOptions}
                 />
               </div>
-              <div className="mt-4">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">User</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Scans</th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                    {userPerformance.users.map((user) => (
-                      <tr key={user.id}>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{user.name}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{user.email}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">{user.scanCount}</td>
+              
+              {/* Employee Statistics Table */}
+              <div className="mt-6">
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Employee Scanning Statistics</h3>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead className="bg-gray-50 dark:bg-gray-700">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Employee</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Email</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Total Scans</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Scans/Day</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">First Scan</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Last Scan</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Most Active Day</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Actions</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                      {userPerformance.users.map((user) => (
+                        <tr key={user.id} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                          <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white">{user.name}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{user.email}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white font-semibold">{user.scanCount}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{user.scansPerDay}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{user.firstScan}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">{user.lastScan}</td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
+                            {user.mostActiveDay} ({user.maxScansInDay} scans)
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm">
+                            <button
+                              onClick={() => setSelectedEmployee(selectedEmployee?.id === user.id ? null : user)}
+                              className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 font-medium"
+                            >
+                              {selectedEmployee?.id === user.id ? 'Hide Details' : 'View Scans'}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
+
+              {/* Detailed Scan History for Selected Employee */}
+              {selectedEmployee && (
+                <div className="mt-6 p-6 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                      Scan History: {selectedEmployee.name}
+                    </h3>
+                    <button
+                      onClick={() => setSelectedEmployee(null)}
+                      className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-600">
+                      <thead className="bg-gray-100 dark:bg-gray-600">
+                        <tr>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Scan Time</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">FNSKU/Code</th>
+                          <th className="px-4 py-2 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase">Product</th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-600">
+                        {selectedEmployee.allScans && selectedEmployee.allScans.length > 0 ? (
+                          selectedEmployee.allScans.map((scan, index) => (
+                            <tr key={index} className="hover:bg-gray-50 dark:hover:bg-gray-700">
+                              <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900 dark:text-white">
+                                {new Date(scan.scanned_at).toLocaleString()}
+                              </td>
+                              <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400 font-mono">
+                                {scan.scanned_code || 'N/A'}
+                              </td>
+                              <td className="px-4 py-2 text-sm text-gray-500 dark:text-gray-400">
+                                {scan.product_description || 'N/A'}
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td colSpan="3" className="px-4 py-4 text-center text-sm text-gray-500 dark:text-gray-400">
+                              No scan history available
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                  {selectedEmployee.allScans && selectedEmployee.allScans.length > 50 && (
+                    <p className="mt-4 text-sm text-gray-500 dark:text-gray-400 text-center">
+                      Showing all {selectedEmployee.allScans.length} scans for this employee
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
-          {/* API Cost Tracking */}
-          {activeTab === 'costs' && apiCosts && (
-            <div>
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-4">API Cost Tracking & Cache Performance</h2>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                <Card>
-                  <div className="p-4">
-                    <p className="text-sm text-gray-600">Total Cache Lookups</p>
-                    <p className="text-2xl font-bold text-gray-900 dark:text-white">{apiCosts.totalLookups.toLocaleString()}</p>
-                  </div>
-                </Card>
-                <Card>
-                  <div className="p-4">
-                    <p className="text-sm text-gray-600">Estimated Savings</p>
-                    <p className="text-2xl font-bold text-green-600">${apiCosts.estimatedSavings.toFixed(2)}</p>
-                  </div>
-                </Card>
-                <Card>
-                  <div className="p-4">
-                    <p className="text-sm text-gray-600">Cache Hit Rate</p>
-                    <p className="text-2xl font-bold text-blue-600">{apiCosts.cacheHitRate}%</p>
-                  </div>
-                </Card>
-              </div>
-              <div className="h-64">
-                <Doughnut
-                  data={{
-                    labels: Object.keys(apiCosts.sourceBreakdown),
-                    datasets: [{
-                      data: Object.values(apiCosts.sourceBreakdown),
-                      backgroundColor: [
-                        'rgba(59, 130, 246, 0.5)',
-                        'rgba(16, 185, 129, 0.5)',
-                        'rgba(245, 158, 11, 0.5)',
-                        'rgba(239, 68, 68, 0.5)',
-                      ],
-                    }],
-                  }}
-                  options={chartOptions}
-                />
-              </div>
-            </div>
-          )}
+          {/* API Cost Tracking section removed */}
 
           {/* Product Popularity */}
           {activeTab === 'products' && productPopularity && (

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useContext } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import axios from 'axios';
@@ -19,6 +20,7 @@ import { useAuth } from '../contexts/AuthContext';
 const Scanner = () => {
   const { user } = useAuth();
   const userId = user?.id;
+  const navigate = useNavigate();
   const [scannedCodes, setScannedCodes] = useState([]);
   const [productInfo, setProductInfo] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -81,6 +83,10 @@ const Scanner = () => {
   const autoRefreshIntervalRef = useRef(null);
   const countdownIntervalRef = useRef(null);
 
+  // State for scan count (free trial tracking)
+  const [scanCount, setScanCount] = useState({ used: 0, limit: 50, remaining: 50, isPaid: false });
+  const [scanCountLoading, setScanCountLoading] = useState(false);
+
   // Cleanup intervals on unmount
   useEffect(() => {
     return () => {
@@ -105,6 +111,51 @@ const Scanner = () => {
       }
     }
   }, []);
+
+  // Fetch scan count on mount and when user changes
+  const fetchScanCount = async () => {
+    if (!userId) return;
+    
+    setScanCountLoading(true);
+    try {
+      let backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || 'http://localhost:5000';
+      if (backendUrl.endsWith('/api')) {
+        backendUrl = backendUrl.replace('/api', '');
+      }
+      
+      // Get Supabase session token for auth
+      const { supabase } = await import('../config/supabaseClient');
+      const { data: { session } } = await supabase.auth.getSession();
+      const token = session?.access_token || '';
+      
+      const response = await axios.get(`${backendUrl}/api/scan-count`, {
+        headers: token ? {
+          'Authorization': `Bearer ${token}`
+        } : {}
+      });
+      
+      if (response.data?.success) {
+        setScanCount({
+          used: response.data.used_scans || 0,
+          limit: response.data.limit || null,
+          remaining: response.data.remaining || null,
+          isPaid: response.data.is_paid || false
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching scan count:', error);
+      // Don't show error toast - just log it
+    } finally {
+      setScanCountLoading(false);
+    }
+  };
+
+  // Fetch scan count on mount and when userId changes
+  useEffect(() => {
+    if (userId) {
+      fetchScanCount();
+    }
+  }, [userId]);
 
   // Save scanned codes to localStorage whenever they change
   useEffect(() => {
@@ -567,6 +618,9 @@ const Scanner = () => {
             
             // Set product info - backend already handled everything!
             handleProductFound(displayableProduct, code);
+            
+            // Refresh scan count after successful scan
+            fetchScanCount();
           } else {
             // Handle error response
             const errorMsg = apiResult?.message || apiResult?.error || "Failed to scan product";
@@ -576,8 +630,33 @@ const Scanner = () => {
         } catch (error) {
           console.error("Error calling backend scan endpoint:", error);
           if (error.response) {
-            const errorMsg = error.response.data?.message || error.response.data?.error || "Backend error";
-            toast.error(`❌ ${errorMsg}`, { autoClose: 5000 });
+            const status = error.response.status;
+            const data = error.response.data || {};
+
+            // Handle free-trial limit reached
+            if (data.error === 'trial_limit_reached' || status === 402) {
+              const used = data.used_scans ?? 'all';
+              const limit = data.limit ?? 50;
+              toast.error(
+                `🚫 Free trial limit reached: ${used}/${limit} scans used. Redirecting to upgrade...`,
+                { autoClose: 3000 }
+              );
+              // Refresh scan count to show updated count
+              fetchScanCount();
+              // Redirect to pricing page after a short delay to let the toast show
+              setTimeout(() => {
+                navigate('/pricing?upgrade=required', { 
+                  state: { 
+                    message: 'Your free trial of 50 scans has been used. Please upgrade to continue scanning.',
+                    usedScans: used,
+                    limit: limit
+                  } 
+                });
+              }, 1500);
+            } else {
+              const errorMsg = data.message || data.error || "Backend error";
+              toast.error(`❌ ${errorMsg}`, { autoClose: 5000 });
+            }
           } else if (error.code === 'ECONNABORTED') {
             toast.error("❌ Request timeout - the scan is taking longer than expected", { autoClose: 5000 });
           } else {
@@ -749,9 +828,13 @@ const Scanner = () => {
 
   // Helper function to create label HTML
   const createLabelHTML = (productInfo, amazonUrl, qrCodeHtml) => {
+    // Get discount percentage from settings
+    const discountPercent = parseFloat(localStorage.getItem('labelDiscountPercent')) || 50;
+    const discountMultiplier = (100 - discountPercent) / 100;
+    
     // Calculate prices automatically
     const retailPrice = productInfo.price != null ? parseFloat(productInfo.price) : 0;
-    const ourPrice = retailPrice / 2; // 50% off retail
+    const ourPrice = retailPrice * discountMultiplier;
     
     // Show full product name (no truncation)
     const productName = productInfo.name || 'Product';
@@ -990,7 +1073,7 @@ const Scanner = () => {
               <div class="retail-price">
                 <span class="retail-price-label">RETAIL:</span> $${retailPrice.toFixed(2)}
               </div>
-              <div class="our-price-label">OUR PRICE:</div>
+              <div class="our-price-label">OUR PRICE (${discountPercent}% OFF):</div>
               <div class="our-price">
                 $${ourPrice.toFixed(2)}
               </div>
@@ -1774,7 +1857,9 @@ const Scanner = () => {
         location: inventoryLocation || 'Default',
         condition: 'New',
         price: productInfo.price || 0,
-        cost: productInfo.price ? (productInfo.price / 2) : 0 // Our price (50% of retail)
+        cost: productInfo.price ? (productInfo.price * ((100 - (parseFloat(localStorage.getItem('labelDiscountPercent')) || 50)) / 100)) : 0, // Our price based on discount setting
+        // Persist product image into inventory so Inventory page can show it
+        image_url: productInfo.image_url || ''
       };
       
       // Only add product_id if it exists (may be null if manifest_data save failed)
@@ -1802,6 +1887,71 @@ const Scanner = () => {
 
   return (
     <div className="p-4 md:p-6 lg:p-8">
+
+      {/* Scan Count Display (Free Trial) */}
+      {!scanCount.isPaid && (
+        <div className="mb-4 bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 border border-indigo-200 dark:border-indigo-800 rounded-lg p-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-3">
+              <div className="flex-shrink-0">
+                <svg className="h-6 w-6 text-indigo-600 dark:text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300">Free Trial Scans</h3>
+                {scanCountLoading ? (
+                  <p className="text-xs text-gray-500 dark:text-gray-400">Loading...</p>
+                ) : (
+                  <p className="text-lg font-bold text-indigo-600 dark:text-indigo-400">
+                    {scanCount.used} / {scanCount.limit || 50} scans used
+                    {scanCount.remaining !== null && (
+                      <span className="text-sm font-normal text-gray-600 dark:text-gray-400 ml-2">
+                        ({scanCount.remaining} remaining)
+                      </span>
+                    )}
+                  </p>
+                )}
+              </div>
+            </div>
+            {scanCount.remaining !== null && scanCount.remaining <= 10 && scanCount.remaining > 0 && (
+              <div className="flex-shrink-0">
+                <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400">
+                  ⚠️ {scanCount.remaining} scans left
+                </span>
+              </div>
+            )}
+            {scanCount.remaining === 0 && (
+              <div className="flex-shrink-0">
+                <button
+                  onClick={() => {
+                    navigate('/pricing?upgrade=required', {
+                      state: {
+                        message: 'Your free trial of 50 scans has been used. Please upgrade to continue scanning.',
+                        usedScans: scanCount.used,
+                        limit: scanCount.limit
+                      }
+                    });
+                  }}
+                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                >
+                  Upgrade Now
+                </button>
+              </div>
+            )}
+          </div>
+          {scanCount.remaining !== null && scanCount.remaining > 0 && (
+            <div className="mt-3">
+              <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                <div
+                  className="bg-indigo-600 dark:bg-indigo-400 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${(scanCount.used / scanCount.limit) * 100}%` }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Batch Mode Toggle */}
       <div className="mb-4 flex items-center justify-between bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">

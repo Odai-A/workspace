@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation, useSearchParams } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../config/supabaseClient';
@@ -96,7 +96,15 @@ const PricingPage = () => {
   const [configError, setConfigError] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const navigate = useNavigate();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
   const { user } = useAuth();
+  
+  // Check if redirected from trial limit
+  const isUpgradeRequired = searchParams.get('upgrade') === 'required';
+  const upgradeMessage = location.state?.message || 'Your free trial has been used. Please upgrade to continue scanning.';
+  const usedScans = location.state?.usedScans;
+  const limit = location.state?.limit;
 
   useEffect(() => {
     // Check if any plans have valid price IDs
@@ -248,6 +256,35 @@ const PricingPage = () => {
       <p className="text-xl text-gray-600 text-center mb-10">
         Start with a plan that suits your needs.
       </p>
+      
+      {/* Show upgrade required message when redirected from trial limit */}
+      {isUpgradeRequired && (
+        <div className="mb-6 bg-gradient-to-r from-red-50 to-orange-50 dark:from-red-900/20 dark:to-orange-900/20 border-2 border-red-300 dark:border-red-700 rounded-lg p-6 shadow-lg">
+          <div className="flex items-start">
+            <div className="flex-shrink-0">
+              <svg className="h-8 w-8 text-red-600 dark:text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+            </div>
+            <div className="ml-4 flex-1">
+              <h3 className="text-xl font-bold text-red-800 dark:text-red-300 mb-2">
+                Free Trial Limit Reached
+              </h3>
+              <p className="text-red-700 dark:text-red-400 mb-3">
+                {upgradeMessage}
+              </p>
+              {usedScans !== undefined && limit !== undefined && (
+                <p className="text-sm text-red-600 dark:text-red-500 font-semibold">
+                  You've used {usedScans} out of {limit} free scans.
+                </p>
+              )}
+              <p className="text-sm text-red-600 dark:text-red-500 mt-2">
+                Choose a plan below to continue scanning and unlock unlimited access to all features.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
       
       {/* Show the detailed warning only to admins */}
       {isAdmin && <PriceIdWarning priceIds={priceIdInfo} />}

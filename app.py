@@ -83,7 +83,7 @@ else:
 # --- Stripe Configuration ---
 STRIPE_API_KEY = os.environ.get('STRIPE_API_KEY')
 STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
-STRIPE_PUBLISHABLE_KEY = os.environ.get('STRIPE_PUBLISHABLE_KEY') # For frontend if needed there
+STRIPE_PUBLISHABLE_KEY = os.environ.get('STRIPE_PUBLISHABLE_KEY')  # For frontend if needed there
 
 # Load Price IDs from environment variables
 STRIPE_STARTER_PLAN_PRICE_ID = os.environ.get('STRIPE_STARTER_PLAN_PRICE_ID')
@@ -99,31 +99,34 @@ STRIPE_BASIC_USAGE_PRICE_ID = os.environ.get('STRIPE_BASIC_USAGE_PRICE_ID')
 STRIPE_PRO_USAGE_PRICE_ID = os.environ.get('STRIPE_PRO_USAGE_PRICE_ID')
 STRIPE_ENTREPRENEUR_USAGE_PRICE_ID = os.environ.get('STRIPE_ENTREPRENEUR_USAGE_PRICE_ID')
 
-# --- Plan Configuration ---
+# --- Free Trial / Plan Configuration ---
+# Number of free scans allowed per tenant before requiring upgrade
+FREE_TRIAL_SCAN_LIMIT = int(os.environ.get('FREE_TRIAL_SCAN_LIMIT', '50'))
+
 PLAN_CONFIG = {
     'basic': {
         'name': 'Basic',
         'monthly_price': 150.00,
         'included_scans': 1000,
         'overage_rate': 0.11,
-        'base_price_id': os.environ.get('STRIPE_BASIC_PLAN_PRICE_ID'),
-        'usage_price_id': os.environ.get('STRIPE_BASIC_USAGE_PRICE_ID'),
+        'base_price_id': STRIPE_BASIC_PLAN_PRICE_ID,
+        'usage_price_id': STRIPE_BASIC_USAGE_PRICE_ID,
     },
     'pro': {
         'name': 'Pro',
         'monthly_price': 300.00,
         'included_scans': 5000,
         'overage_rate': 0.11,
-        'base_price_id': os.environ.get('STRIPE_PRO_PLAN_PRICE_ID'),
-        'usage_price_id': os.environ.get('STRIPE_PRO_USAGE_PRICE_ID'),
+        'base_price_id': STRIPE_PRO_PLAN_PRICE_ID,
+        'usage_price_id': STRIPE_PRO_USAGE_PRICE_ID,
     },
     'entrepreneur': {
         'name': 'Entrepreneur',
         'monthly_price': 500.00,
         'included_scans': 20000,
         'overage_rate': 0.11,
-        'base_price_id': os.environ.get('STRIPE_ENTREPRENEUR_PLAN_PRICE_ID'),
-        'usage_price_id': os.environ.get('STRIPE_ENTREPRENEUR_USAGE_PRICE_ID'),
+        'base_price_id': STRIPE_ENTREPRENEUR_PLAN_PRICE_ID,
+        'usage_price_id': STRIPE_ENTREPRENEUR_USAGE_PRICE_ID,
     },
 }
 
@@ -134,10 +137,33 @@ def get_plan_config_by_price_id(price_id):
             return plan_id, config
     return None, None
 
-# Usage-based price IDs for metered billing (overages)
-STRIPE_BASIC_USAGE_PRICE_ID = os.environ.get('STRIPE_BASIC_USAGE_PRICE_ID')
-STRIPE_PRO_USAGE_PRICE_ID = os.environ.get('STRIPE_PRO_USAGE_PRICE_ID')
-STRIPE_ENTREPRENEUR_USAGE_PRICE_ID = os.environ.get('STRIPE_ENTREPRENEUR_USAGE_PRICE_ID')
+
+def tenant_has_paid_subscription(tenant_id):
+    """
+    Returns True if the tenant has an active Stripe subscription.
+    If no subscription is found or Stripe is not configured, returns False.
+    """
+    try:
+        if not tenant_id:
+            return False
+        if not stripe.api_key:
+            logger.warning("Stripe API key not configured; treating tenant as not subscribed.")
+            return False
+
+        subscription_info = get_tenant_subscription_info(tenant_id)
+        if not subscription_info:
+            return False
+
+        # Prefer stored status, fall back to live subscription object
+        status = subscription_info.get('status')
+        if not status:
+            subscription = subscription_info.get('subscription')
+            status = getattr(subscription, 'status', None) if subscription else None
+
+        return status in ['active', 'trialing', 'past_due']
+    except Exception as e:
+        logger.error(f"Error checking paid subscription for tenant {tenant_id}: {e}")
+        return False
 
 if not STRIPE_API_KEY or not STRIPE_WEBHOOK_SECRET:
     logger.error("Stripe API Key or Webhook Secret not found in .env. Stripe integration will fail.")
@@ -1130,28 +1156,161 @@ def external_lookup():
 
 # ===== NEW UNIFIED SCAN ENDPOINT =====
 
+def detect_code_type(code):
+    """Detect the type of barcode (UPC, EAN, ASIN, or FNSKU)"""
+    clean_code = code.strip().upper()
+    
+    # UPC: 12 digits
+    if clean_code.isdigit() and len(clean_code) == 12:
+        return 'UPC'
+    
+    # EAN: 13 digits
+    if clean_code.isdigit() and len(clean_code) == 13:
+        return 'EAN'
+    
+    # ASIN: Starts with B0 and is 10 characters
+    if (clean_code.startswith('B0') and len(clean_code) == 10) or \
+       (clean_code.startswith('B') and len(clean_code) == 10 and clean_code[1:3].isdigit()):
+        return 'ASIN'
+    
+    # Default to FNSKU
+    return 'FNSKU'
+
+def lookup_upc(upc_code):
+    """
+    Lookup UPC code using free UPCitemdb API (100 requests/day free)
+    Returns product data or None if not found
+    """
+    try:
+        # UPCitemdb free API - no API key needed for basic usage
+        url = f"https://api.upcitemdb.com/prod/trial/lookup"
+        params = {'upc': upc_code}
+        
+        logger.info(f"🔍 Looking up UPC {upc_code} via UPCitemdb API (free)")
+        response = requests.get(url, params=params, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('code') == 'OK' and data.get('items') and len(data['items']) > 0:
+                item = data['items'][0]
+                logger.info(f"✅ Found UPC {upc_code} in UPCitemdb")
+                
+                # Map UPCitemdb response to our format
+                return {
+                    'upc': upc_code,
+                    'title': item.get('title', ''),
+                    'brand': item.get('brand', ''),
+                    'description': item.get('description', ''),
+                    'category': item.get('category', ''),
+                    'images': item.get('images', []),
+                    'ean': item.get('ean', ''),
+                    'model': item.get('model', ''),
+                    'color': item.get('color', ''),
+                    'size': item.get('size', ''),
+                    'dimension': item.get('dimension', ''),
+                    'weight': item.get('weight', ''),
+                    'currency': item.get('currency', 'USD'),
+                    'lowest_recorded_price': item.get('lowest_recorded_price', 0),
+                    'highest_recorded_price': item.get('highest_recorded_price', 0),
+                    'offers': item.get('offers', [])
+                }
+            else:
+                logger.info(f"❌ UPC {upc_code} not found in UPCitemdb")
+                return None
+        else:
+            logger.warning(f"⚠️ UPCitemdb API returned status {response.status_code}")
+            return None
+    except Exception as e:
+        logger.error(f"❌ Error looking up UPC {upc_code}: {e}")
+        return None
+
+@app.route('/api/scan-count', methods=['GET'])
+def get_scan_count():
+    """
+    Get the current scan count for the authenticated user/tenant.
+    Returns scan count and limit for free trial users, or unlimited for paid subscribers.
+    """
+    try:
+        user_id, tenant_id = get_ids_from_request()
+        
+        if not user_id:
+            return jsonify({
+                "success": False,
+                "error": "unauthorized",
+                "message": "User authentication required"
+            }), 401
+        
+        if not supabase_admin:
+            return jsonify({
+                "success": False,
+                "error": "database_error",
+                "message": "Database not available"
+            }), 500
+        
+        # Check if tenant has paid subscription
+        is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
+        
+        # Count scans
+        if tenant_id:
+            scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
+                .eq('tenant_id', tenant_id).execute()
+        else:
+            scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
+                .eq('user_id', user_id).execute()
+        
+        used_scans = getattr(scan_res, 'count', None)
+        if used_scans is None:
+            used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
+        
+        return jsonify({
+            "success": True,
+            "used_scans": used_scans,
+            "limit": None if is_paid else FREE_TRIAL_SCAN_LIMIT,
+            "is_paid": is_paid,
+            "remaining": None if is_paid else max(0, FREE_TRIAL_SCAN_LIMIT - used_scans)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting scan count: {e}")
+        return jsonify({
+            "success": False,
+            "error": "internal_error",
+            "message": str(e)
+        }), 500
+
 @app.route('/api/scan', methods=['POST'])
 def scan_product():
     """
-    Unified scan endpoint that handles FNSKU → ASIN → Rainforest API → Cache → Response
+    Unified scan endpoint that handles FNSKU, UPC, EAN → ASIN → Rainforest API → Cache → Response
     Frontend makes ONE request and gets complete product data back.
     """
     try:
         data = request.get_json()
         code = data.get('code', '').strip()
-        user_id = data.get('user_id', '').strip()
+
+        # Prefer authenticated user/tenant from JWT; fall back to body user_id if provided
+        user_id_from_token, tenant_id = get_ids_from_request()
+        user_id_from_body = (data.get('user_id') or '').strip()
+        user_id = user_id_from_token or user_id_from_body
+
+        # Detect code type
+        code_type = detect_code_type(code)
         
         # Use both print and logger to ensure visibility
         print("\n" + "=" * 60)
         print(f"🔍 SCAN REQUEST RECEIVED")
-        print(f"   FNSKU: {code}")
+        print(f"   Code: {code}")
+        print(f"   Type: {code_type}")
         print(f"   UserID: {user_id}")
+        print(f"   TenantID: {tenant_id}")
         print(f"   Supabase admin client: {supabase_admin is not None}")
         print("=" * 60)
         
         logger.info(f"🔍 ========== SCAN REQUEST RECEIVED ==========")
-        logger.info(f"   FNSKU: {code}")
+        logger.info(f"   Code: {code}")
+        logger.info(f"   Type: {code_type}")
         logger.info(f"   UserID: {user_id}")
+        logger.info(f"   TenantID: {tenant_id}")
         logger.info(f"   Supabase admin client: {supabase_admin is not None}")
         if supabase_admin:
             logger.info(f"   ✅ Supabase is READY for saving to api_lookup_cache")
@@ -1163,9 +1322,178 @@ def scan_product():
         if not code:
             return jsonify({
                 "success": False,
-                "error": "Invalid FNSKU",
+                "error": "Invalid code",
                 "message": "Code is required"
             }), 400
+
+        if not user_id:
+            return jsonify({
+                "success": False,
+                "error": "unauthorized",
+                "message": "User is required to scan products"
+            }), 401
+
+        # --- Free trial enforcement (per tenant, fallback per user) ---
+        if supabase_admin:
+            try:
+                # Treat tenants without an active subscription as on the free trial
+                is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
+
+                if not is_paid:
+                    # If we have a tenant, count by tenant; otherwise, fall back to user-based counting
+                    if tenant_id:
+                        logger.info(f"Checking free trial usage for tenant {tenant_id}")
+                        scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
+                            .eq('tenant_id', tenant_id).execute()
+                    else:
+                        logger.info(f"Checking free trial usage for user {user_id} (no tenant_id)")
+                        scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
+                            .eq('user_id', user_id).execute()
+
+                    used_scans = getattr(scan_res, 'count', None)
+                    if used_scans is None:
+                        used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
+
+                    logger.info(f"Free trial usage: used_scans={used_scans}, limit={FREE_TRIAL_SCAN_LIMIT}, "
+                                f"tenant_id={tenant_id}, user_id={user_id}")
+
+                    if used_scans >= FREE_TRIAL_SCAN_LIMIT:
+                        # Block further scans until upgrade
+                        return jsonify({
+                            "success": False,
+                            "error": "trial_limit_reached",
+                            "message": f"Your free trial of {FREE_TRIAL_SCAN_LIMIT} scans has been used. "
+                                       "Please upgrade to continue scanning.",
+                            "used_scans": used_scans,
+                            "limit": FREE_TRIAL_SCAN_LIMIT,
+                            "tenant_id": tenant_id,
+                            "user_id": user_id
+                        }), 402  # 402 Payment Required
+            except Exception as trial_error:
+                logger.error(f"Error enforcing free trial limit: {trial_error}")
+                # Fail closed: better to block than incur unexpected costs
+                return jsonify({
+                    "success": False,
+                    "error": "trial_check_failed",
+                    "message": "Unable to verify trial usage. Please contact support or try again later."
+                }), 500
+        
+        # Handle UPC codes with free UPCitemdb API
+        if code_type == 'UPC':
+            logger.info(f"📦 Detected UPC code - using free UPCitemdb API")
+            
+            # Check cache first (by UPC)
+            if supabase_admin:
+                try:
+                    cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('upc', code).maybe_single().execute()
+                    
+                    if cache_result.data:
+                        cached = cache_result.data
+                        from datetime import timedelta
+                        now = datetime.now(timezone.utc)
+                        cached_date = datetime.fromisoformat(cached.get('updated_at', cached.get('created_at', now.isoformat())))
+                        age_days = (now - cached_date).days
+                        
+                        # Update access tracking
+                        current_count = cached.get('lookup_count') or 0
+                        supabase_admin.table('api_lookup_cache').update({
+                            'last_accessed': now.isoformat(),
+                            'lookup_count': current_count + 1
+                        }).eq('id', cached['id']).execute()
+                        
+                        # If cache is fresh (<30 days), return immediately
+                        if age_days < 30:
+                            logger.info(f"✅ Returning cached UPC data for {code} (age: {age_days} days)")
+                            return jsonify({
+                                "success": True,
+                                "fnsku": cached.get('fnsku', ''),
+                                "asin": cached.get('asin', ''),
+                                "title": cached.get('product_name', ''),
+                                "price": str(cached.get('price', 0)) if cached.get('price') else '',
+                                "image": cached.get('image_url', ''),
+                                "brand": cached.get('brand', ''),
+                                "category": cached.get('category', ''),
+                                "description": cached.get('description', ''),
+                                "upc": cached.get('upc', code),
+                                "amazon_url": f"https://www.amazon.com/dp/{cached.get('asin')}" if cached.get('asin') else '',
+                                "source": "cache",
+                                "cost_status": "no_charge",
+                                "cached": True,
+                                "code_type": "UPC",
+                                "raw": cached
+                            })
+                except Exception as cache_error:
+                    logger.warning(f"Error checking UPC cache: {cache_error}")
+            
+            # Not in cache - lookup via UPCitemdb
+            upc_data = lookup_upc(code)
+            
+            if upc_data:
+                # Get image URL (first image if available)
+                image_url = ''
+                if upc_data.get('images') and len(upc_data['images']) > 0:
+                    image_url = upc_data['images'][0]
+                
+                # Get price (use lowest recorded price if available)
+                price = upc_data.get('lowest_recorded_price', 0) or upc_data.get('highest_recorded_price', 0) or 0
+                
+                # Save to cache
+                if supabase_admin:
+                    try:
+                        now = datetime.now(timezone.utc).isoformat()
+                        cache_data = {
+                            'upc': code,
+                            'fnsku': '',  # UPCs don't have FNSKUs
+                            'asin': '',  # Will try to find ASIN via Rainforest if needed
+                            'product_name': upc_data.get('title', ''),
+                            'description': upc_data.get('description', ''),
+                            'price': price,
+                            'category': upc_data.get('category', ''),
+                            'image_url': image_url,
+                            'source': 'upcitemdb',
+                            'last_accessed': now,
+                            'lookup_count': 1,
+                            'created_at': now,
+                            'updated_at': now
+                        }
+                        
+                        # Check if exists
+                        existing = supabase_admin.table('api_lookup_cache').select('id').eq('upc', code).maybe_single().execute()
+                        if existing.data:
+                            supabase_admin.table('api_lookup_cache').update(cache_data).eq('upc', code).execute()
+                        else:
+                            supabase_admin.table('api_lookup_cache').insert(cache_data).execute()
+                        logger.info(f"✅ Saved UPC {code} to cache")
+                    except Exception as save_error:
+                        logger.warning(f"⚠️ Could not save UPC to cache: {save_error}")
+                
+                return jsonify({
+                    "success": True,
+                    "fnsku": '',
+                    "asin": '',
+                    "title": upc_data.get('title', ''),
+                    "price": str(price) if price else '',
+                    "image": image_url,
+                    "brand": upc_data.get('brand', ''),
+                    "category": upc_data.get('category', ''),
+                    "description": upc_data.get('description', ''),
+                    "upc": code,
+                    "amazon_url": '',
+                    "source": "upcitemdb",
+                    "cost_status": "free",
+                    "cached": False,
+                    "code_type": "UPC",
+                    "raw": upc_data
+                })
+            else:
+                return jsonify({
+                    "success": False,
+                    "error": "UPC not found",
+                    "message": f"UPC {code} not found in UPCitemdb database",
+                    "code_type": "UPC"
+                }), 404
+        
+        # Continue with existing FNSKU logic for non-UPC codes
         
         # Get API keys from environment
         FNSKU_API_KEY = os.environ.get('FNSKU_API_KEY')
@@ -1180,9 +1508,13 @@ def scan_product():
             }), 500
         
         # STEP 1: Check Supabase cache first (instant return if cached)
+        # Check by FNSKU for FNSKU codes, by UPC for UPC codes
         if supabase_admin:
             try:
-                cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('fnsku', code).maybe_single().execute()
+                if code_type == 'UPC':
+                    cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('upc', code).maybe_single().execute()
+                else:
+                    cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('fnsku', code).maybe_single().execute()
                 
                 if cache_result.data:
                     cached = cache_result.data
@@ -1655,9 +1987,28 @@ def scan_product():
                 response_data["saved_to_cache"] = False
                 # Don't fail the request - just log the error
         
-        # Log scan event for Stripe usage tracking (if user_id provided)
-        if user_id and supabase_admin:
+        # Log scan event for Stripe usage tracking and local analytics
+        # Also record the scan in scan_history so free trial limits and reporting work.
+        if supabase_admin and user_id:
             try:
+                # Insert into scan_history table (tenant-scoped usage)
+                scan_insert = {
+                    'user_id': user_id,
+                    'code': code,
+                    'asin': asin,
+                    'fnsku': code,
+                    'scanned_at': datetime.now(timezone.utc).isoformat()
+                }
+                # Attach tenant if we know it
+                if tenant_id:
+                    scan_insert['tenant_id'] = tenant_id
+
+                supabase_admin.table('scan_history').insert(scan_insert).execute()
+            except Exception as history_error:
+                logger.warning(f"Failed to insert scan into scan_history: {history_error}")
+
+            try:
+                # Legacy api_scan_logs for detailed billing/debug
                 supabase_admin.table('api_scan_logs').insert({
                     'user_id': user_id,
                     'fnsku_scanned': code,
@@ -1667,7 +2018,7 @@ def scan_product():
                     'created_at': datetime.now(timezone.utc).isoformat()
                 }).execute()
             except Exception as log_error:
-                logger.warning(f"Failed to log scan event: {log_error}")
+                logger.warning(f"Failed to log scan event in api_scan_logs: {log_error}")
         
         # Log final response status
         print("\n" + "=" * 60)
@@ -2449,6 +2800,73 @@ def report_usage_endpoint():
     except Exception as e:
         logger.error(f"Error in report-usage endpoint: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/contact-support', methods=['POST'])
+def contact_support():
+    """
+    Handle contact support form submissions
+    Stores messages in Supabase and logs them for admin review
+    """
+    try:
+        data = request.get_json()
+        subject = data.get('subject', '').strip()
+        message_type = data.get('type', 'other')  # bug, feature, question, other
+        message = data.get('message', '').strip()
+        user_email = data.get('user_email', 'Unknown')
+        user_id = data.get('user_id')
+        user_name = data.get('user_name', user_email)
+        
+        if not subject or not message:
+            return jsonify({
+                "success": False,
+                "error": "Subject and message are required"
+            }), 400
+        
+        # Store in Supabase if available
+        if supabase_admin:
+            try:
+                support_data = {
+                    'user_id': user_id,
+                    'user_email': user_email,
+                    'user_name': user_name,
+                    'subject': subject,
+                    'type': message_type,
+                    'message': message,
+                    'status': 'open',
+                    'created_at': datetime.now(timezone.utc).isoformat()
+                }
+                
+                # Try to insert into support_messages table
+                try:
+                    result = supabase_admin.table('support_messages').insert(support_data).execute()
+                    logger.info(f"✅ Support message saved to database from {user_email}")
+                except Exception as db_error:
+                    # Table might not exist - log but continue
+                    logger.warning(f"⚠️ Could not save to support_messages table (may not exist): {db_error}")
+            except Exception as e:
+                logger.warning(f"⚠️ Error saving support message to database: {e}")
+        
+        # Log the message (always log for now, even if DB insert fails)
+        logger.info("=" * 60)
+        logger.info("📧 CONTACT SUPPORT MESSAGE RECEIVED")
+        logger.info(f"   From: {user_name} ({user_email})")
+        logger.info(f"   User ID: {user_id or 'N/A'}")
+        logger.info(f"   Type: {message_type}")
+        logger.info(f"   Subject: {subject}")
+        logger.info(f"   Message: {message}")
+        logger.info("=" * 60)
+        
+        return jsonify({
+            "success": True,
+            "message": "Your message has been received. We'll get back to you soon!"
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing contact support request: {e}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("FLASK_RUN_PORT", 5000))

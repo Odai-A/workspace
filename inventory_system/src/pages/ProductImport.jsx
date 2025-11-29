@@ -30,7 +30,7 @@ const parseCSVLine = (line) => {
   return result;
 };
 
-// Updated normalizeItemForSupabase for essential fields
+// Normalize CSV row into the format used for your inventory import
 const normalizeItemForSupabase = (csvRowObject) => {
   const normalized = {
     lpn: csvRowObject['LPN'] || null,
@@ -206,7 +206,7 @@ const ProductImport = () => {
       
       <Card className="max-w-xl mx-auto">
         <div className="p-6">
-          <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Upload CSV to Supabase</h2>
+          <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Upload CSV to Inventory</h2>
           
           <div className="mb-4">
             <label htmlFor="file-upload" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -267,7 +267,7 @@ const ProductImport = () => {
                   Importing...
                 </>
               ) : (
-                'Import Products to Supabase' // Updated button text
+                'Import Products to Inventory'
               )}
             </Button>
           </div>

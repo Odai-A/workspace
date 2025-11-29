@@ -301,8 +301,12 @@ const Inventory = () => {
       return '<html><body><p>Error: Product information not available</p></body></html>';
     }
 
+    // Get discount percentage from settings
+    const discountPercent = parseFloat(localStorage.getItem('labelDiscountPercent')) || 50;
+    const discountMultiplier = (100 - discountPercent) / 100;
+    
     const retailPrice = parseFloat(productInfo.price) || 0;
-    const ourPrice = retailPrice / 2;
+    const ourPrice = retailPrice * discountMultiplier;
     const amazonUrl = `https://www.amazon.com/dp/${productInfo.asin}`;
     const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(amazonUrl)}`;
     const qrCodeHtml = `<img src="${qrCodeUrl}" alt="QR Code" style="width: 80px; height: 80px;" />`;
@@ -544,7 +548,7 @@ const Inventory = () => {
               <div class="retail-price">
                 <span class="retail-price-label">RETAIL:</span> $${retailPrice.toFixed(2)}
               </div>
-              <div class="our-price-label">OUR PRICE:</div>
+              <div class="our-price-label">OUR PRICE (${discountPercent}% OFF):</div>
               <div class="our-price">
                 $${ourPrice.toFixed(2)}
               </div>

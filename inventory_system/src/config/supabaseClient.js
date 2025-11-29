@@ -25,16 +25,35 @@ const finalSupabaseAnonKey = isSupabaseConfigured ? supabaseAnonKey : 'placehold
 // Create client with placeholder values if not configured (prevents crashes)
 export const supabase = createClient(finalSupabaseUrl, finalSupabaseAnonKey);
 
+// Helper function to get current user ID
+const getCurrentUserId = async () => {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    return user?.id || null;
+  } catch (error) {
+    console.error('Error getting current user:', error);
+    return null;
+  }
+};
+
 export const inventoryService = {
   // We will add product and inventory related functions here,
   // such as getInventoryBySku, addOrUpdateInventory, etc.
   
   /**
    * Get all items from the inventory table with optional search and pagination
+   * Automatically filters by current user's ID
    */
   async getInventory(options = {}) {
     if (!supabaseUrl || !supabaseAnonKey) {
       console.error("Supabase client not initialized.");
+      return { data: [], totalCount: 0 };
+    }
+    
+    // Get current user ID
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      console.warn("No user ID found - cannot fetch inventory");
       return { data: [], totalCount: 0 };
     }
     
@@ -45,7 +64,8 @@ export const inventoryService = {
     } = options;
     
     const offset = (page - 1) * limit;
-    let query = supabase.from('inventory').select('*', { count: 'exact' });
+    // Filter by user_id to ensure users only see their own inventory
+    let query = supabase.from('inventory').select('*', { count: 'exact' }).eq('user_id', userId);
     
     // Add search functionality
     if (searchQuery && searchQuery.trim()) {
@@ -81,19 +101,29 @@ export const inventoryService = {
   },
 
   /**
-   * Example: Get inventory item by SKU
-   * Replace 'inventory' and 'sku' with your actual table and column names.
+   * Get inventory item by SKU for the current user
+   * Automatically filters by current user's ID
    */
   async getInventoryBySku(skuValue) {
     if (!supabaseUrl || !supabaseAnonKey) {
       console.error("Supabase client not initialized.");
       return null; 
     }
+    
+    // Get current user ID
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      console.warn("No user ID found - cannot fetch inventory by SKU");
+      return null;
+    }
+    
+    // Filter by both SKU and user_id to ensure users only see their own inventory
     const { data, error } = await supabase
-      .from('inventory') // Replace 'inventory' with your actual table name
+      .from('inventory')
       .select('*')
-      .eq('sku', skuValue) // Replace 'sku' with your actual SKU column name
-      .single(); // Assumes SKU is unique
+      .eq('sku', skuValue)
+      .eq('user_id', userId) // Only get items belonging to current user
+      .maybeSingle(); // Use maybeSingle instead of single to avoid errors if not found
 
     if (error && error.code !== 'PGRST116') { // PGRST116: Row to singular not found
       console.error('Error fetching inventory by SKU:', error);
@@ -105,6 +135,7 @@ export const inventoryService = {
   /**
    * Add or update an inventory item.
    * Checks if item exists first, then updates or inserts accordingly.
+   * Automatically associates with current user's ID
    */
   async addOrUpdateInventory(item) {
     if (!supabaseUrl || !supabaseAnonKey) {
@@ -112,8 +143,15 @@ export const inventoryService = {
       return null;
     }
     
+    // Get current user ID
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      console.error('addOrUpdateInventory: User must be logged in');
+      return null;
+    }
+    
     // Remove fields that don't exist in the inventory table
-    // Only keep essential fields: sku, name, quantity, location, condition, price, cost
+    // Only keep essential fields: sku, name, quantity, location, condition, price, cost, image_url
     const cleanItem = {
       sku: item.sku,
       name: item.name,
@@ -121,15 +159,38 @@ export const inventoryService = {
       location: item.location,
       condition: item.condition,
       price: item.price,
-      cost: item.cost
+      cost: item.cost,
+      image_url: item.image_url, // Optional, but persisted if provided
+      user_id: userId // Always set user_id to current user
     };
     
-    // Only add optional fields if they exist and are not null/undefined
+    // Only add product_id if it exists and is valid
+    // We'll verify it exists in manifest_data before including it
+    // If it doesn't exist or can't be verified, we'll skip it (product_id is optional)
     if (item.product_id !== undefined && item.product_id !== null) {
-      cleanItem.product_id = item.product_id;
+      try {
+        // Verify the product_id exists in manifest_data (for current user)
+        const { data: productCheck, error: checkError } = await supabase
+          .from('manifest_data')
+          .select('id')
+          .eq('id', item.product_id)
+          .eq('user_id', userId) // Only check current user's manifest data
+          .maybeSingle();
+        
+        if (!checkError && productCheck) {
+          // Product exists, safe to include product_id
+          cleanItem.product_id = item.product_id;
+        } else {
+          // Product doesn't exist or error checking, skip product_id
+          console.warn(`Product ID ${item.product_id} not found in manifest_data for user ${userId}, skipping product_id`);
+        }
+      } catch (error) {
+        // If verification fails, skip product_id (it's optional)
+        console.warn('Error verifying product_id, skipping:', error);
+      }
     }
     
-    // Check if item exists by SKU
+    // Check if item exists by SKU AND user_id (users can have same SKU)
     const skuValue = cleanItem.sku;
     if (!skuValue) {
       console.error('addOrUpdateInventory: SKU is required');
@@ -137,10 +198,12 @@ export const inventoryService = {
     }
     
     try {
+      // Check for existing item with same SKU AND user_id
       const { data: existingData, error: searchError } = await supabase
         .from('inventory')
         .select('*')
         .eq('sku', skuValue)
+        .eq('user_id', userId) // Only check items belonging to current user
         .limit(1)
         .maybeSingle();
       
@@ -162,6 +225,7 @@ export const inventoryService = {
           .from('inventory')
           .update(updateData)
           .eq('sku', skuValue)
+          .eq('user_id', userId) // Ensure we only update current user's items
           .select()
           .single();
         
@@ -172,7 +236,7 @@ export const inventoryService = {
         result = data;
         console.log('✅ Successfully updated inventory item:', result);
       } else {
-        // Insert new item
+        // Insert new item (user_id is already set in cleanItem)
         const { data, error } = await supabase
           .from('inventory')
           .insert(cleanItem)
@@ -197,6 +261,7 @@ export const inventoryService = {
 
   /**
    * Delete an inventory item by ID
+   * Only deletes items belonging to the current user
    */
   async deleteInventoryItem(id) {
     if (!supabaseUrl || !supabaseAnonKey) {
@@ -204,11 +269,20 @@ export const inventoryService = {
       return null;
     }
     
+    // Get current user ID
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      console.error('deleteInventoryItem: User must be logged in');
+      return { success: false, error: 'User must be logged in' };
+    }
+    
     try {
+      // Only delete if the item belongs to the current user
       const { error } = await supabase
         .from('inventory')
         .delete()
-        .eq('id', id);
+        .eq('id', id)
+        .eq('user_id', userId); // Ensure we only delete current user's items
       
       if (error) {
         console.error('Error deleting inventory item:', error);
@@ -224,6 +298,7 @@ export const inventoryService = {
 
   /**
    * Delete multiple inventory items by IDs
+   * Only deletes items belonging to the current user
    */
   async deleteInventoryItems(ids) {
     if (!supabaseUrl || !supabaseAnonKey) {
@@ -235,11 +310,20 @@ export const inventoryService = {
       return { success: false, error: "No IDs provided" };
     }
     
+    // Get current user ID
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      console.error('deleteInventoryItems: User must be logged in');
+      return { success: false, error: 'User must be logged in' };
+    }
+    
     try {
+      // Only delete items that belong to the current user
       const { error } = await supabase
         .from('inventory')
         .delete()
-        .in('id', ids);
+        .in('id', ids)
+        .eq('user_id', userId); // Ensure we only delete current user's items
       
       if (error) {
         console.error('Error deleting inventory items:', error);
