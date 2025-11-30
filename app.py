@@ -165,6 +165,69 @@ def tenant_has_paid_subscription(tenant_id):
         logger.error(f"Error checking paid subscription for tenant {tenant_id}: {e}")
         return False
 
+def get_trial_start_date(tenant_id, user_id):
+    """
+    Get the trial start date for a tenant or user.
+    For tenants: returns tenant.created_at (when the tenant was created)
+    For users without tenant: returns a default date (e.g., 30 days ago) or user creation date
+    This ensures we only count scans from when the trial actually started, excluding old test scans.
+    Always returns a datetime object with timezone info.
+    """
+    from datetime import timedelta
+    default_date = datetime.now(timezone.utc) - timedelta(days=30)
+    
+    try:
+        if tenant_id and supabase_admin:
+            try:
+                # Get tenant creation date
+                tenant_res = supabase_admin.from_('tenants').select('created_at').eq('id', tenant_id).limit(1).execute()
+                if tenant_res.data and len(tenant_res.data) > 0:
+                    tenant_created = tenant_res.data[0].get('created_at')
+                    if tenant_created:
+                        # Parse the date string if it's a string
+                        if isinstance(tenant_created, str):
+                            # Try parsing ISO format first
+                            try:
+                                # Handle different ISO formats
+                                date_str = tenant_created.replace('Z', '+00:00')
+                                parsed_date = datetime.fromisoformat(date_str)
+                                # Ensure it has timezone info
+                                if parsed_date.tzinfo is None:
+                                    parsed_date = parsed_date.replace(tzinfo=timezone.utc)
+                                return parsed_date
+                            except Exception as parse_error:
+                                logger.warning(f"Failed to parse tenant created_at '{tenant_created}': {parse_error}")
+                                return default_date
+                        # If it's already a datetime object, ensure it has timezone
+                        elif isinstance(tenant_created, datetime):
+                            if tenant_created.tzinfo is None:
+                                return tenant_created.replace(tzinfo=timezone.utc)
+                            return tenant_created
+                        else:
+                            # Try to convert to string and parse
+                            try:
+                                date_str = str(tenant_created).replace('Z', '+00:00')
+                                parsed_date = datetime.fromisoformat(date_str)
+                                if parsed_date.tzinfo is None:
+                                    parsed_date = parsed_date.replace(tzinfo=timezone.utc)
+                                return parsed_date
+                            except Exception as parse_error:
+                                logger.warning(f"Failed to convert and parse tenant created_at: {parse_error}")
+                                return default_date
+            except Exception as db_error:
+                logger.warning(f"Database error getting tenant {tenant_id} created_at: {db_error}")
+                return default_date
+        
+        # Fallback: if no tenant or tenant not found, use a reasonable default
+        # Only count scans from the last 30 days to exclude old test scans
+        return default_date
+    except Exception as e:
+        logger.error(f"Unexpected error getting trial start date for tenant {tenant_id}, user {user_id}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        # Default: only count scans from last 30 days
+        return default_date
+
 def log_scan_to_history(user_id, tenant_id, code, asin, supabase_client):
     """
     Log a scan to scan_history, but only if this user hasn't already scanned this exact code.
@@ -1032,7 +1095,7 @@ def external_lookup():
                 # Try to find by FNSKU
                 cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('fnsku', fnsku).maybe_single().execute()
                 
-                if cache_result.data:
+                if cache_result and hasattr(cache_result, 'data') and cache_result.data:
                     logger.info(f"✅ Found FNSKU {fnsku} in Supabase cache - NO API CHARGE!")
                     cached = cache_result.data
                     
@@ -1353,13 +1416,24 @@ def get_scan_count():
         # Check if tenant has paid subscription
         is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
         
-        # Count scans
+        # Get trial start date to exclude old test scans
+        trial_start_date = get_trial_start_date(tenant_id, user_id) if not is_paid else None
+        
+        # Count scans (only after trial start date for free trial users)
         if tenant_id:
-            scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
-                .eq('tenant_id', tenant_id).execute()
+            query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                .eq('tenant_id', tenant_id)
+            # Only count scans after trial start date (excludes old test scans)
+            if trial_start_date:
+                query = query.gte('scanned_at', trial_start_date.isoformat())
+            scan_res = query.execute()
         else:
-            scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
-                .eq('user_id', user_id).execute()
+            query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                .eq('user_id', user_id)
+            # Only count scans after trial start date (excludes old test scans)
+            if trial_start_date:
+                query = query.gte('scanned_at', trial_start_date.isoformat())
+            scan_res = query.execute()
         
         used_scans = getattr(scan_res, 'count', None)
         if used_scans is None:
@@ -1443,15 +1517,26 @@ def scan_product():
                 is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
 
                 if not is_paid:
+                    # Get trial start date to exclude old test scans
+                    trial_start_date = get_trial_start_date(tenant_id, user_id)
+                    
                     # If we have a tenant, count by tenant; otherwise, fall back to user-based counting
                     if tenant_id:
-                        logger.info(f"Checking free trial usage for tenant {tenant_id}")
-                        scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
-                            .eq('tenant_id', tenant_id).execute()
+                        logger.info(f"Checking free trial usage for tenant {tenant_id} (trial started: {trial_start_date})")
+                        query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                            .eq('tenant_id', tenant_id)
+                        # Only count scans after trial start date (excludes old test scans)
+                        if trial_start_date:
+                            query = query.gte('scanned_at', trial_start_date.isoformat())
+                        scan_res = query.execute()
                     else:
-                        logger.info(f"Checking free trial usage for user {user_id} (no tenant_id)")
-                        scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
-                            .eq('user_id', user_id).execute()
+                        logger.info(f"Checking free trial usage for user {user_id} (no tenant_id, trial started: {trial_start_date})")
+                        query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                            .eq('user_id', user_id)
+                        # Only count scans after trial start date (excludes old test scans)
+                        if trial_start_date:
+                            query = query.gte('scanned_at', trial_start_date.isoformat())
+                        scan_res = query.execute()
 
                     used_scans = getattr(scan_res, 'count', None)
                     if used_scans is None:
@@ -1490,7 +1575,7 @@ def scan_product():
                 try:
                     cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('upc', code).maybe_single().execute()
                     
-                    if cache_result.data:
+                    if cache_result and hasattr(cache_result, 'data') and cache_result.data:
                         cached = cache_result.data
                         from datetime import timedelta
                         now = datetime.now(timezone.utc)
@@ -1506,6 +1591,40 @@ def scan_product():
                         
                         # If cache is fresh (<30 days), return immediately
                         if age_days < 30:
+                            # Try to get fresh Amazon price if we have ASIN and Rainforest API key
+                            cached_price = cached.get('price', 0) or 0
+                            price_source = 'cache'
+                            cached_asin = cached.get('asin', '')
+                            
+                            # If we have ASIN in cache, try to get current Amazon price
+                            if cached_asin and len(cached_asin) >= 10 and RAINFOREST_API_KEY:
+                                try:
+                                    logger.info(f"🔍 Cached UPC has ASIN {cached_asin}, fetching current Amazon price...")
+                                    rainforest_response = requests.get(
+                                        'https://api.rainforestapi.com/request',
+                                        params={
+                                            'api_key': RAINFOREST_API_KEY,
+                                            'type': 'product',
+                                            'amazon_domain': 'amazon.com',
+                                            'asin': cached_asin
+                                        },
+                                        timeout=10
+                                    )
+                                    
+                                    if rainforest_response.status_code == 200:
+                                        rainforest_json = rainforest_response.json()
+                                        if rainforest_json.get('product'):
+                                            product = rainforest_json['product']
+                                            buybox_price = product.get('buybox_winner', {}).get('price', {})
+                                            if buybox_price:
+                                                amazon_price = buybox_price.get('value')
+                                                if amazon_price:
+                                                    cached_price = amazon_price
+                                                    price_source = 'amazon_rainforest'
+                                                    logger.info(f"✅ Updated price from Amazon: ${cached_price}")
+                                except Exception as rainforest_error:
+                                    logger.warning(f"⚠️ Could not fetch Amazon price for cached UPC: {rainforest_error}")
+                            
                             # Log scan to history (even if cached, it counts toward trial limit)
                             # But only count unique scans per user
                             print(f"\n🔵🔵🔵 ABOUT TO CALL log_scan_to_history (UPC)")
@@ -1514,7 +1633,7 @@ def scan_product():
                             print(f"   code: {code}")
                             print(f"   supabase_admin: {supabase_admin is not None}")
                             logger.info(f"🔵 Calling log_scan_to_history (UPC): user_id={user_id}, tenant_id={tenant_id}, code={code}")
-                            scan_was_logged = log_scan_to_history(user_id, tenant_id, code, cached.get('asin', ''), supabase_admin)
+                            scan_was_logged = log_scan_to_history(user_id, tenant_id, code, cached_asin, supabase_admin)
                             print(f"🔵🔵🔵 log_scan_to_history RETURNED (UPC): {scan_was_logged}")
                             logger.info(f"🔵 log_scan_to_history returned (UPC): {scan_was_logged}")
                             
@@ -1531,35 +1650,68 @@ def scan_product():
                                         print(f"   user_id: {user_id}")
                                         print(f"   tenant_id: {tenant_id}")
                                         
+                                        # Get trial start date to exclude old test scans
+                                        try:
+                                            trial_start_date = get_trial_start_date(tenant_id, user_id)
+                                            print(f"   Trial start date: {trial_start_date}")
+                                        except Exception as trial_date_error:
+                                            logger.error(f"Error getting trial start date: {trial_date_error}")
+                                            print(f"   ❌ Trial date error: {trial_date_error}, using fallback")
+                                            # Use fallback: count all scans (better than failing)
+                                            from datetime import timedelta
+                                            trial_start_date = datetime.now(timezone.utc) - timedelta(days=30)
+                                        
                                         for attempt in range(max_retries):
                                             print(f"   Attempt {attempt + 1}/{max_retries}...")
-                                            if tenant_id:
-                                                print(f"   Query: tenant_id={tenant_id}")
-                                                scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                                    .eq('tenant_id', tenant_id).execute()
-                                            else:
-                                                # Match the insert logic: if no tenant_id, count by user_id only
-                                                print(f"   Query: user_id={user_id} (no tenant_id)")
-                                                scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                                    .eq('user_id', user_id).execute()
-                                            
-                                            used_scans = getattr(scan_res, 'count', None)
-                                            if used_scans is None:
-                                                used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
-                                            
-                                            print(f"   Count result: {used_scans} scans found")
-                                            if hasattr(scan_res, 'data') and scan_res.data:
-                                                print(f"   Sample records: {scan_res.data[:3]}")
-                                            
-                                            # If scan was logged and count is still 0, wait a bit and retry
-                                            if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
-                                                import time
-                                                wait_time = 0.3 * (attempt + 1)  # Increasing wait time
-                                                print(f"   ⏳ Waiting {wait_time}s before retry...")
-                                                time.sleep(wait_time)
-                                                logger.info(f"   Retry {attempt + 1}/{max_retries}: count was 0, retrying...")
-                                            else:
-                                                break
+                                            try:
+                                                if tenant_id:
+                                                    print(f"   Query: tenant_id={tenant_id}, trial_start={trial_start_date}")
+                                                    query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                                        .eq('tenant_id', tenant_id)
+                                                    # Only count scans after trial start date (excludes old test scans)
+                                                    if trial_start_date:
+                                                        query = query.gte('scanned_at', trial_start_date.isoformat())
+                                                    scan_res = query.execute()
+                                                else:
+                                                    # Match the insert logic: if no tenant_id, count by user_id only
+                                                    print(f"   Query: user_id={user_id} (no tenant_id), trial_start={trial_start_date}")
+                                                    query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                                        .eq('user_id', user_id)
+                                                    # Only count scans after trial start date (excludes old test scans)
+                                                    if trial_start_date:
+                                                        query = query.gte('scanned_at', trial_start_date.isoformat())
+                                                    scan_res = query.execute()
+                                                
+                                                used_scans = getattr(scan_res, 'count', None)
+                                                if used_scans is None:
+                                                    used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
+                                                
+                                                print(f"   Count result: {used_scans} scans found")
+                                                if hasattr(scan_res, 'data') and scan_res.data:
+                                                    print(f"   Sample records: {scan_res.data[:3]}")
+                                                
+                                                # If scan was logged and count is still 0, wait a bit and retry
+                                                if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
+                                                    import time
+                                                    wait_time = 0.3 * (attempt + 1)  # Increasing wait time
+                                                    print(f"   ⏳ Waiting {wait_time}s before retry...")
+                                                    time.sleep(wait_time)
+                                                    logger.info(f"   Retry {attempt + 1}/{max_retries}: count was 0, retrying...")
+                                                else:
+                                                    break
+                                            except Exception as query_error:
+                                                logger.error(f"Error in scan count query attempt {attempt + 1}: {query_error}")
+                                                print(f"   ❌ Query error on attempt {attempt + 1}: {query_error}")
+                                                import traceback
+                                                logger.error(f"   Traceback: {traceback.format_exc()}")
+                                                if attempt == max_retries - 1:
+                                                    # Last attempt failed, use fallback
+                                                    used_scans = 0
+                                                    break
+                                                else:
+                                                    import time
+                                                    time.sleep(0.3 * (attempt + 1))
+                                                    continue
                                         
                                         logger.info(f"📊 UPC cached scan count: used={used_scans}, was_logged={scan_was_logged}")
                                         print(f"📊📊📊 FINAL SCAN COUNT (UPC): {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
@@ -1582,16 +1734,17 @@ def scan_product():
                             response_data = {
                                 "success": True,
                                 "fnsku": cached.get('fnsku', ''),
-                                "asin": cached.get('asin', ''),
+                                "asin": cached_asin,
                                 "title": cached.get('product_name', ''),
-                                "price": str(cached.get('price', 0)) if cached.get('price') else '',
+                                "price": str(cached_price) if cached_price else '',
                                 "image": cached.get('image_url', ''),
                                 "brand": cached.get('brand', ''),
                                 "category": cached.get('category', ''),
                                 "description": cached.get('description', ''),
                                 "upc": cached.get('upc', code),
-                                "amazon_url": f"https://www.amazon.com/dp/{cached.get('asin')}" if cached.get('asin') else '',
+                                "amazon_url": f"https://www.amazon.com/dp/{cached_asin}" if cached_asin else '',
                                 "source": "cache",
+                                "price_source": price_source,  # Indicate where price came from
                                 "cost_status": "no_charge",
                                 "cached": True,
                                 "code_type": "UPC",
@@ -1624,8 +1777,74 @@ def scan_product():
                 if upc_data.get('images') and len(upc_data['images']) > 0:
                     image_url = upc_data['images'][0]
                 
-                # Get price (use lowest recorded price if available)
-                price = upc_data.get('lowest_recorded_price', 0) or upc_data.get('highest_recorded_price', 0) or 0
+                # Try to find ASIN from UPCitemdb offers (Amazon offers often have ASINs)
+                potential_asin = ''
+                amazon_price = None
+                price_source = 'upcitemdb'  # Track where price came from
+                
+                # Check offers for Amazon ASIN
+                offers = upc_data.get('offers', [])
+                for offer in offers:
+                    if isinstance(offer, dict):
+                        # Check if this is an Amazon offer
+                        merchant = offer.get('merchant', '').lower()
+                        if 'amazon' in merchant:
+                            potential_asin = offer.get('asin', '') or offer.get('link', '').split('/dp/')[-1].split('/')[0] if '/dp/' in offer.get('link', '') else ''
+                            # Try to get price from Amazon offer
+                            if offer.get('price'):
+                                try:
+                                    amazon_price = float(offer.get('price', 0))
+                                    price_source = 'amazon_offer'
+                                except:
+                                    pass
+                
+                # If we found an ASIN, try to get actual Amazon price from Rainforest API
+                if potential_asin and len(potential_asin) >= 10 and RAINFOREST_API_KEY:
+                    try:
+                        logger.info(f"🔍 Found ASIN {potential_asin} from UPCitemdb, fetching Amazon price from Rainforest API...")
+                        rainforest_response = requests.get(
+                            'https://api.rainforestapi.com/request',
+                            params={
+                                'api_key': RAINFOREST_API_KEY,
+                                'type': 'product',
+                                'amazon_domain': 'amazon.com',
+                                'asin': potential_asin
+                            },
+                            timeout=10
+                        )
+                        
+                        if rainforest_response.status_code == 200:
+                            rainforest_json = rainforest_response.json()
+                            if rainforest_json.get('product'):
+                                product = rainforest_json['product']
+                                # Get buybox price (actual Amazon price)
+                                buybox_price = product.get('buybox_winner', {}).get('price', {})
+                                if buybox_price:
+                                    amazon_price = buybox_price.get('value')
+                                    if amazon_price:
+                                        price_source = 'amazon_rainforest'
+                                        logger.info(f"✅ Got Amazon price from Rainforest: ${amazon_price}")
+                                # Also update ASIN if we got it from Rainforest
+                                if product.get('asin'):
+                                    potential_asin = product.get('asin')
+                    except Exception as rainforest_error:
+                        logger.warning(f"⚠️ Could not fetch Amazon price from Rainforest: {rainforest_error}")
+                
+                # Use Amazon price if available, otherwise fall back to UPCitemdb price
+                if amazon_price:
+                    price = amazon_price
+                else:
+                    # Get price from UPCitemdb (generic retail price)
+                    price = upc_data.get('lowest_recorded_price', 0) or upc_data.get('highest_recorded_price', 0) or 0
+                
+                # Store the ASIN if we found one
+                found_asin = potential_asin if len(potential_asin) >= 10 else ''
+                
+                # Log scan to history (even if not cached, it counts toward trial limit)
+                scan_was_logged = False
+                if supabase_admin and user_id:
+                    scan_was_logged = log_scan_to_history(user_id, tenant_id, code, '', supabase_admin)
+                    logger.info(f"📝 Logged UPC scan to history: {scan_was_logged}")
                 
                 # Save to cache
                 if supabase_admin:
@@ -1634,7 +1853,7 @@ def scan_product():
                         cache_data = {
                             'upc': code,
                             'fnsku': '',  # UPCs don't have FNSKUs
-                            'asin': '',  # Will try to find ASIN via Rainforest if needed
+                            'asin': found_asin,  # ASIN found from offers or Rainforest
                             'product_name': upc_data.get('title', ''),
                             'description': upc_data.get('description', ''),
                             'price': price,
@@ -1649,7 +1868,7 @@ def scan_product():
                         
                         # Check if exists
                         existing = supabase_admin.table('api_lookup_cache').select('id').eq('upc', code).maybe_single().execute()
-                        if existing.data:
+                        if existing and hasattr(existing, 'data') and existing.data:
                             supabase_admin.table('api_lookup_cache').update(cache_data).eq('upc', code).execute()
                         else:
                             supabase_admin.table('api_lookup_cache').insert(cache_data).execute()
@@ -1657,10 +1876,82 @@ def scan_product():
                     except Exception as save_error:
                         logger.warning(f"⚠️ Could not save UPC to cache: {save_error}")
                 
-                return jsonify({
+                # Get scan count for response
+                scan_count_data = None
+                if supabase_admin and user_id:
+                    try:
+                        is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
+                        if not is_paid:
+                            # Get trial start date to exclude old test scans
+                            try:
+                                trial_start_date = get_trial_start_date(tenant_id, user_id)
+                            except Exception as trial_date_error:
+                                logger.error(f"Error getting trial start date: {trial_date_error}")
+                                from datetime import timedelta
+                                trial_start_date = datetime.now(timezone.utc) - timedelta(days=30)
+                            
+                            # Count scans
+                            max_retries = 5 if scan_was_logged else 1
+                            used_scans = 0
+                            for attempt in range(max_retries):
+                                try:
+                                    if tenant_id:
+                                        query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                            .eq('tenant_id', tenant_id)
+                                        if trial_start_date:
+                                            query = query.gte('scanned_at', trial_start_date.isoformat())
+                                        scan_res = query.execute()
+                                    else:
+                                        query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                            .eq('user_id', user_id)
+                                        if trial_start_date:
+                                            query = query.gte('scanned_at', trial_start_date.isoformat())
+                                        scan_res = query.execute()
+                                    
+                                    used_scans = getattr(scan_res, 'count', None)
+                                    if used_scans is None:
+                                        used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
+                                    
+                                    if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
+                                        import time
+                                        time.sleep(0.3 * (attempt + 1))
+                                        continue
+                                    else:
+                                        break
+                                except Exception as query_error:
+                                    logger.error(f"Error in scan count query: {query_error}")
+                                    if attempt == max_retries - 1:
+                                        used_scans = 0
+                                        break
+                                    import time
+                                    time.sleep(0.3 * (attempt + 1))
+                            
+                            scan_count_data = {
+                                'used': used_scans,
+                                'limit': FREE_TRIAL_SCAN_LIMIT,
+                                'remaining': max(0, FREE_TRIAL_SCAN_LIMIT - used_scans),
+                                'is_paid': False
+                            }
+                        else:
+                            scan_count_data = {
+                                'used': 0,
+                                'limit': None,
+                                'remaining': None,
+                                'is_paid': True
+                            }
+                    except Exception as count_error:
+                        logger.error(f"❌ Failed to get scan count for UPC response: {count_error}")
+                        scan_count_data = {
+                            'used': 0,
+                            'limit': FREE_TRIAL_SCAN_LIMIT,
+                            'remaining': FREE_TRIAL_SCAN_LIMIT,
+                            'is_paid': False
+                        }
+                
+                response_data = {
                     "success": True,
                     "fnsku": '',
-                    "asin": '',
+                    "asin": found_asin,
                     "title": upc_data.get('title', ''),
                     "price": str(price) if price else '',
                     "image": image_url,
@@ -1668,13 +1959,28 @@ def scan_product():
                     "category": upc_data.get('category', ''),
                     "description": upc_data.get('description', ''),
                     "upc": code,
-                    "amazon_url": '',
+                    "amazon_url": f"https://www.amazon.com/dp/{found_asin}" if found_asin else '',
                     "source": "upcitemdb",
+                    "price_source": price_source,  # Indicate where price came from
                     "cost_status": "free",
                     "cached": False,
                     "code_type": "UPC",
                     "raw": upc_data
-                })
+                }
+                
+                # Always include scan_count
+                if scan_count_data:
+                    response_data['scan_count'] = scan_count_data
+                else:
+                    response_data['scan_count'] = {
+                        'used': 0,
+                        'limit': FREE_TRIAL_SCAN_LIMIT,
+                        'remaining': FREE_TRIAL_SCAN_LIMIT,
+                        'is_paid': False
+                    }
+                
+                logger.info(f"✅ Returning UPC data from UPCitemdb for {code}")
+                return jsonify(response_data)
             else:
                 return jsonify({
                     "success": False,
@@ -1709,7 +2015,7 @@ def scan_product():
                     cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('fnsku', code).maybe_single().execute()
                     logger.info(f"   Cache query: looking for FNSKU={code}")
                 
-                if cache_result.data:
+                if cache_result and hasattr(cache_result, 'data') and cache_result.data:
                     logger.info(f"✅✅✅ FOUND IN CACHE! Code: {code}, ASIN: {cache_result.data.get('asin', 'N/A')}")
                     print(f"✅✅✅ FOUND IN CACHE! Code: {code}")
                     cached = cache_result.data
@@ -1754,17 +2060,28 @@ def scan_product():
                                     print(f"   user_id: {user_id}")
                                     print(f"   tenant_id: {tenant_id}")
                                     
+                                    # Get trial start date to exclude old test scans
+                                    trial_start_date = get_trial_start_date(tenant_id, user_id)
+                                    
                                     for attempt in range(max_retries):
                                         print(f"   Attempt {attempt + 1}/{max_retries}...")
                                         if tenant_id:
-                                            print(f"   Query: tenant_id={tenant_id}")
-                                            scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                                .eq('tenant_id', tenant_id).execute()
+                                            print(f"   Query: tenant_id={tenant_id}, trial_start={trial_start_date}")
+                                            query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                                .eq('tenant_id', tenant_id)
+                                            # Only count scans after trial start date (excludes old test scans)
+                                            if trial_start_date:
+                                                query = query.gte('scanned_at', trial_start_date.isoformat())
+                                            scan_res = query.execute()
                                         else:
                                             # Match the insert logic: if no tenant_id, count by user_id only
-                                            print(f"   Query: user_id={user_id} (no tenant_id)")
-                                            scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                                .eq('user_id', user_id).execute()
+                                            print(f"   Query: user_id={user_id} (no tenant_id), trial_start={trial_start_date}")
+                                            query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                                .eq('user_id', user_id)
+                                            # Only count scans after trial start date (excludes old test scans)
+                                            if trial_start_date:
+                                                query = query.gte('scanned_at', trial_start_date.isoformat())
+                                            scan_res = query.execute()
                                         
                                         used_scans = getattr(scan_res, 'count', None)
                                         if used_scans is None:
@@ -1933,6 +2250,7 @@ def scan_product():
         if not asin or len(asin) < 10:
             logger.info(f"⏳ ASIN not immediately available. Polling for task {task_id} (max {max_polls} attempts, ~{max_polls * 2}s)...")
             import time
+            task_state = 0  # Initialize task_state before polling loop
             
             for attempt in range(1, max_polls + 1):
                 # Retry AddOrGet after 2 polls to trigger processing
@@ -2318,17 +2636,28 @@ def scan_product():
                     print(f"   user_id: {user_id}")
                     print(f"   tenant_id: {tenant_id}")
                     
+                    # Get trial start date to exclude old test scans
+                    trial_start_date = get_trial_start_date(tenant_id, user_id)
+                    
                     for attempt in range(max_retries):
                         print(f"   Attempt {attempt + 1}/{max_retries}...")
                         if tenant_id:
-                            print(f"   Query: tenant_id={tenant_id}")
-                            scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                .eq('tenant_id', tenant_id).execute()
+                            print(f"   Query: tenant_id={tenant_id}, trial_start={trial_start_date}")
+                            query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                .eq('tenant_id', tenant_id)
+                            # Only count scans after trial start date (excludes old test scans)
+                            if trial_start_date:
+                                query = query.gte('scanned_at', trial_start_date.isoformat())
+                            scan_res = query.execute()
                         else:
                             # Match the insert logic: if no tenant_id, count by user_id only
-                            print(f"   Query: user_id={user_id} (no tenant_id)")
-                            scan_res = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                .eq('user_id', user_id).execute()
+                            print(f"   Query: user_id={user_id} (no tenant_id), trial_start={trial_start_date}")
+                            query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                                .eq('user_id', user_id)
+                            # Only count scans after trial start date (excludes old test scans)
+                            if trial_start_date:
+                                query = query.gte('scanned_at', trial_start_date.isoformat())
+                            scan_res = query.execute()
                         
                         used_scans = getattr(scan_res, 'count', None)
                         if used_scans is None:

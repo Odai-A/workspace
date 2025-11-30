@@ -434,7 +434,9 @@ const Scanner = () => {
           // Set product info - backend already handled everything!
           handleProductFound(displayableProduct, code);
           
-            // Update scan count from response if available, otherwise fetch it
+          // Update scan count from response if available, otherwise fetch it
+          // Use setTimeout to avoid setState during render warning
+          setTimeout(() => {
             console.log("📊 Scan response scan_count:", apiResult.scan_count);
             if (apiResult.scan_count) {
                 console.log("✅ Updating scan count from response:", apiResult.scan_count);
@@ -449,10 +451,9 @@ const Scanner = () => {
             } else {
                 console.log("⚠️ No scan_count in response, fetching...");
                 // Fallback: fetch scan count after a small delay to ensure DB has updated
-                setTimeout(() => {
-                  fetchScanCount();
-                }, 500);
+                fetchScanCount();
             }
+          }, 0);
         } else {
           // Handle error response
           const errorMsg = apiResult?.message || apiResult?.error || "Failed to scan product";
@@ -563,12 +564,33 @@ const Scanner = () => {
 
   // Handle viewing product on Amazon
   const handleViewOnAmazon = () => {
-    if (productInfo && productInfo.asin) {
-      const amazonUrl = `https://www.amazon.com/dp/${productInfo.asin}`;
+    if (!productInfo) {
+      toast.error("No product information available");
+      return;
+    }
+    
+    let amazonUrl = '';
+    let productCode = '';
+    
+    if (productInfo.asin) {
+      amazonUrl = `https://www.amazon.com/dp/${productInfo.asin}`;
+      productCode = `ASIN: ${productInfo.asin}`;
+    } else if (productInfo.upc) {
+      amazonUrl = `https://www.amazon.com/s?k=${productInfo.upc}`;
+      productCode = `UPC: ${productInfo.upc}`;
+    } else if (productInfo.fnsku) {
+      amazonUrl = `https://www.amazon.com/s?k=${productInfo.fnsku}`;
+      productCode = `FNSKU: ${productInfo.fnsku}`;
+    } else if (productInfo.code) {
+      amazonUrl = `https://www.amazon.com/s?k=${productInfo.code}`;
+      productCode = `Code: ${productInfo.code}`;
+    }
+    
+    if (amazonUrl) {
       window.open(amazonUrl, '_blank');
-      toast.success(`🔗 Opening Amazon page for ASIN: ${productInfo.asin}`);
+      toast.success(`🔗 Opening Amazon search for ${productCode}`);
     } else {
-      toast.error("No ASIN available to view on Amazon");
+      toast.error("No product code available to search on Amazon");
     }
   };
 
@@ -615,18 +637,38 @@ const Scanner = () => {
 
   // Handle printing 4x6 label
   const handlePrintLabel = async () => {
-    if (!productInfo || !productInfo.asin) {
-      toast.error("No ASIN available to print label");
+    if (!productInfo) {
+      toast.error("No product information available to print label");
+      return;
+    }
+    
+    // For UPC scans, we might not have an ASIN - use UPC or product code instead
+    const productCode = productInfo.asin || productInfo.upc || productInfo.fnsku || productInfo.code || '';
+    if (!productCode) {
+      toast.error("No product code available to print label");
       return;
     }
 
-    const amazonUrl = `https://www.amazon.com/dp/${productInfo.asin}`;
+    // Use ASIN if available, otherwise use UPC or other code for URL
+    let amazonUrl = '';
+    if (productInfo.asin) {
+      amazonUrl = `https://www.amazon.com/dp/${productInfo.asin}`;
+    } else if (productInfo.upc) {
+      amazonUrl = `https://www.amazon.com/s?k=${productInfo.upc}`;
+    } else if (productInfo.fnsku) {
+      amazonUrl = `https://www.amazon.com/s?k=${productInfo.fnsku}`;
+    } else if (productCode) {
+      // Fallback: use product code for search
+      amazonUrl = `https://www.amazon.com/s?k=${productCode}`;
+    }
     
     // Use QR code API service for reliable printing (smaller size for top right corner)
-    const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(amazonUrl)}`;
+    // If no URL available, create QR code with product code or name
+    const qrData = amazonUrl || productCode || productInfo.name || 'Product';
+    const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(qrData)}`;
     
     // Product data should already be enhanced from Rainforest API when scanned
-    // But if image is missing, try to fetch it one more time
+    // But if image is missing, try to fetch it one more time (only if we have ASIN)
     let labelProductData = { ...productInfo };
     
     if (!labelProductData.image_url && productInfo.asin) {
@@ -670,11 +712,14 @@ const Scanner = () => {
     // Show full product name (no truncation)
     const productName = productInfo.name || 'Product';
     
+    // Get product identifier for title (ASIN, UPC, FNSKU, or code)
+    const productId = productInfo.asin || productInfo.upc || productInfo.fnsku || productInfo.code || 'Product';
+    
     return `
       <!DOCTYPE html>
       <html>
         <head>
-          <title>Product Label - ${productInfo.asin}</title>
+          <title>Product Label - ${productId}</title>
           <style>
             @page {
               size: 4in 6in;
@@ -888,7 +933,7 @@ const Scanner = () => {
           </div>
 
           <div class="asin-display">
-            ASIN: ${productInfo.asin}
+            ${productInfo.asin ? `ASIN: ${productInfo.asin}` : (productInfo.upc ? `UPC: ${productInfo.upc}` : (productInfo.fnsku ? `FNSKU: ${productInfo.fnsku}` : 'Product Code'))}
           </div>
 
           ${productInfo.image_url ? `
@@ -942,7 +987,7 @@ const Scanner = () => {
         </div>
 
         <div class="asin-display">
-          ASIN: ${productInfo.asin}
+          ${productInfo.asin ? `ASIN: ${productInfo.asin}` : (productInfo.upc ? `UPC: ${productInfo.upc}` : (productInfo.fnsku ? `FNSKU: ${productInfo.fnsku}` : 'Product Code'))}
         </div>
 
         ${productInfo.image_url ? `
@@ -971,10 +1016,24 @@ const Scanner = () => {
   // Helper function to create combined batch label HTML (all labels in one document)
   const createBatchLabelHTML = (batchItems) => {
     const labelsHTML = batchItems
-      .filter(item => item.product && item.product.asin)
+      .filter(item => item.product && (item.product.asin || item.product.upc || item.product.fnsku || item.product.code))
       .map(item => {
-        const amazonUrl = `https://www.amazon.com/dp/${item.product.asin}`;
-        const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(amazonUrl)}`;
+        // Use ASIN if available, otherwise use UPC or other code
+        let amazonUrl = '';
+        if (item.product.asin) {
+          amazonUrl = `https://www.amazon.com/dp/${item.product.asin}`;
+        } else if (item.product.upc) {
+          amazonUrl = `https://www.amazon.com/s?k=${item.product.upc}`;
+        } else if (item.product.fnsku) {
+          amazonUrl = `https://www.amazon.com/s?k=${item.product.fnsku}`;
+        } else {
+          const productCode = item.product.code || item.product.fnsku || item.product.upc || '';
+          amazonUrl = productCode ? `https://www.amazon.com/s?k=${productCode}` : '';
+        }
+        
+        // Create QR code with URL or product code
+        const qrData = amazonUrl || item.product.upc || item.product.fnsku || item.product.code || 'Product';
+        const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(qrData)}`;
         return createLabelBody(item.product, amazonUrl, qrApiUrl);
       })
       .join('');
@@ -1765,12 +1824,33 @@ const Scanner = () => {
 
   // Handle viewing Amazon from recent scan
   const handleViewOnAmazonFromScan = (scanItem) => {
-    if (scanItem.productInfo && scanItem.productInfo.asin) {
-      const amazonUrl = `https://www.amazon.com/dp/${scanItem.productInfo.asin}`;
+    if (!scanItem.productInfo) {
+      toast.error("No product information available");
+      return;
+    }
+    
+    let amazonUrl = '';
+    let productCode = '';
+    
+    if (scanItem.productInfo.asin) {
+      amazonUrl = `https://www.amazon.com/dp/${scanItem.productInfo.asin}`;
+      productCode = `ASIN: ${scanItem.productInfo.asin}`;
+    } else if (scanItem.productInfo.upc) {
+      amazonUrl = `https://www.amazon.com/s?k=${scanItem.productInfo.upc}`;
+      productCode = `UPC: ${scanItem.productInfo.upc}`;
+    } else if (scanItem.productInfo.fnsku) {
+      amazonUrl = `https://www.amazon.com/s?k=${scanItem.productInfo.fnsku}`;
+      productCode = `FNSKU: ${scanItem.productInfo.fnsku}`;
+    } else if (scanItem.code) {
+      amazonUrl = `https://www.amazon.com/s?k=${scanItem.code}`;
+      productCode = `Code: ${scanItem.code}`;
+    }
+    
+    if (amazonUrl) {
       window.open(amazonUrl, '_blank');
-      toast.success(`🔗 Opening Amazon page for ASIN: ${scanItem.productInfo.asin}`);
+      toast.success(`🔗 Opening Amazon search for ${productCode}`);
     } else {
-      toast.error("No ASIN available for this scan");
+      toast.error("No product code available to search on Amazon");
     }
   };
 
@@ -1837,17 +1917,37 @@ const Scanner = () => {
 
   // Handle printing label from recent scan
   const handlePrintLabelFromScan = async (scanItem) => {
-    if (!scanItem.productInfo || !scanItem.productInfo.asin) {
-      toast.error("No ASIN available to print label");
+    if (!scanItem.productInfo) {
+      toast.error("No product information available to print label");
       return;
     }
 
-    const amazonUrl = `https://www.amazon.com/dp/${scanItem.productInfo.asin}`;
-    const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(amazonUrl)}`;
+    // Get product code (ASIN, UPC, FNSKU, or code)
+    const productCode = scanItem.productInfo.asin || scanItem.productInfo.upc || scanItem.productInfo.fnsku || scanItem.productInfo.code || '';
+    if (!productCode) {
+      toast.error("No product code available to print label");
+      return;
+    }
+
+    // Use ASIN if available, otherwise use UPC or other code
+    let amazonUrl = '';
+    if (scanItem.productInfo.asin) {
+      amazonUrl = `https://www.amazon.com/dp/${scanItem.productInfo.asin}`;
+    } else if (scanItem.productInfo.upc) {
+      amazonUrl = `https://www.amazon.com/s?k=${scanItem.productInfo.upc}`;
+    } else if (scanItem.productInfo.fnsku) {
+      amazonUrl = `https://www.amazon.com/s?k=${scanItem.productInfo.fnsku}`;
+    } else {
+      amazonUrl = `https://www.amazon.com/s?k=${productCode}`;
+    }
+    
+    // Create QR code with URL or product code
+    const qrData = amazonUrl || productCode;
+    const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(qrData)}`;
     
     let labelProductData = { ...scanItem.productInfo };
     
-    // If image is missing, try to fetch it
+    // If image is missing, try to fetch it (only if we have ASIN)
     if (!labelProductData.image_url && scanItem.productInfo.asin) {
       toast.info("📦 Fetching product image...", { autoClose: 1500 });
       try {
@@ -2360,7 +2460,7 @@ const Scanner = () => {
                     type="button"
                     className="flex-1 inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
                     onClick={handleViewOnAmazon}
-                    disabled={loading || !productInfo.asin}
+                    disabled={loading || !productInfo}
                   >
                     <ArrowTopRightOnSquareIcon className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
                     View on Amazon
@@ -2369,7 +2469,7 @@ const Scanner = () => {
                     type="button"
                     className="flex-1 inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
                     onClick={handlePrintLabel}
-                    disabled={loading || !productInfo.asin}
+                    disabled={loading || !productInfo}
                   >
                     <PrinterIcon className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
                     Print Label
