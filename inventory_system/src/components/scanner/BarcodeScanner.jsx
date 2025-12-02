@@ -1,5 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import Quagga from '@ericblade/quagga2';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { BrowserMultiFormatReader, NotFoundException } from '@zxing/browser';
 
 const BarcodeScanner = ({ 
   onDetected, 
@@ -8,196 +8,267 @@ const BarcodeScanner = ({
   scannerSettings = {}, 
   className = '',
 }) => {
-  const scannerRef = useRef(null);
-  const [initialized, setInitialized] = useState(false);
+  const videoRef = useRef(null);
+  const containerRef = useRef(null);
+  const readerRef = useRef(null);
+  const streamRef = useRef(null);
+  const scanIntervalRef = useRef(null);
+  const canvasRef = useRef(null);
+  const [isScanning, setIsScanning] = useState(false);
+  const [error, setError] = useState(null);
+  const [hasScanned, setHasScanned] = useState(false);
 
-  // Default scanner configuration
-  const defaultScannerConfig = {
-    inputStream: {
-      type: 'LiveStream',
-      constraints: {
-        width: { min: 450 },
-        height: { min: 300 },
-        facingMode: 'environment',
-        aspectRatio: { min: 1, max: 2 },
-      },
-      area: { // Define scan area dimensions
-        top: '0%',
-        right: '0%',
-        left: '0%',
-        bottom: '0%',
-      },
-    },
-    locator: {
-      patchSize: 'medium',
-      halfSample: true,
-    },
-    numOfWorkers: navigator.hardwareConcurrency || 4,
-    frequency: 10,
-    decoder: {
-      readers: [
-        'ean_reader',
-        'ean_8_reader',
-        'upc_reader',
-        'code_128_reader',
-        'code_39_reader',
-        'code_93_reader'
-      ],
-    },
-    locate: true,
-  };
-
-  // Merge default config with provided settings
-  const scannerConfig = { ...defaultScannerConfig, ...scannerSettings };
-
-  // Initialize the scanner when component mounts or when scannerRunning changes
+  // Initialize ZXing reader
   useEffect(() => {
-    if (!scannerRef.current) {
+    if (!readerRef.current) {
+      readerRef.current = new BrowserMultiFormatReader();
+    }
+    return () => {
+      stopScanning();
+    };
+  }, []);
+
+  const stopScanning = useCallback(() => {
+    // Clear scan interval
+    if (scanIntervalRef.current) {
+      clearInterval(scanIntervalRef.current);
+      scanIntervalRef.current = null;
+    }
+
+    // Stop video stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => {
+        track.stop();
+      });
+      streamRef.current = null;
+    }
+
+    // Reset video element
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+      videoRef.current.load();
+    }
+
+    setIsScanning(false);
+    setHasScanned(false);
+  }, []);
+
+  const startScanning = useCallback(async () => {
+    if (!videoRef.current || !containerRef.current || hasScanned) {
       return;
     }
 
-    // Start scanner if scannerRunning is true
-    if (scannerRunning && !initialized) {
-      // Make sure scannerConfig points to the correct DOM element
-      const updatedConfig = {
-        ...scannerConfig,
-        inputStream: {
-          ...scannerConfig.inputStream,
-          target: scannerRef.current.querySelector('.viewport') || scannerRef.current
-        }
+    try {
+      setError(null);
+      setIsScanning(true);
+
+      // Create optimal camera constraints
+      const videoConstraints = {
+        width: { ideal: 1920, min: 1280 },
+        height: { ideal: 1080, min: 720 },
+        facingMode: { ideal: 'environment' }, // Force rear camera
+        aspectRatio: { ideal: 16/9 },
+        frameRate: { ideal: 60, min: 30 }, // 60fps ideal
+        focusMode: 'continuous', // Continuous autofocus
+        exposureMode: 'continuous',
+        whiteBalanceMode: 'continuous',
+        zoom: { ideal: 1.0 },
+        ...scannerSettings
       };
 
-      try {
-        Quagga.init(updatedConfig, (err) => {
-          if (err) {
-            console.error('Error initializing Quagga:', err);
-            if (onError) {
-              onError(err);
-            }
-            return;
-          }
+      // Get user media with optimal settings
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: videoConstraints,
+        audio: false
+      });
+
+      streamRef.current = stream;
+
+      // Apply stream to video element
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.setAttribute('playsinline', 'true');
+        videoRef.current.setAttribute('autoplay', 'true');
+        videoRef.current.setAttribute('muted', 'true');
+        videoRef.current.setAttribute('autofocus', 'true');
+        
+        // Wait for video to be ready
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            reject(new Error('Video load timeout'));
+          }, 10000);
+
+          const onLoadedMetadata = () => {
+            clearTimeout(timeout);
+            videoRef.current.removeEventListener('loadedmetadata', onLoadedMetadata);
+            resolve();
+          };
+
+          videoRef.current.addEventListener('loadedmetadata', onLoadedMetadata);
           
-          console.log('Quagga initialized successfully');
-          setInitialized(true);
-          
-          try {
-            Quagga.start();
-            console.log('Quagga started successfully');
-          } catch (startErr) {
-            console.error('Error starting Quagga:', startErr);
-            if (onError) {
-              onError(startErr);
-            }
+          // Also handle if already loaded
+          if (videoRef.current.readyState >= 1) {
+            clearTimeout(timeout);
+            videoRef.current.removeEventListener('loadedmetadata', onLoadedMetadata);
+            resolve();
           }
         });
-      } catch (initErr) {
-        console.error('Error in Quagga initialization:', initErr);
-        if (onError) {
-          onError(initErr);
+
+        // Apply additional constraints after stream starts
+        const videoTrack = stream.getVideoTracks()[0];
+        if (videoTrack) {
+          const capabilities = videoTrack.getCapabilities();
+          const settings = videoTrack.getSettings();
+
+          // Apply continuous focus if supported
+          if (capabilities?.focusMode?.includes('continuous')) {
+            try {
+              await videoTrack.applyConstraints({
+                advanced: [{ focusMode: 'continuous' }]
+              });
+              console.log('✅ Continuous focus enabled');
+            } catch (err) {
+              console.warn('Could not set continuous focus:', err);
+            }
+          }
+
+          // Apply zoom if supported
+          if (capabilities?.zoom) {
+            try {
+              const maxZoom = Math.min(capabilities.zoom.max || 1, 2);
+              await videoTrack.applyConstraints({
+                advanced: [{ zoom: maxZoom }]
+              });
+              console.log('✅ Zoom applied');
+            } catch (err) {
+              console.warn('Could not set zoom:', err);
+            }
+          }
+
+          // Log camera settings
+          console.log('📹 Camera settings:', {
+            width: settings.width,
+            height: settings.height,
+            frameRate: settings.frameRate,
+            focusMode: settings.focusMode,
+            exposureMode: settings.exposureMode,
+            zoom: settings.zoom
+          });
+        }
+
+        // Play video
+        try {
+          await videoRef.current.play();
+        } catch (playError) {
+          console.warn('Autoplay prevented, user interaction required');
         }
       }
 
-      // Set up barcode detection handler
-      Quagga.onDetected((result) => {
-        if (result && result.codeResult && result.codeResult.code) {
-          // Get barcode data
-          const code = result.codeResult.code;
-          const format = result.codeResult.format;
-          const confidence = Math.round(result.codeResult.confidence * 100);
+      // Create canvas for decoding
+      if (!canvasRef.current) {
+        canvasRef.current = document.createElement('canvas');
+      }
+
+      // Start scanning loop - decode every 50ms (20 scans per second)
+      scanIntervalRef.current = setInterval(async () => {
+        if (!videoRef.current || !canvasRef.current || hasScanned) {
+          return;
+        }
+
+        try {
+          const video = videoRef.current;
           
-          // Only report results with confidence above threshold
-          if (confidence >= 70) {
+          // Check if video is ready
+          if (video.readyState !== video.HAVE_ENOUGH_DATA) {
+            return;
+          }
+
+          // Set canvas dimensions to match video
+          canvasRef.current.width = video.videoWidth;
+          canvasRef.current.height = video.videoHeight;
+
+          // Draw video frame to canvas
+          const ctx = canvasRef.current.getContext('2d', { willReadFrequently: true });
+          ctx.drawImage(video, 0, 0, canvasRef.current.width, canvasRef.current.height);
+
+          // Decode barcode from canvas
+          const result = await readerRef.current.decodeFromCanvas(canvasRef.current);
+
+          if (result && result.getText()) {
+            const code = result.getText().trim();
+            const format = result.getBarcodeFormat().toString();
+
+            // Stop immediately after first successful scan
+            setHasScanned(true);
+            stopScanning();
+
+            // Call callback with result
             if (onDetected) {
               onDetected({
                 code,
                 format,
-                confidence,
+                confidence: 100, // ZXing doesn't provide confidence, assume high
               });
             }
           }
-        }
-      });
-
-      // Add optional processing handlers for better accuracy
-      Quagga.onProcessed((result) => {
-        const drawingCtx = Quagga.canvas.ctx.overlay;
-        const drawingCanvas = Quagga.canvas.dom.overlay;
-
-        if (result) {
-          // Clear previous drawing
-          if (drawingCtx) {
-            drawingCtx.clearRect(
-              0, 0, 
-              parseInt(drawingCanvas.getAttribute('width')), 
-              parseInt(drawingCanvas.getAttribute('height'))
-            );
-          }
-
-          // Draw boxes for detected barcodes
-          if (result.boxes) {
-            for (let i = 0; i < result.boxes.length; i++) {
-              const box = result.boxes[i];
-              if (box !== result.box) {
-                Quagga.ImageDebug.drawPath(box, { x: 0, y: 1 }, drawingCtx, {
-                  color: 'yellow',
-                  lineWidth: 2,
-                });
-              }
-            }
-          }
-
-          // Highlight successfully detected barcode
-          if (result.box) {
-            Quagga.ImageDebug.drawPath(result.box, { x: 0, y: 1 }, drawingCtx, {
-              color: 'blue',
-              lineWidth: 2,
-            });
-          }
-
-          // Draw the patch that Quagga is using for barcode detection analysis
-          if (result.codeResult && result.codeResult.code) {
-            Quagga.ImageDebug.drawPath(result.line, { x: 'x', y: 'y' }, drawingCtx, {
-              color: 'red',
-              lineWidth: 3,
-            });
-          }
-        }
-      });
-
-      return () => {
-        if (initialized) {
-          Quagga.stop();
-          setInitialized(false);
-        }
-      };
-    } else if (!scannerRunning && initialized) {
-      // Stop scanner if scannerRunning is false but scanner is initialized
-      Quagga.stop();
-      setInitialized(false);
-    }
-  }, [scannerRunning, scannerSettings, initialized]);
-
-  // Clean up on component unmount
-  useEffect(() => {
-    return () => {
-      if (initialized) {
-        try {
-          Quagga.stop();
-          console.log('Quagga scanner stopped successfully');
         } catch (err) {
-          console.error('Error stopping Quagga:', err);
+          // NotFoundException is expected when no barcode is found
+          if (!(err instanceof NotFoundException)) {
+            console.warn('Scan error:', err);
+          }
         }
+      }, 50); // 50ms = 20 scans per second
+
+    } catch (err) {
+      console.error('Error starting camera:', err);
+      setError(err.message || 'Failed to start camera');
+      setIsScanning(false);
+      
+      if (onError) {
+        onError(err);
       }
-    };
-  }, [initialized]);
+    }
+  }, [scannerSettings, onDetected, hasScanned, stopScanning, onError]);
+
+  // Handle scannerRunning prop changes
+  useEffect(() => {
+    if (scannerRunning && !isScanning && !hasScanned) {
+      // Small delay to ensure DOM is ready
+      setTimeout(() => {
+        startScanning();
+      }, 100);
+    } else if (!scannerRunning && isScanning) {
+      stopScanning();
+    }
+  }, [scannerRunning, isScanning, hasScanned, startScanning, stopScanning]);
+
+  // Reset hasScanned when scannerRunning becomes false
+  useEffect(() => {
+    if (!scannerRunning) {
+      setHasScanned(false);
+      setError(null);
+    }
+  }, [scannerRunning]);
 
   return (
     <div 
-      ref={scannerRef} 
+      ref={containerRef}
       className={`relative overflow-hidden rounded-lg ${className}`}
+      style={{ minHeight: '400px' }}
     >
-      {/* Scanner viewport */}
-      <div className="viewport absolute inset-0" />
+      {/* Video Element */}
+      <video
+        ref={videoRef}
+        className="absolute inset-0 w-full h-full object-cover"
+        playsInline
+        autoPlay
+        muted
+        style={{
+          transform: 'scaleX(-1)', // Mirror for better UX
+          imageRendering: 'crisp-edges',
+          WebkitTransform: 'scaleX(-1)',
+        }}
+      />
       
       {/* Scanner overlay with visual guides */}
       <div className="absolute inset-0 border-2 border-dashed border-blue-500 rounded-lg pointer-events-none">
@@ -208,8 +279,32 @@ const BarcodeScanner = ({
       
       {/* Instructions overlay */}
       <div className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-50 text-white p-2 text-center text-sm">
-        Position barcode within the red box
+        {isScanning ? 'Scanning...' : 'Position barcode within the red box'}
       </div>
+
+      {/* Error message */}
+      {error && (
+        <div className="absolute inset-0 flex items-center justify-center z-30 bg-black/80">
+          <div className="bg-red-500/90 text-white px-4 py-2 rounded-lg">
+            <p className="text-sm font-medium">{error}</p>
+          </div>
+        </div>
+      )}
+
+      {/* CSS for video quality */}
+      <style>{`
+        .barcode-scanner video {
+          width: 100% !important;
+          height: 100% !important;
+          object-fit: cover !important;
+          image-rendering: -webkit-optimize-contrast;
+          image-rendering: crisp-edges;
+          -webkit-transform: scaleX(-1);
+          transform: scaleX(-1);
+          filter: contrast(1.1) brightness(1.05) saturate(1.1);
+          -webkit-filter: contrast(1.1) brightness(1.05) saturate(1.1);
+        }
+      `}</style>
     </div>
   );
 };
