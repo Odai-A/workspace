@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { BrowserMultiFormatReader } from '@zxing/browser';
+import React, { useState, useRef, useEffect } from 'react';
+import { BrowserMultiFormatReader } from '@zxing/library';
 import { NotFoundException } from '@zxing/library';
 import PropTypes from 'prop-types';
 
@@ -14,316 +14,139 @@ const BarcodeReader = ({
 }) => {
   // Use onCodeDetected if provided, otherwise fall back to onDetected
   const handleDetectedCallback = onCodeDetected || onDetected;
-  const videoRef = useRef(null);
-  const containerRef = useRef(null);
+  const fileInputRef = useRef(null);
   const readerRef = useRef(null);
-  const streamRef = useRef(null);
-  const scanIntervalRef = useRef(null);
-  const canvasRef = useRef(null);
-  const focusTimeoutRef = useRef(null);
-  const videoTrackRef = useRef(null);
-  const [isScanning, setIsScanning] = useState(false);
+  const [isDecoding, setIsDecoding] = useState(false);
   const [error, setError] = useState(null);
-  const [hasScanned, setHasScanned] = useState(false);
+  const [previewImage, setPreviewImage] = useState(null);
+  const [result, setResult] = useState(null);
 
   // Initialize ZXing reader
   useEffect(() => {
     if (!readerRef.current) {
       readerRef.current = new BrowserMultiFormatReader();
     }
-    return () => {
-      stopScanning();
-    };
   }, []);
 
-  // Function to re-apply continuous focus (required for Safari)
-  const reapplyFocus = useCallback(async () => {
-    const track = videoTrackRef.current;
-    if (!track) return;
+  // Decode barcode from image file
+  const decodeImageFile = async (file) => {
+    if (!file) return;
+
+    setIsDecoding(true);
+    setError(null);
+    setResult(null);
+
+    let imageURL = null;
 
     try {
-      const capabilities = track.getCapabilities();
-      if (capabilities?.focusMode?.includes('continuous')) {
-        await track.applyConstraints({
-          advanced: [{ focusMode: 'continuous' }]
-        });
-        console.log('✅ Focus re-applied');
-      }
-    } catch (err) {
-      console.warn('Could not re-apply focus:', err);
-    }
-  }, []);
+      // Create preview
+      imageURL = URL.createObjectURL(file);
+      setPreviewImage(imageURL);
 
-  // Handle tap-to-focus
-  const handleVideoTap = useCallback((e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    
-    // Re-apply focus on tap
-    reapplyFocus();
-    
-    // Visual feedback (optional - you can add a focus indicator here)
-    if (videoRef.current) {
-      videoRef.current.style.opacity = '0.9';
-      setTimeout(() => {
-        if (videoRef.current) {
-          videoRef.current.style.opacity = '1';
-        }
-      }, 200);
-    }
-  }, [reapplyFocus]);
-
-  const stopScanning = useCallback(() => {
-    // Clear scan interval
-    if (scanIntervalRef.current) {
-      clearInterval(scanIntervalRef.current);
-      scanIntervalRef.current = null;
-    }
-
-    // Clear focus timeout
-    if (focusTimeoutRef.current) {
-      clearTimeout(focusTimeoutRef.current);
-      focusTimeoutRef.current = null;
-    }
-
-    // Stop video stream
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => {
-        track.stop();
-      });
-      streamRef.current = null;
-    }
-
-    videoTrackRef.current = null;
-
-    // Reset video element
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-      videoRef.current.load();
-    }
-
-    setIsScanning(false);
-    setHasScanned(false);
-  }, []);
-
-  const startScanning = useCallback(async () => {
-    if (!videoRef.current || !containerRef.current || hasScanned) {
-      return;
-    }
-
-    try {
-      setError(null);
-      setIsScanning(true);
-
-      // iPhone Safari optimized camera constraints
-      const videoConstraints = {
-        facingMode: { exact: 'environment' },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
-        frameRate: { ideal: 60 },
-        advanced: [
-          { focusMode: 'continuous' },
-          { zoom: 2.0 }
-        ],
-        ...constraints
-      };
-
-      // Get user media with optimal settings
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: videoConstraints,
-        audio: false
+      // Decode barcode from image
+      // Create an image element and decode from it
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(new Error('Failed to load image'));
+        img.src = imageURL;
       });
 
-      streamRef.current = stream;
-      const videoTrack = stream.getVideoTracks()[0];
-      videoTrackRef.current = videoTrack;
+      // Create canvas from image for decoding
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0);
 
-      // Immediately re-apply focus after stream starts (Safari requirement)
-      if (videoTrack) {
-        try {
-          const capabilities = videoTrack.getCapabilities();
-          if (capabilities?.focusMode?.includes('continuous')) {
-            await videoTrack.applyConstraints({
-              advanced: [{ focusMode: 'continuous' }]
-            });
-            console.log('✅ Initial focus applied');
-          }
-        } catch (err) {
-          console.warn('Could not set initial focus:', err);
-        }
-      }
+      // Decode from canvas
+      const decodeResult = await readerRef.current.decodeFromCanvas(canvas);
 
-      // Apply stream to video element
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        
-        // Set all required attributes for iPhone Safari
-        videoRef.current.setAttribute('playsinline', 'true');
-        videoRef.current.setAttribute('webkit-playsinline', 'true');
-        videoRef.current.setAttribute('autofocus', 'true');
-        videoRef.current.setAttribute('autoplay', 'true');
-        videoRef.current.setAttribute('muted', 'true');
-        videoRef.current.setAttribute('disablePictureInPicture', 'true');
-        
-        // Add tap handler for manual focus
-        videoRef.current.addEventListener('click', handleVideoTap);
-        videoRef.current.addEventListener('touchend', handleVideoTap);
-        
-        // Wait for video to be ready
-        await new Promise((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            reject(new Error('Video load timeout'));
-          }, 10000);
+      if (decodeResult && decodeResult.getText()) {
+        const code = decodeResult.getText().trim();
+        const format = decodeResult.getBarcodeFormat().toString();
 
-          const onLoadedMetadata = () => {
-            clearTimeout(timeout);
-            videoRef.current.removeEventListener('loadedmetadata', onLoadedMetadata);
-            resolve();
-          };
-
-          videoRef.current.addEventListener('loadedmetadata', onLoadedMetadata);
-          
-          // Also handle if already loaded
-          if (videoRef.current.readyState >= 1) {
-            clearTimeout(timeout);
-            videoRef.current.removeEventListener('loadedmetadata', onLoadedMetadata);
-            resolve();
-          }
+        setResult({
+          code,
+          format,
+          confidence: 100,
         });
 
-        // Re-apply focus after 500ms (Safari locks autofocus after 1 second)
-        focusTimeoutRef.current = setTimeout(() => {
-          reapplyFocus();
-        }, 500);
-
-        // Re-apply focus after 1500ms
-        setTimeout(() => {
-          reapplyFocus();
-        }, 1500);
-
-        // Log camera settings
-        if (videoTrack) {
-          const settings = videoTrack.getSettings();
-          console.log('📹 Camera settings:', {
-            width: settings.width,
-            height: settings.height,
-            frameRate: settings.frameRate,
-            focusMode: settings.focusMode,
-            zoom: settings.zoom
+        // Call callback with result
+        if (handleDetectedCallback) {
+          handleDetectedCallback({
+            code,
+            format,
+            confidence: 100,
           });
         }
-
-        // Play video
-        try {
-          await videoRef.current.play();
-        } catch (playError) {
-          console.warn('Autoplay prevented, user interaction required');
-        }
+      } else {
+        throw new NotFoundException('No barcode found');
       }
-
-      // Create canvas for decoding
-      if (!canvasRef.current) {
-        canvasRef.current = document.createElement('canvas');
-      }
-
-      // Start scanning loop - decode every 50ms (20 scans per second)
-      scanIntervalRef.current = setInterval(async () => {
-        if (!videoRef.current || !canvasRef.current || hasScanned) {
-          return;
-        }
-
-        try {
-          const video = videoRef.current;
-          
-          // Check if video is ready
-          if (video.readyState !== video.HAVE_ENOUGH_DATA) {
-            return;
-          }
-
-          // Set canvas dimensions to match video
-          canvasRef.current.width = video.videoWidth;
-          canvasRef.current.height = video.videoHeight;
-
-          // Draw video frame to canvas
-          const ctx = canvasRef.current.getContext('2d', { willReadFrequently: true });
-          ctx.drawImage(video, 0, 0, canvasRef.current.width, canvasRef.current.height);
-
-          // Decode barcode from canvas
-          const result = await readerRef.current.decodeFromCanvas(canvasRef.current);
-
-          if (result && result.getText()) {
-            const code = result.getText().trim();
-            const format = result.getBarcodeFormat().toString();
-
-            // Stop immediately after first successful scan
-            setHasScanned(true);
-            stopScanning();
-
-            // Call callback with result
-            if (handleDetectedCallback) {
-              handleDetectedCallback({
-                code,
-                format,
-                confidence: 100, // ZXing doesn't provide confidence, assume high
-              });
-            }
-          }
-        } catch (err) {
-          // NotFoundException is expected when no barcode is found
-          if (!(err instanceof NotFoundException)) {
-            console.warn('Scan error:', err);
-          }
-        }
-      }, 50); // 50ms = 20 scans per second
-
     } catch (err) {
-      console.error('Error starting camera:', err);
-      setError(err.message || 'Failed to start camera');
-      setIsScanning(false);
-      
+      // NotFoundException is expected when no barcode is found
+      if (err instanceof NotFoundException || err.name === 'NotFoundException') {
+        setError('No barcode detected. Please try a clearer image.');
+      } else {
+        setError(err.message || 'Failed to decode barcode. Please try another image.');
+      }
+
       if (onError) {
         onError(err);
       }
+    } finally {
+      setIsDecoding(false);
     }
-  }, [constraints, handleDetectedCallback, hasScanned, stopScanning, onError, reapplyFocus, handleVideoTap]);
+  };
 
-  // Handle active prop changes
-  useEffect(() => {
-    if (active && !isScanning && !hasScanned) {
-      // Small delay to ensure DOM is ready
-      setTimeout(() => {
-        startScanning();
-      }, 100);
-    } else if (!active && isScanning) {
-      stopScanning();
+  // Handle file selection
+  const handleFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      // Validate file type
+      if (!file.type.startsWith('image/')) {
+        setError('Please select an image file.');
+        return;
+      }
+
+      decodeImageFile(file);
     }
-  }, [active, isScanning, hasScanned, startScanning, stopScanning]);
 
-  // Reset hasScanned when active becomes false
+    // Reset input so same file can be selected again
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  // Reset when active changes
   useEffect(() => {
     if (!active) {
-      setHasScanned(false);
+      setPreviewImage(null);
+      setResult(null);
       setError(null);
+      setIsDecoding(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
   }, [active]);
 
-  // Cleanup event listeners
+  // Cleanup preview URL
   useEffect(() => {
-    const video = videoRef.current;
     return () => {
-      if (video) {
-        video.removeEventListener('click', handleVideoTap);
-        video.removeEventListener('touchend', handleVideoTap);
+      if (previewImage) {
+        URL.revokeObjectURL(previewImage);
       }
     };
-  }, [handleVideoTap]);
+  }, [previewImage]);
 
   return (
     <div className={`relative w-full ${className}`}>
       {/* Scanner Container */}
       <div 
-        ref={containerRef}
-        className="barcode-reader relative overflow-hidden rounded-xl shadow-2xl bg-black"
+        className="barcode-reader relative overflow-hidden rounded-xl shadow-2xl bg-gradient-to-br from-gray-900 to-gray-800"
         style={{ 
           minHeight: "500px",
           maxHeight: "800px",
@@ -331,72 +154,164 @@ const BarcodeReader = ({
           aspectRatio: "16/9"
         }}
       >
-        {/* Video Element */}
-        <video
-          ref={videoRef}
-          className="absolute inset-0 w-full h-full object-cover cursor-pointer"
-          playsInline
-          autoPlay
-          muted
-          style={{
-            transform: 'scaleX(-1)', // Mirror for better UX
-            imageRendering: 'crisp-edges',
-            WebkitTransform: 'scaleX(-1)',
-          }}
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          onChange={handleFileChange}
+          className="hidden"
+          id="barcode-file-input"
         />
 
-        {/* Professional Viewfinder Overlay */}
-        {showViewFinder && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
-            {/* Corner brackets for scanning guide */}
-            <div className="relative w-80 h-48 md:w-96 md:h-56">
-              {/* Top-left corner */}
-              <div className="absolute top-0 left-0 w-12 h-12 border-t-4 border-l-4 border-green-400 rounded-tl-lg"></div>
-              {/* Top-right corner */}
-              <div className="absolute top-0 right-0 w-12 h-12 border-t-4 border-r-4 border-green-400 rounded-tr-lg"></div>
-              {/* Bottom-left corner */}
-              <div className="absolute bottom-0 left-0 w-12 h-12 border-b-4 border-l-4 border-green-400 rounded-bl-lg"></div>
-              {/* Bottom-right corner */}
-              <div className="absolute bottom-0 right-0 w-12 h-12 border-b-4 border-r-4 border-green-400 rounded-br-lg"></div>
-              
-              {/* Scanning line animation */}
-              <div className="absolute inset-0 overflow-hidden rounded-lg">
-                <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-transparent via-green-400 to-transparent animate-scan-line"></div>
-              </div>
-              
-              {/* Center guide text */}
-              <div className="absolute -bottom-12 left-1/2 transform -translate-x-1/2 text-center">
-                <div className="bg-black/80 backdrop-blur-sm text-white text-sm font-medium px-4 py-2 rounded-lg shadow-lg">
-                  <p className="flex items-center justify-center gap-2">
-                    <svg className="w-4 h-4 animate-pulse" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd" />
-                    </svg>
-                    {isScanning ? 'Scanning... Tap to focus' : 'Position barcode within frame'}
-                  </p>
+        {/* Main content area */}
+        {!previewImage && !isDecoding && !result && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center">
+            {/* Camera icon */}
+            <div className="mb-6">
+              <svg 
+                className="w-24 h-24 text-green-400 mx-auto" 
+                fill="none" 
+                stroke="currentColor" 
+                viewBox="0 0 24 24"
+              >
+                <path 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round" 
+                  strokeWidth={2} 
+                  d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" 
+                />
+                <path 
+                  strokeLinecap="round" 
+                  strokeLinejoin="round" 
+                  strokeWidth={2} 
+                  d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" 
+                />
+              </svg>
+            </div>
+
+            {/* Title */}
+            <h3 className="text-2xl font-bold text-white mb-2">
+              Take Photo to Scan
+            </h3>
+            <p className="text-gray-300 mb-6 text-sm">
+              Capture or upload an image with a barcode
+            </p>
+
+            {/* Action button */}
+            <label
+              htmlFor="barcode-file-input"
+              className="inline-flex items-center gap-2 px-6 py-3 bg-green-500 hover:bg-green-600 text-white font-semibold rounded-lg shadow-lg transition-colors cursor-pointer"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+              Take Photo
+            </label>
+
+            {/* Viewfinder overlay (optional visual guide) */}
+            {showViewFinder && (
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <div className="relative w-80 h-48 md:w-96 md:h-56">
+                  {/* Corner brackets */}
+                  <div className="absolute top-0 left-0 w-12 h-12 border-t-4 border-l-4 border-green-400/50 rounded-tl-lg"></div>
+                  <div className="absolute top-0 right-0 w-12 h-12 border-t-4 border-r-4 border-green-400/50 rounded-tr-lg"></div>
+                  <div className="absolute bottom-0 left-0 w-12 h-12 border-b-4 border-l-4 border-green-400/50 rounded-bl-lg"></div>
+                  <div className="absolute bottom-0 right-0 w-12 h-12 border-b-4 border-r-4 border-green-400/50 rounded-br-lg"></div>
                 </div>
               </div>
+            )}
+          </div>
+        )}
+
+        {/* Preview image */}
+        {previewImage && (
+          <div className="absolute inset-0 flex flex-col">
+            <div className="relative flex-1 overflow-hidden">
+              <img
+                src={previewImage}
+                alt="Preview"
+                className="w-full h-full object-contain"
+              />
+              
+              {/* Overlay for scanning area indicator */}
+              {showViewFinder && (
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                  <div className="relative w-80 h-48 md:w-96 md:h-56">
+                    <div className="absolute top-0 left-0 w-12 h-12 border-t-4 border-l-4 border-green-400 rounded-tl-lg"></div>
+                    <div className="absolute top-0 right-0 w-12 h-12 border-t-4 border-r-4 border-green-400 rounded-tr-lg"></div>
+                    <div className="absolute bottom-0 left-0 w-12 h-12 border-b-4 border-l-4 border-green-400 rounded-bl-lg"></div>
+                    <div className="absolute bottom-0 right-0 w-12 h-12 border-b-4 border-r-4 border-green-400 rounded-br-lg"></div>
+                  </div>
+                </div>
+              )}
             </div>
-            
-            {/* Dimmed overlay outside scanning area */}
-            <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]">
-              <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-80 h-48 md:w-96 md:h-56 bg-transparent"></div>
+
+            {/* Action buttons below preview */}
+            <div className="bg-gray-900/90 backdrop-blur-sm p-4 flex gap-3">
+              <label
+                htmlFor="barcode-file-input"
+                className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white font-medium rounded-lg transition-colors cursor-pointer"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
+                Retake
+              </label>
             </div>
           </div>
         )}
-        
-        {/* Status indicator */}
-        {isScanning && (
-          <div className="absolute top-4 left-4 z-20 flex items-center gap-2 bg-green-500/90 backdrop-blur-sm text-white px-3 py-1.5 rounded-full text-xs font-medium shadow-lg">
-            <div className="w-2 h-2 bg-white rounded-full animate-pulse"></div>
-            <span>Scanning...</span>
+
+        {/* Loading state */}
+        {isDecoding && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm z-30">
+            <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-green-400 mb-4"></div>
+            <p className="text-white text-lg font-medium">Decoding barcode...</p>
+            <p className="text-gray-300 text-sm mt-2">Please wait</p>
+          </div>
+        )}
+
+        {/* Success result */}
+        {result && !isDecoding && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-green-500/90 backdrop-blur-sm z-30">
+            <div className="bg-white rounded-lg p-6 max-w-sm mx-4 text-center shadow-2xl">
+              <div className="mb-4">
+                <svg className="w-16 h-16 text-green-500 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <h3 className="text-xl font-bold text-gray-900 mb-2">Barcode Found!</h3>
+              <p className="text-2xl font-mono font-bold text-green-600 mb-1 break-all">{result.code}</p>
+              <p className="text-sm text-gray-600 mb-4">Format: {result.format}</p>
+              <label
+                htmlFor="barcode-file-input"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 font-medium rounded-lg transition-colors cursor-pointer"
+              >
+                Scan Another
+              </label>
+            </div>
           </div>
         )}
 
         {/* Error message */}
-        {error && (
-          <div className="absolute inset-0 flex items-center justify-center z-30 bg-black/80">
-            <div className="bg-red-500/90 text-white px-4 py-2 rounded-lg">
-              <p className="text-sm font-medium">{error}</p>
+        {error && !isDecoding && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-red-500/90 backdrop-blur-sm z-30">
+            <div className="bg-white rounded-lg p-6 max-w-sm mx-4 text-center shadow-2xl">
+              <div className="mb-4">
+                <svg className="w-16 h-16 text-red-500 mx-auto" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <h3 className="text-xl font-bold text-gray-900 mb-2">Scan Failed</h3>
+              <p className="text-gray-700 mb-4">{error}</p>
+              <label
+                htmlFor="barcode-file-input"
+                className="inline-flex items-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600 text-white font-medium rounded-lg transition-colors cursor-pointer"
+              >
+                Try Again
+              </label>
             </div>
           </div>
         )}
@@ -411,35 +326,32 @@ const BarcodeReader = ({
           <div className="flex-1 text-sm text-blue-800 dark:text-blue-300">
             <p className="font-medium mb-1">Scanning Tips:</p>
             <ul className="list-disc list-inside space-y-1 text-xs">
-              <li>Hold your device steady and ensure good lighting</li>
-              <li>Position the barcode within the green frame</li>
-              <li>Keep the barcode flat and avoid glare or shadows</li>
-              <li>Tap the video to re-focus if needed (iPhone Safari)</li>
-              <li>Move closer if the barcode is too small</li>
-              <li>Scanning is instant - no need to wait</li>
-              <li>Ensure the entire barcode is visible in the frame</li>
+              <li>Tap "Take Photo" to open your camera</li>
+              <li>Ensure good lighting and hold steady</li>
+              <li>Position the barcode clearly in the frame</li>
+              <li>Keep the barcode flat and avoid glare</li>
+              <li>Works perfectly on iPhone Safari and all devices</li>
+              <li>No blur, no mirroring, crystal clear scanning</li>
             </ul>
           </div>
         </div>
       </div>
       
-      {/* Add CSS for scanning line animation and video quality */}
+      {/* CSS for animations */}
       <style>{`
-        @keyframes scan-line {
-          0% {
-            transform: translateY(0);
-            opacity: 1;
-          }
-          50% {
-            opacity: 0.5;
-          }
-          100% {
-            transform: translateY(100%);
-            opacity: 1;
+        .barcode-reader {
+          -webkit-font-smoothing: antialiased;
+          -moz-osx-font-smoothing: grayscale;
+        }
+        
+        @keyframes spin {
+          to {
+            transform: rotate(360deg);
           }
         }
-        .animate-scan-line {
-          animation: scan-line 2s ease-in-out infinite;
+        
+        .animate-spin {
+          animation: spin 1s linear infinite;
         }
         
         /* Mobile optimizations */
@@ -448,30 +360,6 @@ const BarcodeReader = ({
             min-height: 450px !important;
             max-height: 600px !important;
           }
-        }
-        
-        /* Prevent blur and improve rendering */
-        .barcode-reader {
-          -webkit-font-smoothing: antialiased;
-          -moz-osx-font-smoothing: grayscale;
-          transform: translateZ(0);
-          -webkit-transform: translateZ(0);
-          backface-visibility: hidden;
-          -webkit-backface-visibility: hidden;
-        }
-        
-        /* Ensure video fills container with high quality */
-        .barcode-reader video {
-          width: 100% !important;
-          height: 100% !important;
-          object-fit: cover !important;
-          image-rendering: -webkit-optimize-contrast;
-          image-rendering: crisp-edges;
-          -webkit-transform: scaleX(-1);
-          transform: scaleX(-1);
-          filter: contrast(1.1) brightness(1.05) saturate(1.1);
-          -webkit-filter: contrast(1.1) brightness(1.05) saturate(1.1);
-          -webkit-tap-highlight-color: transparent;
         }
       `}</style>
     </div>
