@@ -15,18 +15,11 @@ const BarcodeReader = ({
   // Use onCodeDetected if provided, otherwise fall back to onDetected
   const handleDetectedCallback = onCodeDetected || onDetected;
   const fileInputRef = useRef(null);
-  const readerRef = useRef(null);
   const [isDecoding, setIsDecoding] = useState(false);
   const [error, setError] = useState(null);
   const [previewImage, setPreviewImage] = useState(null);
   const [result, setResult] = useState(null);
 
-  // Initialize ZXing reader
-  useEffect(() => {
-    if (!readerRef.current) {
-      readerRef.current = new BrowserMultiFormatReader();
-    }
-  }, []);
 
   // Decode barcode from image file
   const decodeImageFile = async (file) => {
@@ -43,26 +36,11 @@ const BarcodeReader = ({
       imageURL = URL.createObjectURL(file);
       setPreviewImage(imageURL);
 
-      // Decode barcode from image
-      // Create an image element and decode from it
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      
-      await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = () => reject(new Error('Failed to load image'));
-        img.src = imageURL;
-      });
+      // Create new reader instance for each decode
+      const reader = new BrowserMultiFormatReader();
 
-      // Create canvas from image for decoding
-      const canvas = document.createElement('canvas');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      ctx.drawImage(img, 0, 0);
-
-      // Decode from canvas
-      const decodeResult = await readerRef.current.decodeFromCanvas(canvas);
+      // Decode from image URL
+      const decodeResult = await reader.decodeFromImageUrl(imageURL);
 
       if (decodeResult && decodeResult.getText()) {
         const code = decodeResult.getText().trim();
