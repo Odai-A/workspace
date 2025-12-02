@@ -42,8 +42,10 @@ export const getSubscriptionStatus = async () => {
     baseUrl = baseUrl.replace(/\/api\/?$/, '');
     const endpoint = `${baseUrl}/api/subscription-status`;
     
-    console.log('🔍 [Subscription Service] Fetching from:', endpoint);
-    console.log('🔍 [Subscription Service] Base URL was:', API_URL);
+    // Only log in development
+    if (import.meta.env.DEV) {
+      console.log('🔍 [Subscription Service] Fetching from:', endpoint);
+    }
 
     const response = await fetch(endpoint, {
       method: 'GET',
@@ -54,7 +56,10 @@ export const getSubscriptionStatus = async () => {
     });
 
     if (!response.ok) {
-      console.error('Failed to fetch subscription status:', response.statusText);
+      // Only log non-404 errors (404 is expected when backend isn't available)
+      if (response.status !== 404 && import.meta.env.DEV) {
+        console.warn('Failed to fetch subscription status:', response.status, response.statusText);
+      }
       return { status: 'incomplete', hasActiveSubscription: false, subscriptionInfo: null };
     }
 
@@ -68,7 +73,10 @@ export const getSubscriptionStatus = async () => {
       subscriptionInfo: data,
     };
   } catch (error) {
-    console.error('Error fetching subscription status:', error);
+    // Only log network errors in development (expected when backend is unavailable)
+    if (import.meta.env.DEV && error.name !== 'TypeError') {
+      console.warn('Error fetching subscription status:', error.message);
+    }
     return { status: 'incomplete', hasActiveSubscription: false, subscriptionInfo: null };
   }
 };
