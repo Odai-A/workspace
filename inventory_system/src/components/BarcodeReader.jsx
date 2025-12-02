@@ -20,6 +20,8 @@ const BarcodeReader = ({
   const streamRef = useRef(null);
   const scanIntervalRef = useRef(null);
   const canvasRef = useRef(null);
+  const focusTimeoutRef = useRef(null);
+  const videoTrackRef = useRef(null);
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState(null);
   const [hasScanned, setHasScanned] = useState(false);
@@ -34,11 +36,54 @@ const BarcodeReader = ({
     };
   }, []);
 
+  // Function to re-apply continuous focus (required for Safari)
+  const reapplyFocus = useCallback(async () => {
+    const track = videoTrackRef.current;
+    if (!track) return;
+
+    try {
+      const capabilities = track.getCapabilities();
+      if (capabilities?.focusMode?.includes('continuous')) {
+        await track.applyConstraints({
+          advanced: [{ focusMode: 'continuous' }]
+        });
+        console.log('✅ Focus re-applied');
+      }
+    } catch (err) {
+      console.warn('Could not re-apply focus:', err);
+    }
+  }, []);
+
+  // Handle tap-to-focus
+  const handleVideoTap = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    // Re-apply focus on tap
+    reapplyFocus();
+    
+    // Visual feedback (optional - you can add a focus indicator here)
+    if (videoRef.current) {
+      videoRef.current.style.opacity = '0.9';
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.style.opacity = '1';
+        }
+      }, 200);
+    }
+  }, [reapplyFocus]);
+
   const stopScanning = useCallback(() => {
     // Clear scan interval
     if (scanIntervalRef.current) {
       clearInterval(scanIntervalRef.current);
       scanIntervalRef.current = null;
+    }
+
+    // Clear focus timeout
+    if (focusTimeoutRef.current) {
+      clearTimeout(focusTimeoutRef.current);
+      focusTimeoutRef.current = null;
     }
 
     // Stop video stream
@@ -48,6 +93,8 @@ const BarcodeReader = ({
       });
       streamRef.current = null;
     }
+
+    videoTrackRef.current = null;
 
     // Reset video element
     if (videoRef.current) {
@@ -68,17 +115,16 @@ const BarcodeReader = ({
       setError(null);
       setIsScanning(true);
 
-      // Create optimal camera constraints
+      // iPhone Safari optimized camera constraints
       const videoConstraints = {
-        width: { ideal: 1920, min: 1280 },
-        height: { ideal: 1080, min: 720 },
-        facingMode: { ideal: 'environment' }, // Force rear camera
-        aspectRatio: { ideal: 16/9 },
-        frameRate: { ideal: 60, min: 30 }, // 60fps ideal
-        focusMode: 'continuous', // Continuous autofocus
-        exposureMode: 'continuous',
-        whiteBalanceMode: 'continuous',
-        zoom: { ideal: 1.0 },
+        facingMode: { exact: 'environment' },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        frameRate: { ideal: 60 },
+        advanced: [
+          { focusMode: 'continuous' },
+          { zoom: 2.0 }
+        ],
         ...constraints
       };
 
@@ -89,14 +135,39 @@ const BarcodeReader = ({
       });
 
       streamRef.current = stream;
+      const videoTrack = stream.getVideoTracks()[0];
+      videoTrackRef.current = videoTrack;
+
+      // Immediately re-apply focus after stream starts (Safari requirement)
+      if (videoTrack) {
+        try {
+          const capabilities = videoTrack.getCapabilities();
+          if (capabilities?.focusMode?.includes('continuous')) {
+            await videoTrack.applyConstraints({
+              advanced: [{ focusMode: 'continuous' }]
+            });
+            console.log('✅ Initial focus applied');
+          }
+        } catch (err) {
+          console.warn('Could not set initial focus:', err);
+        }
+      }
 
       // Apply stream to video element
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        
+        // Set all required attributes for iPhone Safari
         videoRef.current.setAttribute('playsinline', 'true');
+        videoRef.current.setAttribute('webkit-playsinline', 'true');
+        videoRef.current.setAttribute('autofocus', 'true');
         videoRef.current.setAttribute('autoplay', 'true');
         videoRef.current.setAttribute('muted', 'true');
-        videoRef.current.setAttribute('autofocus', 'true');
+        videoRef.current.setAttribute('disablePictureInPicture', 'true');
+        
+        // Add tap handler for manual focus
+        videoRef.current.addEventListener('click', handleVideoTap);
+        videoRef.current.addEventListener('touchend', handleVideoTap);
         
         // Wait for video to be ready
         await new Promise((resolve, reject) => {
@@ -120,44 +191,24 @@ const BarcodeReader = ({
           }
         });
 
-        // Apply additional constraints after stream starts
-        const videoTrack = stream.getVideoTracks()[0];
+        // Re-apply focus after 500ms (Safari locks autofocus after 1 second)
+        focusTimeoutRef.current = setTimeout(() => {
+          reapplyFocus();
+        }, 500);
+
+        // Re-apply focus after 1500ms
+        setTimeout(() => {
+          reapplyFocus();
+        }, 1500);
+
+        // Log camera settings
         if (videoTrack) {
-          const capabilities = videoTrack.getCapabilities();
           const settings = videoTrack.getSettings();
-
-          // Apply continuous focus if supported
-          if (capabilities?.focusMode?.includes('continuous')) {
-            try {
-              await videoTrack.applyConstraints({
-                advanced: [{ focusMode: 'continuous' }]
-              });
-              console.log('✅ Continuous focus enabled');
-            } catch (err) {
-              console.warn('Could not set continuous focus:', err);
-            }
-          }
-
-          // Apply zoom if supported
-          if (capabilities?.zoom) {
-            try {
-              const maxZoom = Math.min(capabilities.zoom.max || 1, 2);
-              await videoTrack.applyConstraints({
-                advanced: [{ zoom: maxZoom }]
-              });
-              console.log('✅ Zoom applied');
-            } catch (err) {
-              console.warn('Could not set zoom:', err);
-            }
-          }
-
-          // Log camera settings
           console.log('📹 Camera settings:', {
             width: settings.width,
             height: settings.height,
             frameRate: settings.frameRate,
             focusMode: settings.focusMode,
-            exposureMode: settings.exposureMode,
             zoom: settings.zoom
           });
         }
@@ -234,7 +285,7 @@ const BarcodeReader = ({
         onError(err);
       }
     }
-  }, [constraints, handleDetectedCallback, hasScanned, stopScanning, onError]);
+  }, [constraints, handleDetectedCallback, hasScanned, stopScanning, onError, reapplyFocus, handleVideoTap]);
 
   // Handle active prop changes
   useEffect(() => {
@@ -256,6 +307,17 @@ const BarcodeReader = ({
     }
   }, [active]);
 
+  // Cleanup event listeners
+  useEffect(() => {
+    const video = videoRef.current;
+    return () => {
+      if (video) {
+        video.removeEventListener('click', handleVideoTap);
+        video.removeEventListener('touchend', handleVideoTap);
+      }
+    };
+  }, [handleVideoTap]);
+
   return (
     <div className={`relative w-full ${className}`}>
       {/* Scanner Container */}
@@ -272,7 +334,7 @@ const BarcodeReader = ({
         {/* Video Element */}
         <video
           ref={videoRef}
-          className="absolute inset-0 w-full h-full object-cover"
+          className="absolute inset-0 w-full h-full object-cover cursor-pointer"
           playsInline
           autoPlay
           muted
@@ -309,7 +371,7 @@ const BarcodeReader = ({
                     <svg className="w-4 h-4 animate-pulse" fill="currentColor" viewBox="0 0 20 20">
                       <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clipRule="evenodd" />
                     </svg>
-                    {isScanning ? 'Scanning...' : 'Position barcode within frame'}
+                    {isScanning ? 'Scanning... Tap to focus' : 'Position barcode within frame'}
                   </p>
                 </div>
               </div>
@@ -352,6 +414,7 @@ const BarcodeReader = ({
               <li>Hold your device steady and ensure good lighting</li>
               <li>Position the barcode within the green frame</li>
               <li>Keep the barcode flat and avoid glare or shadows</li>
+              <li>Tap the video to re-focus if needed (iPhone Safari)</li>
               <li>Move closer if the barcode is too small</li>
               <li>Scanning is instant - no need to wait</li>
               <li>Ensure the entire barcode is visible in the frame</li>
@@ -408,6 +471,7 @@ const BarcodeReader = ({
           transform: scaleX(-1);
           filter: contrast(1.1) brightness(1.05) saturate(1.1);
           -webkit-filter: contrast(1.1) brightness(1.05) saturate(1.1);
+          -webkit-tap-highlight-color: transparent;
         }
       `}</style>
     </div>
