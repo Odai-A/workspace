@@ -16,31 +16,344 @@ const BarcodeReader = ({
   const handleDetectedCallback = onCodeDetected || onDetected;
   const fileInputRef = useRef(null);
   const [isDecoding, setIsDecoding] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState(null);
   const [previewImage, setPreviewImage] = useState(null);
+  const [processedPreview, setProcessedPreview] = useState(null);
   const [result, setResult] = useState(null);
 
+  // Image preprocessing functions
+  const preprocessImage = (canvas, ctx, width, height) => {
+    // Get image data
+    const imageData = ctx.getImageData(0, 0, width, height);
+    const data = imageData.data;
+
+    // Step 1: Auto-crop to high-contrast region (simplified - find edges)
+    let minX = 0, minY = 0, maxX = width, maxY = height;
+    const edgeThreshold = 30;
+    
+    // Find left edge
+    for (let x = 0; x < width; x++) {
+      let hasEdge = false;
+      for (let y = 0; y < height; y++) {
+        const idx = (y * width + x) * 4;
+        const gray = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+        if (gray < edgeThreshold || gray > 255 - edgeThreshold) {
+          hasEdge = true;
+          break;
+        }
+      }
+      if (hasEdge) {
+        minX = Math.max(0, x - 10);
+        break;
+      }
+    }
+
+    // Find right edge
+    for (let x = width - 1; x >= 0; x--) {
+      let hasEdge = false;
+      for (let y = 0; y < height; y++) {
+        const idx = (y * width + x) * 4;
+        const gray = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
+        if (gray < edgeThreshold || gray > 255 - edgeThreshold) {
+          hasEdge = true;
+          break;
+        }
+      }
+      if (hasEdge) {
+        maxX = Math.min(width, x + 10);
+        break;
+      }
+    }
+
+    // Crop region
+    const cropWidth = maxX - minX;
+    const cropHeight = maxY - minY;
+    const croppedData = ctx.getImageData(minX, minY, cropWidth, cropHeight);
+    
+    // Create new canvas for processed image
+    const processedCanvas = document.createElement('canvas');
+    processedCanvas.width = cropWidth;
+    processedCanvas.height = cropHeight;
+    const processedCtx = processedCanvas.getContext('2d');
+    processedCtx.putImageData(croppedData, 0, 0);
+
+    // Get processed image data
+    const processedImageData = processedCtx.getImageData(0, 0, cropWidth, cropHeight);
+    const processedData = processedImageData.data;
+
+    // Step 2: Convert to grayscale and calculate average brightness
+    let totalBrightness = 0;
+    for (let i = 0; i < processedData.length; i += 4) {
+      const gray = (processedData[i] + processedData[i + 1] + processedData[i + 2]) / 3;
+      processedData[i] = gray;
+      processedData[i + 1] = gray;
+      processedData[i + 2] = gray;
+      totalBrightness += gray;
+    }
+    const avgBrightness = totalBrightness / (processedData.length / 4);
+
+    // Step 3: Increase contrast by 40%
+    const contrastFactor = 1.4;
+    const contrastOffset = 128 * (1 - contrastFactor);
+    for (let i = 0; i < processedData.length; i += 4) {
+      processedData[i] = Math.max(0, Math.min(255, processedData[i] * contrastFactor + contrastOffset));
+      processedData[i + 1] = processedData[i];
+      processedData[i + 2] = processedData[i];
+    }
+
+    // Step 4: Increase brightness if image is dark
+    if (avgBrightness < 100) {
+      const brightnessBoost = 100 - avgBrightness;
+      for (let i = 0; i < processedData.length; i += 4) {
+        processedData[i] = Math.max(0, Math.min(255, processedData[i] + brightnessBoost * 0.5));
+        processedData[i + 1] = processedData[i];
+        processedData[i + 2] = processedData[i];
+      }
+    }
+
+    // Step 5: Apply edge sharpening filter
+    const sharpenKernel = [
+      0, -1, 0,
+      -1, 5, -1,
+      0, -1, 0
+    ];
+    const tempData = new Uint8ClampedArray(processedData);
+    for (let y = 1; y < cropHeight - 1; y++) {
+      for (let x = 1; x < cropWidth - 1; x++) {
+        let sum = 0;
+        for (let ky = -1; ky <= 1; ky++) {
+          for (let kx = -1; kx <= 1; kx++) {
+            const idx = ((y + ky) * cropWidth + (x + kx)) * 4;
+            const kernelIdx = (ky + 1) * 3 + (kx + 1);
+            sum += tempData[idx] * sharpenKernel[kernelIdx];
+          }
+        }
+        const idx = (y * cropWidth + x) * 4;
+        processedData[idx] = Math.max(0, Math.min(255, sum));
+        processedData[idx + 1] = processedData[idx];
+        processedData[idx + 2] = processedData[idx];
+      }
+    }
+
+    // Step 6: Reduce noise (simple median filter)
+    const tempData2 = new Uint8ClampedArray(processedData);
+    for (let y = 1; y < cropHeight - 1; y++) {
+      for (let x = 1; x < cropWidth - 1; x++) {
+        const values = [];
+        for (let ky = -1; ky <= 1; ky++) {
+          for (let kx = -1; kx <= 1; kx++) {
+            const idx = ((y + ky) * cropWidth + (x + kx)) * 4;
+            values.push(tempData2[idx]);
+          }
+        }
+        values.sort((a, b) => a - b);
+        const median = values[4]; // Middle value
+        const idx = (y * cropWidth + x) * 4;
+        processedData[idx] = median;
+        processedData[idx + 1] = median;
+        processedData[idx + 2] = median;
+      }
+    }
+
+    // Step 7: Resize so barcode region is at least 1000px wide
+    let finalWidth = cropWidth;
+    let finalHeight = cropHeight;
+    if (cropWidth < 1000) {
+      const scale = 1000 / cropWidth;
+      finalWidth = 1000;
+      finalHeight = Math.round(cropHeight * scale);
+    }
+
+    // Apply processed data and resize
+    processedCtx.putImageData(processedImageData, 0, 0);
+    
+    const finalCanvas = document.createElement('canvas');
+    finalCanvas.width = finalWidth;
+    finalCanvas.height = finalHeight;
+    const finalCtx = finalCanvas.getContext('2d');
+    finalCtx.drawImage(processedCanvas, 0, 0, finalWidth, finalHeight);
+
+    return finalCanvas;
+  };
+
+  // Rotate image
+  const rotateImage = (img, degrees) => {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    if (degrees === 90 || degrees === 270) {
+      canvas.width = img.height;
+      canvas.height = img.width;
+    } else {
+      canvas.width = img.width;
+      canvas.height = img.height;
+    }
+
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate((degrees * Math.PI) / 180);
+    ctx.drawImage(img, -img.width / 2, -img.height / 2);
+
+    return canvas;
+  };
+
+  // Zoom image
+  const zoomImage = (img, scale) => {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = img.width * scale;
+    canvas.height = img.height * scale;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  };
+
+  // Multi-pass decoding strategy
+  const decodeWithMultiPass = async (imageURL, processedCanvas) => {
+    const reader = new BrowserMultiFormatReader();
+    let lastError = null;
+
+    // Pass 1: Decode from original image URL
+    try {
+      const result = await reader.decodeFromImageUrl(imageURL);
+      if (result && result.getText()) {
+        return result;
+      }
+    } catch (err) {
+      lastError = err;
+    }
+
+    // Pass 2: Decode from processed canvas (convert to image element)
+    if (processedCanvas) {
+      try {
+        const processedImg = new Image();
+        processedImg.crossOrigin = 'anonymous';
+        
+        await new Promise((resolve, reject) => {
+          processedImg.onload = resolve;
+          processedImg.onerror = reject;
+          processedImg.src = processedCanvas.toDataURL();
+        });
+
+        const result = await reader.decodeFromImage(processedImg);
+        if (result && result.getText()) {
+          return result;
+        }
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    // Pass 3: Try rotated versions (90°, 180°, 270°)
+    const rotations = [90, 180, 270];
+    for (const rotation of rotations) {
+      try {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = imageURL;
+        });
+
+        const rotatedCanvas = rotateImage(img, rotation);
+        const rotatedImg = new Image();
+        rotatedImg.crossOrigin = 'anonymous';
+        
+        await new Promise((resolve, reject) => {
+          rotatedImg.onload = resolve;
+          rotatedImg.onerror = reject;
+          rotatedImg.src = rotatedCanvas.toDataURL();
+        });
+
+        const result = await reader.decodeFromImage(rotatedImg);
+        if (result && result.getText()) {
+          return result;
+        }
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    // Pass 4: Try zoomed versions (1.5x, 2x)
+    const zoomLevels = [1.5, 2.0];
+    for (const zoom of zoomLevels) {
+      try {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = imageURL;
+        });
+
+        const zoomedCanvas = zoomImage(img, zoom);
+        const zoomedImg = new Image();
+        zoomedImg.crossOrigin = 'anonymous';
+        
+        await new Promise((resolve, reject) => {
+          zoomedImg.onload = resolve;
+          zoomedImg.onerror = reject;
+          zoomedImg.src = zoomedCanvas.toDataURL();
+        });
+
+        const result = await reader.decodeFromImage(zoomedImg);
+        if (result && result.getText()) {
+          return result;
+        }
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    throw lastError || new NotFoundException('No barcode found after all passes');
+  };
 
   // Decode barcode from image file
   const decodeImageFile = async (file) => {
     if (!file) return;
 
+    setIsProcessing(true);
     setIsDecoding(true);
     setError(null);
     setResult(null);
+    setProcessedPreview(null);
 
     let imageURL = null;
+    let processedCanvas = null;
 
     try {
       // Create preview
       imageURL = URL.createObjectURL(file);
       setPreviewImage(imageURL);
 
-      // Create new reader instance for each decode
-      const reader = new BrowserMultiFormatReader();
+      // Load image for preprocessing
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(new Error('Failed to load image'));
+        img.src = imageURL;
+      });
 
-      // Decode from image URL
-      const decodeResult = await reader.decodeFromImageUrl(imageURL);
+      // Preprocess image
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+
+      processedCanvas = preprocessImage(canvas, ctx, img.width, img.height);
+      
+      // Show processed preview (optional)
+      setProcessedPreview(processedCanvas.toDataURL());
+
+      setIsProcessing(false);
+
+      // Multi-pass decoding
+      const decodeResult = await decodeWithMultiPass(imageURL, processedCanvas);
 
       if (decodeResult && decodeResult.getText()) {
         const code = decodeResult.getText().trim();
@@ -66,7 +379,7 @@ const BarcodeReader = ({
     } catch (err) {
       // NotFoundException is expected when no barcode is found
       if (err instanceof NotFoundException || err.name === 'NotFoundException') {
-        setError('No barcode detected. Please try a clearer image.');
+        setError('No barcode detected. Please try a closer, clearer photo.');
       } else {
         setError(err.message || 'Failed to decode barcode. Please try another image.');
       }
@@ -75,6 +388,7 @@ const BarcodeReader = ({
         onError(err);
       }
     } finally {
+      setIsProcessing(false);
       setIsDecoding(false);
     }
   };
@@ -102,16 +416,18 @@ const BarcodeReader = ({
   useEffect(() => {
     if (!active) {
       setPreviewImage(null);
+      setProcessedPreview(null);
       setResult(null);
       setError(null);
       setIsDecoding(false);
+      setIsProcessing(false);
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
     }
   }, [active]);
 
-  // Cleanup preview URL
+  // Cleanup preview URLs
   useEffect(() => {
     return () => {
       if (previewImage) {
@@ -205,7 +521,7 @@ const BarcodeReader = ({
         )}
 
         {/* Preview image */}
-        {previewImage && (
+        {previewImage && !isProcessing && !isDecoding && !result && (
           <div className="absolute inset-0 flex flex-col">
             <div className="relative flex-1 overflow-hidden">
               <img
@@ -213,6 +529,13 @@ const BarcodeReader = ({
                 alt="Preview"
                 className="w-full h-full object-contain"
               />
+              
+              {/* Enhanced preview toggle (optional) */}
+              {processedPreview && (
+                <div className="absolute top-2 right-2 bg-black/50 text-white text-xs px-2 py-1 rounded">
+                  Enhanced
+                </div>
+              )}
               
               {/* Overlay for scanning area indicator */}
               {showViewFinder && (
@@ -242,12 +565,21 @@ const BarcodeReader = ({
           </div>
         )}
 
-        {/* Loading state */}
-        {isDecoding && (
+        {/* Processing state */}
+        {isProcessing && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm z-30">
+            <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-blue-400 mb-4"></div>
+            <p className="text-white text-lg font-medium">Processing Image...</p>
+            <p className="text-gray-300 text-sm mt-2">Enhancing for better detection</p>
+          </div>
+        )}
+
+        {/* Decoding state */}
+        {isDecoding && !isProcessing && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm z-30">
             <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-green-400 mb-4"></div>
             <p className="text-white text-lg font-medium">Decoding barcode...</p>
-            <p className="text-gray-300 text-sm mt-2">Please wait</p>
+            <p className="text-gray-300 text-sm mt-2">Trying multiple detection methods</p>
           </div>
         )}
 
@@ -302,14 +634,13 @@ const BarcodeReader = ({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
           <div className="flex-1 text-sm text-blue-800 dark:text-blue-300">
-            <p className="font-medium mb-1">Scanning Tips:</p>
+            <p className="font-medium mb-1">Advanced Scanning:</p>
             <ul className="list-disc list-inside space-y-1 text-xs">
+              <li>Automatic image enhancement for better detection</li>
+              <li>Multi-pass decoding (original, enhanced, rotated, zoomed)</li>
+              <li>Works with small or slightly blurry barcodes</li>
               <li>Tap "Take Photo" to open your camera</li>
-              <li>Ensure good lighting and hold steady</li>
-              <li>Position the barcode clearly in the frame</li>
-              <li>Keep the barcode flat and avoid glare</li>
               <li>Works perfectly on iPhone Safari and all devices</li>
-              <li>No blur, no mirroring, crystal clear scanning</li>
             </ul>
           </div>
         </div>
