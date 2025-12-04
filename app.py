@@ -7,7 +7,6 @@ from flask import Flask, request, render_template, redirect, url_for, flash, jso
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from dotenv import load_dotenv
-from datetime import datetime, timezone
 import stripe
 from supabase import create_client, Client
 import logging # For better logging
@@ -445,6 +444,29 @@ def validate_price_id(price_id):
         return False, f"Error validating price: {str(e)}"
 
 # --- Root/Index Route ---
+@app.route('/health', methods=['GET'])
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint to verify backend is running"""
+    # Get all registered routes for debugging
+    routes = []
+    for rule in app.url_map.iter_rules():
+        if str(rule).startswith('/api/'):  # Only show API routes
+            routes.append({
+                'endpoint': rule.endpoint,
+                'methods': list(rule.methods - {'HEAD', 'OPTIONS'}),
+                'path': str(rule)
+            })
+    
+    return jsonify({
+        "status": "healthy",
+        "service": "backend",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "api_routes": routes,
+        "supabase_configured": supabase_admin is not None,
+        "cors_origins": allowed_origins if 'allowed_origins' in globals() else "unknown"
+    }), 200
+
 @app.route('/')
 def index():
     # Redirect to a frontend page or a marketing page
