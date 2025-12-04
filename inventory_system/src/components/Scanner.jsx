@@ -262,6 +262,10 @@ const Scanner = () => {
       } else {
         // Try to create a new product lookup entry (optional - may fail due to RLS)
         try {
+          // Collect all images - handle both array and single image
+          const allImages = product.images || (product.image_url ? [product.image_url] : []);
+          const imageUrlToSave = allImages.length > 0 ? JSON.stringify(allImages) : null;
+          
           const productData = {
             name: product.name || 'Unknown Product',
             sku: product.fnsku || product.sku || product.asin,
@@ -272,6 +276,7 @@ const Scanner = () => {
             price: product.price,
             category: product.category || 'Uncategorized',
             description: product.description || product.name,
+            image_url: imageUrlToSave,  // JSON array of all images
             condition: 'New',
             source: 'Scanner (Auto)',
             created_at: new Date().toISOString()
@@ -399,12 +404,40 @@ const Scanner = () => {
         console.log("🚀 Backend scan response:", apiResult);
         
         if (apiResult && apiResult.success) {
+          // Get all images from backend response (array) or fallback to single image
+          let allImages = apiResult.images || (apiResult.image ? [apiResult.image] : []);
+          
+          // Check if we only got one image - if so, fetch all images from Rainforest API
+          if (allImages.length === 1 && apiResult.asin && apiResult.source === 'api' && !apiResult.cached) {
+            console.log("⚠️ Only one image received, fetching all images from Rainforest API...");
+            toast.info("🔄 Fetching all product images...", { autoClose: 2000 });
+            
+            try {
+              const rainforestData = await fetchProductDataFromRainforest(apiResult.asin);
+              if (rainforestData && rainforestData.images && rainforestData.images.length > 1) {
+                allImages = rainforestData.images;
+                console.log(`✅ Fetched ${allImages.length} images from Rainforest API`);
+                toast.success(`✅ Found ${allImages.length} product images!`, { autoClose: 3000 });
+              }
+            } catch (error) {
+              console.warn("Could not fetch additional images from Rainforest API:", error);
+            }
+          }
+          
+          // Get videos from backend response
+          const allVideos = apiResult.videos || [];
+          const videosCount = apiResult.videos_count || allVideos.length;
+          
           // Map backend response to frontend product format
           const displayableProduct = {
             fnsku: apiResult.fnsku || code,
             asin: apiResult.asin || '',
             name: apiResult.title || '',
-            image_url: apiResult.image || '',
+            image_url: allImages[0] || '',  // Primary image for display
+            images: allImages,  // ALL images array
+            images_count: allImages.length,
+            videos: allVideos,  // ALL videos array
+            videos_count: videosCount,
             price: apiResult.price || '',
             brand: apiResult.brand || '',
             category: apiResult.category || '',
@@ -419,7 +452,7 @@ const Scanner = () => {
           if (apiResult.cached) {
             toast.success("✅ Found in cache - No API charge!", { icon: "💚" });
           } else if (apiResult.source === 'api') {
-            toast.success("✅ Product scanned successfully!", { icon: "💚" });
+            toast.success(`✅ Product scanned successfully! (${allImages.length} images)`, { icon: "💚" });
           }
           
           // Set product info - backend already handled everything!
@@ -607,9 +640,39 @@ const Scanner = () => {
 
       if (response.data && response.data.product) {
         const product = response.data.product;
+        
+        // Collect ALL images from Rainforest API
+        const allImages = [];
+        
+        // Add main_image if it exists
+        if (product.main_image?.link) {
+          allImages.push(product.main_image.link);
+        }
+        
+        // Add all images from images array
+        if (product.images && Array.isArray(product.images)) {
+          product.images.forEach(img => {
+            const imgLink = img?.link || img;
+            if (imgLink && !allImages.includes(imgLink)) {
+              allImages.push(imgLink);
+            }
+          });
+        }
+        
+        // Fallback: if no images collected, try images_flat
+        if (allImages.length === 0 && product.images_flat) {
+          const flatImages = product.images_flat.split(',').map(url => url.trim()).filter(url => url);
+          allImages.push(...flatImages);
+        }
+        
+        // Primary image for backward compatibility
+        const primaryImage = allImages[0] || '';
+        
         return {
           title: product.title || '',
-          image: product.main_image?.link || product.images?.[0]?.link || '',
+          image: primaryImage,  // Primary image for backward compatibility
+          images: allImages,  // ALL images array
+          images_count: allImages.length,
           price: product.buybox_winner?.price?.value || product.price?.value || null,
           rating: product.rating || null,
           reviews_count: product.reviews_total || null,
@@ -2000,6 +2063,10 @@ const Scanner = () => {
         // Try to create a new product lookup entry (optional - may fail due to RLS)
         // If it fails, we'll still add to inventory without product_id
         try {
+          // Collect all images - handle both array and single image
+          const allImages = productInfo.images || (productInfo.image_url ? [productInfo.image_url] : []);
+          const imageUrlToSave = allImages.length > 0 ? JSON.stringify(allImages) : null;
+          
           const productData = {
             name: productInfo.name || 'Unknown Product',
             sku: productInfo.fnsku || productInfo.sku || productInfo.asin,
@@ -2010,6 +2077,7 @@ const Scanner = () => {
             price: productInfo.price,
             category: productInfo.category || 'Uncategorized',
             description: productInfo.description || productInfo.name,
+            image_url: imageUrlToSave,  // JSON array of all images
             condition: 'New',
             source: 'Scanner',
             created_at: new Date().toISOString()
@@ -2418,8 +2486,40 @@ const Scanner = () => {
                   <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Code Type: {productInfo.code_type || 'N/A'} ({productInfo.code_type === 'FNSKU' ? 'Fulfillment Network Stock Keeping Unit' : productInfo.code_type})</span>
               </div>
 
-              {/* Product Image */}
-              {productInfo.image_url && (
+              {/* Product Images - Show all if available */}
+              {productInfo.images && productInfo.images.length > 0 ? (
+                <div className="mb-4">
+                  <div className="flex justify-center items-center gap-2 mb-2">
+                    <span className="text-xs text-gray-500 dark:text-gray-400">
+                      {productInfo.images.length} image{productInfo.images.length !== 1 ? 's' : ''}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap justify-center gap-2">
+                    {productInfo.images.map((imgUrl, index) => (
+                      <div key={index} className="relative group">
+                        <img 
+                          src={imgUrl} 
+                          alt={`${productInfo.name || 'Product'} - Image ${index + 1}`} 
+                          className="max-w-full h-48 w-auto object-contain border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 shadow-sm cursor-pointer hover:shadow-lg transition-shadow"
+                          onError={(e) => {
+                            e.target.style.display = 'none';
+                          }}
+                          onClick={() => {
+                            // Open image in new tab on click
+                            window.open(imgUrl, '_blank');
+                          }}
+                          title="Click to view full size"
+                        />
+                        {index === 0 && (
+                          <span className="absolute top-1 left-1 bg-blue-500 text-white text-xs px-2 py-1 rounded">
+                            Main
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : productInfo.image_url ? (
                 <div className="mb-4 flex justify-center">
                   <img 
                     src={productInfo.image_url} 
@@ -2429,6 +2529,74 @@ const Scanner = () => {
                       e.target.style.display = 'none';
                     }}
                   />
+                </div>
+              ) : null}
+
+              {/* Product Videos - Show all if available */}
+              {productInfo.videos && productInfo.videos.length > 0 && (
+                <div className="mb-4">
+                  <div className="flex justify-center items-center gap-2 mb-2">
+                    <span className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                      🎥 {productInfo.videos.length} video{productInfo.videos.length !== 1 ? 's' : ''}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {productInfo.videos.map((video, index) => (
+                      <div key={video.id || index} className="relative group border border-gray-200 dark:border-gray-600 rounded-lg overflow-hidden bg-white dark:bg-gray-700 shadow-sm hover:shadow-lg transition-shadow">
+                        {/* Video Thumbnail */}
+                        {video.video_image_url && (
+                          <div className="relative aspect-video bg-gray-100 dark:bg-gray-800">
+                            <img 
+                              src={video.video_image_url} 
+                              alt={video.title || `Video ${index + 1}`}
+                              className="w-full h-full object-cover"
+                              onError={(e) => {
+                                e.target.style.display = 'none';
+                              }}
+                            />
+                            {/* Play Button Overlay */}
+                            <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-30 group-hover:bg-opacity-50 transition-opacity">
+                              <div className="bg-white bg-opacity-90 rounded-full p-3 group-hover:scale-110 transition-transform">
+                                <svg className="w-8 h-8 text-gray-900" fill="currentColor" viewBox="0 0 20 20">
+                                  <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
+                                </svg>
+                              </div>
+                            </div>
+                            {/* Duration Badge */}
+                            {video.duration && (
+                              <span className="absolute bottom-2 right-2 bg-black bg-opacity-75 text-white text-xs px-2 py-1 rounded">
+                                {video.duration}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        {/* Video Info */}
+                        <div className="p-3">
+                          <h4 className="text-sm font-medium text-gray-900 dark:text-white mb-1 line-clamp-2">
+                            {video.title || `Video ${index + 1}`}
+                          </h4>
+                          {video.public_name && (
+                            <p className="text-xs text-gray-500 dark:text-gray-400">
+                              by {video.public_name}
+                            </p>
+                          )}
+                        </div>
+                        {/* Click to play */}
+                        <button
+                          onClick={() => {
+                            if (video.video_url) {
+                              // Open video in new tab or play in modal
+                              window.open(video.video_url, '_blank');
+                            } else if (video.video_previews) {
+                              window.open(video.video_previews, '_blank');
+                            }
+                          }}
+                          className="absolute inset-0 w-full h-full opacity-0 hover:opacity-100 transition-opacity"
+                          title="Click to play video"
+                        />
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
 

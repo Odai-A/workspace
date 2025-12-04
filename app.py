@@ -56,11 +56,26 @@ else:
         allowed_origins.append(frontend_base_url.rstrip('/'))
 
 if allowed_origins == ['*']:
-    # Development: allow all origins
-    CORS(app)
+    # Development: allow all origins with explicit CORS configuration
+    CORS(app, resources={
+        r"/api/*": {
+            "origins": "*",
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+            "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+            "supports_credentials": False
+        }
+    })
+    logger.info("CORS configured for development: allowing all origins for /api/* routes")
 else:
     # Production: allow specific origins
-    CORS(app, resources={r"/api/*": {"origins": allowed_origins}})
+    CORS(app, resources={
+        r"/api/*": {
+            "origins": allowed_origins,
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+            "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+            "supports_credentials": False
+        }
+    })
     logger.info(f"CORS configured for origins: {', '.join(allowed_origins)}")
 
 # eBay API Configuration
@@ -1149,6 +1164,35 @@ def external_lookup():
                     if user_id_from_req:
                         log_scan_to_history(user_id_from_req, tenant_id_from_req, fnsku, cached.get('asin', ''), supabase_admin)
                     
+                    # Extract images from cached data
+                    all_images = []
+                    try:
+                        image_url_data = cached.get('image_url', '')
+                        if image_url_data:
+                            parsed = json.loads(image_url_data) if isinstance(image_url_data, str) else image_url_data
+                            if isinstance(parsed, list):
+                                all_images = parsed
+                            else:
+                                all_images = [image_url_data] if image_url_data else []
+                    except:
+                        all_images = [cached.get('image_url')] if cached.get('image_url') else []
+                    
+                    # Extract videos from rainforest_raw_data if available
+                    videos = []
+                    videos_count = 0
+                    if cached.get('rainforest_raw_data'):
+                        try:
+                            raw_data = cached.get('rainforest_raw_data')
+                            if isinstance(raw_data, str):
+                                raw_data = json.loads(raw_data)
+                            if raw_data and raw_data.get('product'):
+                                product = raw_data.get('product')
+                                if product.get('videos_additional') and isinstance(product.get('videos_additional'), list):
+                                    videos = product.get('videos_additional', [])
+                                    videos_count = product.get('videos_count', len(videos))
+                        except Exception as video_error:
+                            logger.warning(f"Could not extract videos from cache: {video_error}")
+                    
                     # Return cached data
                     product_data = {
                         "success": True,
@@ -1157,7 +1201,12 @@ def external_lookup():
                         "title": cached.get('product_name') or f"Product {fnsku}",
                         "price": str(cached.get('price', 0)) if cached.get('price') else '',
                         "fnsku": fnsku,
-                        "image_url": cached.get('image_url') or '',
+                        "image": all_images[0] if all_images else (cached.get('image_url') or ''),
+                        "images": all_images,
+                        "images_count": len(all_images),
+                        "videos": videos,
+                        "videos_count": videos_count,
+                        "image_url": all_images[0] if all_images else (cached.get('image_url') or ''),
                         "description": cached.get('description') or '',
                         "category": cached.get('category') or '',
                         "upc": cached.get('upc') or '',
@@ -1166,6 +1215,7 @@ def external_lookup():
                         "task_state": cached.get('task_state') or '',
                         "asin_found": cached.get('asin_found', False),
                         "cost_status": "no_charge",
+                        "cached": True,
                         "message": "Found in cache - no API charge"
                     }
                     return jsonify(product_data)
@@ -2153,13 +2203,46 @@ def scan_product():
                             except Exception as count_error:
                                 logger.error(f"❌ Failed to get scan count for cached FNSKU response: {count_error}")
                         
+                        # Extract images from cached data
+                        all_images = []
+                        try:
+                            image_url_data = cached.get('image_url', '')
+                            if image_url_data:
+                                parsed = json.loads(image_url_data) if isinstance(image_url_data, str) else image_url_data
+                                if isinstance(parsed, list):
+                                    all_images = parsed
+                                else:
+                                    all_images = [image_url_data] if image_url_data else []
+                        except:
+                            all_images = [cached.get('image_url')] if cached.get('image_url') else []
+                        
+                        # Extract videos from rainforest_raw_data if available
+                        videos = []
+                        videos_count = 0
+                        if cached.get('rainforest_raw_data'):
+                            try:
+                                raw_data = cached.get('rainforest_raw_data')
+                                if isinstance(raw_data, str):
+                                    raw_data = json.loads(raw_data)
+                                if raw_data and raw_data.get('product'):
+                                    product = raw_data.get('product')
+                                    if product.get('videos_additional') and isinstance(product.get('videos_additional'), list):
+                                        videos = product.get('videos_additional', [])
+                                        videos_count = product.get('videos_count', len(videos))
+                            except Exception as video_error:
+                                logger.warning(f"Could not extract videos from cache: {video_error}")
+                        
                         response_data = {
                             "success": True,
                             "fnsku": cached.get('fnsku', code),
                             "asin": cached.get('asin', ''),
                             "title": cached.get('product_name', ''),
                             "price": str(cached.get('price', 0)) if cached.get('price') else '',
-                            "image": cached.get('image_url', ''),
+                            "image": all_images[0] if all_images else (cached.get('image_url') or ''),
+                            "images": all_images,
+                            "images_count": len(all_images),
+                            "videos": videos,
+                            "videos_count": videos_count,
                             "brand": cached.get('brand', ''),
                             "category": cached.get('category', ''),
                             "description": cached.get('description', ''),
@@ -2409,6 +2492,8 @@ def scan_product():
             else:
                 logger.info(f"📦 Fetching product data from Rainforest API for ASIN {asin}...")
                 try:
+                    # Request product data from Rainforest API
+                    # The API returns all available images by default
                     rainforest_response = requests.get(
                         'https://api.rainforestapi.com/request',
                         params={
@@ -2425,24 +2510,102 @@ def scan_product():
                     if rainforest_response.status_code == 200:
                         response_json = rainforest_response.json()
                         logger.info(f"📦 Rainforest API response keys: {list(response_json.keys())}")
+                        logger.info(f"📦 Response includes: request_info, request_parameters, request_metadata, product, brand_store, newer_model, similar_to_consider")
+                        
+                        # SAVE COMPLETE RAINFOREST API RESPONSE - You're paying for ALL this data!
+                        # Store the ENTIRE response_json - EVERYTHING from the API
+                        # This includes: request_info, request_parameters, request_metadata, product (all fields), 
+                        # brand_store, newer_model, similar_to_consider, and any other data
+                        rainforest_full_response = response_json
+                        response_size_bytes = len(json.dumps(response_json))
+                        logger.info(f"💾 Complete response size: {response_size_bytes:,} bytes - Storing EVERYTHING for future data sales")
                         
                         if response_json.get('product'):
                             product = response_json['product']
                             logger.info(f"✅ Product found in Rainforest response. Title: {product.get('title', 'N/A')[:50]}...")
                             
+                            # Collect ALL images from Rainforest API
+                            all_images = []
+                            
+                            # Add main_image if it exists
+                            main_image_link = product.get('main_image', {}).get('link')
+                            if main_image_link:
+                                all_images.append(main_image_link)
+                            
+                            # Add all images from images array
+                            images_array = product.get('images', [])
+                            if images_array:
+                                for img in images_array:
+                                    img_link = img.get('link') if isinstance(img, dict) else img
+                                    if img_link and img_link not in all_images:  # Avoid duplicates
+                                        all_images.append(img_link)
+                            
+                            # Fallback: if no images collected, try images_flat
+                            if not all_images and product.get('images_flat'):
+                                images_flat = product.get('images_flat', '')
+                                if images_flat:
+                                    flat_images = [url.strip() for url in images_flat.split(',') if url.strip()]
+                                    all_images.extend(flat_images)
+                            
+                            # Log image count for debugging
+                            logger.info(f"📸 Collected {len(all_images)} images from Rainforest API for ASIN {asin}")
+                            
+                            # If we only got one image, log a warning (might need to re-fetch)
+                            if len(all_images) == 1:
+                                logger.warning(f"⚠️ Only 1 image found for ASIN {asin}. Product may have more images available.")
+                            
+                            # Primary image (first one) for backward compatibility
+                            primary_image = all_images[0] if all_images else ''
+                            
+                            # Extract videos from product data
+                            videos_additional = product.get('videos_additional', [])
+                            videos_count = product.get('videos_count', len(videos_additional))
+                            
+                            # Extract commonly used fields for quick access
                             rainforest_data = {
                                 'title': product.get('title', ''),
-                                'image': product.get('main_image', {}).get('link') or (product.get('images', [{}])[0].get('link') if product.get('images') else ''),
+                                'image': primary_image,  # Primary image for backward compatibility
+                                'images': all_images,  # ALL images as array
+                                'images_count': len(all_images),
+                                'videos': videos_additional,  # ALL videos as array
+                                'videos_count': videos_count,
                                 'price': product.get('buybox_winner', {}).get('price', {}).get('value') or product.get('price', {}).get('value'),
                                 'rating': product.get('rating'),
                                 'reviews_count': product.get('reviews_total'),
                                 'brand': product.get('brand', ''),
                                 'category': product.get('category', {}).get('name', '') if isinstance(product.get('category'), dict) else '',
-                                'description': product.get('description', '')
+                                'description': product.get('description', ''),
+                                # Store the FULL response for access to everything
+                                'full_response': rainforest_full_response  # Complete response with all data
                             }
-                            logger.info(f"✅ Rainforest API data retrieved for ASIN {asin}: title={rainforest_data.get('title', '')[:50]}, price={rainforest_data.get('price')}, brand={rainforest_data.get('brand')}")
+                            
+                            if videos_count > 0:
+                                logger.info(f"🎥 Found {videos_count} videos for ASIN {asin}")
+                            logger.info(f"✅ Rainforest API data retrieved for ASIN {asin}: title={rainforest_data.get('title', '')[:50]}, price={rainforest_data.get('price')}, brand={rainforest_data.get('brand')}, images_count={rainforest_data.get('images_count', 0)}")
+                            logger.info(f"💾 Storing complete Rainforest API response ({len(str(rainforest_full_response))} chars) - includes request_info, product, brand_store, newer_model, similar_to_consider, etc.")
+                            
+                            # Verify all expected keys are in the response
+                            expected_keys = ['request_info', 'request_parameters', 'request_metadata', 'product', 'brand_store']
+                            missing_keys = [key for key in expected_keys if key not in rainforest_full_response]
+                            if missing_keys:
+                                logger.warning(f"⚠️ Missing keys in response: {missing_keys}")
+                            else:
+                                logger.info(f"✅ All expected keys present in response")
+                            
+                            # Log presence of optional keys
+                            optional_keys = ['newer_model', 'similar_to_consider']
+                            for key in optional_keys:
+                                if key in rainforest_full_response:
+                                    logger.info(f"✅ {key} present in response")
+                                else:
+                                    logger.info(f"ℹ️ {key} not present in response (may not be available for this product)")
                         else:
                             logger.warning(f"⚠️ Rainforest API response does not contain 'product' key. Response: {str(response_json)[:200]}")
+                            # Even if no product, save the complete response anyway
+                            rainforest_full_response = response_json
+                            rainforest_data = {
+                                'full_response': rainforest_full_response
+                            }
                     else:
                         logger.error(f"❌ Rainforest API returned status {rainforest_response.status_code}. Response: {rainforest_response.text[:200]}")
                 except requests.exceptions.Timeout:
@@ -2470,13 +2633,37 @@ def scan_product():
         
         # Safely access scan_data with fallbacks
         product_name = (rainforest_data.get('title') if rainforest_data else '') or (scan_data.get('productName') if scan_data else '') or (scan_data.get('name') if scan_data else '') or (f"Amazon Product (ASIN: {asin})" if asin else f"FNSKU: {code}")
-        image_url = (rainforest_data.get('image') if rainforest_data else '') or (scan_data.get('imageUrl') if scan_data else '') or (scan_data.get('image') if scan_data else '') or ''
+        
+        # Collect ALL images from Rainforest API
+        all_images = []
+        if rainforest_data and rainforest_data.get('images'):
+            all_images = rainforest_data.get('images', [])
+        elif rainforest_data and rainforest_data.get('image'):
+            all_images = [rainforest_data.get('image')]
+        elif scan_data and scan_data.get('imageUrl'):
+            all_images = [scan_data.get('imageUrl')]
+        elif scan_data and scan_data.get('image'):
+            all_images = [scan_data.get('image')]
+        
+        # Primary image for backward compatibility (first image)
+        image_url = all_images[0] if all_images else ''
+        
+        # Store all images as JSON string for database
+        image_url_json = json.dumps(all_images) if all_images else None
+        
         price = (rainforest_data.get('price') if rainforest_data else None) or (scan_data.get('price') if scan_data else None) or (scan_data.get('listPrice') if scan_data else None) or 0
         description = (rainforest_data.get('description') if rainforest_data else '') or (scan_data.get('description') if scan_data else '') or product_name
         category = (rainforest_data.get('category') if rainforest_data else '') or (scan_data.get('category') if scan_data else '') or 'External API'
         brand = (rainforest_data.get('brand') if rainforest_data else '') or (scan_data.get('brand') if scan_data else '') or ''
         
-        logger.info(f"📊 Final response data: title={product_name[:50]}, price={price}, brand={brand}, category={category}, image={image_url[:50] if image_url else 'none'}")
+        # Extract videos from rainforest_data if available
+        videos = []
+        videos_count = 0
+        if rainforest_data and rainforest_data.get('videos'):
+            videos = rainforest_data.get('videos', [])
+            videos_count = rainforest_data.get('videos_count', len(videos))
+        
+        logger.info(f"📊 Final response data: title={product_name[:50]}, price={price}, brand={brand}, category={category}, images_count={len(all_images)}, videos_count={videos_count}, primary_image={image_url[:50] if image_url else 'none'}")
         
         response_data = {
             "success": True,
@@ -2484,7 +2671,11 @@ def scan_product():
             "asin": asin,
             "title": product_name,
             "price": str(price) if price else '',
-            "image": image_url,
+            "image": image_url,  # Primary image for backward compatibility
+            "images": all_images,  # ALL images array
+            "images_count": len(all_images),
+            "videos": videos,  # ALL videos array
+            "videos_count": videos_count,
             "brand": brand,
             "category": category,
             "description": description,
@@ -2562,8 +2753,34 @@ def scan_product():
                 
                 # Prepare cache data - ensure all required fields are present
                 # NOTE: Only include columns that exist in api_lookup_cache table
-                # Table columns: fnsku, asin, product_name, description, price, category, upc, image_url, source, scan_task_id, task_state, asin_found, lookup_count, last_accessed, created_at, updated_at
+                # Table columns: fnsku, asin, product_name, description, price, category, upc, image_url, source, scan_task_id, task_state, asin_found, lookup_count, last_accessed, created_at, updated_at, rainforest_raw_data
                 # NOTE: 'brand' column does NOT exist in the table, so we don't include it
+                # Store all images as JSON in image_url (TEXT column can store JSON)
+                # Use JSON array of all images, fallback to primary image as string for backward compatibility
+                image_url_to_save = image_url_json if image_url_json else (image_url[:500] if image_url else None)
+                
+                # Save COMPLETE Rainforest API response - you're paying for ALL this data!
+                # Store EVERYTHING: request_info, request_parameters, request_metadata, product (all fields),
+                # brand_store, newer_model, similar_to_consider, and ANY OTHER data in the response
+                # NO FILTERING - save the ENTIRE response_json exactly as received
+                rainforest_raw_data_to_save = None
+                if rainforest_data and rainforest_data.get('full_response'):
+                    # Store the COMPLETE response as JSONB (Supabase accepts dict for JSONB)
+                    # This is the ENTIRE response_json from Rainforest API - NOTHING is filtered out
+                    # We save EVERY key-value pair exactly as received from the API
+                    rainforest_raw_data_to_save = rainforest_data.get('full_response')
+                    response_size = len(json.dumps(rainforest_raw_data_to_save))
+                    
+                    # Log what keys are being saved
+                    saved_keys = list(rainforest_raw_data_to_save.keys()) if isinstance(rainforest_raw_data_to_save, dict) else []
+                    logger.info(f"💾 Saving COMPLETE Rainforest API response ({response_size:,} bytes)")
+                    logger.info(f"💾 Response contains {len(saved_keys)} top-level keys: {', '.join(saved_keys)}")
+                    logger.info(f"💾 Includes: request_info (credits, overage), request_parameters, request_metadata")
+                    logger.info(f"💾 Includes: product (ALL fields: title, images, price, rating, reviews, brand, category, description, keywords, specifications, feature_bullets, videos, dimensions, weight, color, manufacturer, model_number, whats_in_the_box, variants, top_reviews, a_plus_content, etc.)")
+                    logger.info(f"💾 Includes: brand_store, newer_model (if available), similar_to_consider (if available)")
+                    logger.info(f"💾 Stored in rainforest_raw_data column - COMPLETE response for future data sales/analysis")
+                    logger.info(f"💾 NO DATA IS FILTERED - Everything from the API response is saved")
+                
                 cache_data = {
                     'fnsku': code,  # REQUIRED
                     'asin': asin,  # REQUIRED
@@ -2571,14 +2788,15 @@ def scan_product():
                     'description': (description[:2000] if description else product_name) or '',  # Can be empty
                     'price': price_float,
                     'category': (category[:200] if category else 'External API') or 'External API',
-                    'image_url': image_url[:500] if image_url else None,
+                    'image_url': image_url_to_save,  # JSON array of all images, or single image URL
                     'upc': scan_data.get('upc') if (scan_data and scan_data.get('upc')) else None,
                     'source': 'rainforest_api' if rainforest_data else 'fnskutoasin.com',
                     'scan_task_id': str(task_id) if task_id else None,
                     'task_state': str(scan_data.get('taskState', '')) if (scan_data and scan_data.get('taskState')) else None,
                     'asin_found': True,
                     'last_accessed': now,
-                    'updated_at': now
+                    'updated_at': now,
+                    'rainforest_raw_data': rainforest_raw_data_to_save  # COMPLETE Rainforest API response as JSON
                     # 'brand' column does NOT exist in api_lookup_cache table - removed
                 }
                 

@@ -28,6 +28,7 @@ const columnMap = {
   price: 'MSRP',
   upc: 'UPC',
   quantity: 'Quantity',
+  image_url: 'image_url',  // Added for storing images
 };
 
 // API Cache service for external lookup caching in 'api_lookup_cache'
@@ -114,6 +115,30 @@ export const apiCacheService = {
       const hasValidAsin = apiResult.asin && apiResult.asin.trim() !== '' && apiResult.asin.length >= 10;
       const asinFound = apiResult.asin_found !== undefined ? !!apiResult.asin_found : hasValidAsin;
       
+      // Collect all images - handle both array and single image
+      let allImages = [];
+      if (apiResult.images && Array.isArray(apiResult.images)) {
+        allImages = apiResult.images;
+      } else if (apiResult.image_url) {
+        // Try to parse if it's a JSON string, otherwise treat as single image
+        try {
+          const parsed = JSON.parse(apiResult.image_url);
+          if (Array.isArray(parsed)) {
+            allImages = parsed;
+          } else {
+            allImages = [apiResult.image_url];
+          }
+        } catch {
+          // Not JSON, treat as single image
+          allImages = [apiResult.image_url];
+        }
+      } else if (apiResult.image) {
+        allImages = [apiResult.image];
+      }
+      
+      // Store all images as JSON string in image_url column
+      const imageUrlToSave = allImages.length > 0 ? JSON.stringify(allImages) : null;
+      
       const dataToUpsert = {
         fnsku: fnskuValue, // Required - use ASIN as fallback if FNSKU not available
         asin: apiResult.asin || null,
@@ -122,7 +147,7 @@ export const apiCacheService = {
         price: apiResult.price != null ? parseFloat(apiResult.price) : 0,
         category: apiResult.category || 'External API',
         upc: apiResult.upc || null,
-        image_url: apiResult.image_url || null,
+        image_url: imageUrlToSave,  // JSON array of all images
         source: apiResult.source || 'fnskutoasin.com',
         task_state: apiResult.task_state || (hasValidAsin ? 'completed' : 'processing'),
         scan_task_id: apiResult.scan_task_id || null,
@@ -227,6 +252,50 @@ export const apiCacheService = {
    */
   mapCacheToDisplay(cacheData) {
     if (!cacheData) return null;
+    
+    // Parse image_url - handle both JSON array and single string
+    let imageUrl = '';
+    let allImages = [];
+    if (cacheData.image_url) {
+      try {
+        const parsed = JSON.parse(cacheData.image_url);
+        if (Array.isArray(parsed)) {
+          allImages = parsed;
+          imageUrl = parsed[0] || '';  // Primary image for backward compatibility
+        } else {
+          imageUrl = cacheData.image_url;
+          allImages = [cacheData.image_url];
+        }
+      } catch {
+        // Not JSON, treat as single image string
+        imageUrl = cacheData.image_url;
+        allImages = [cacheData.image_url];
+      }
+    }
+    
+    // Extract videos from rainforest_raw_data if available
+    let allVideos = [];
+    let videosCount = 0;
+    if (cacheData.rainforest_raw_data) {
+      try {
+        // rainforest_raw_data is already a JSON object (Supabase JSONB)
+        const rawData = typeof cacheData.rainforest_raw_data === 'string' 
+          ? JSON.parse(cacheData.rainforest_raw_data) 
+          : cacheData.rainforest_raw_data;
+        
+        if (rawData && rawData.product) {
+          const product = rawData.product;
+          // Extract videos from product.videos_additional
+          if (product.videos_additional && Array.isArray(product.videos_additional)) {
+            allVideos = product.videos_additional;
+            videosCount = product.videos_count || allVideos.length;
+          }
+        }
+      } catch (error) {
+        console.warn('Error extracting videos from cache:', error);
+      }
+    }
+    
     return {
       id: cacheData.id, // Or whatever primary key is used
       fnsku: cacheData.fnsku,
@@ -239,7 +308,11 @@ export const apiCacheService = {
       sku: cacheData.fnsku || cacheData.asin, // Prioritize FNSKU as display SKU
       lpn: '', // api_lookup_cache likely doesn't have LPN from manifest
       quantity: 0, // api_lookup_cache doesn't track live quantity
-      image_url: cacheData.image_url || '',
+      image_url: imageUrl,  // Primary image for backward compatibility
+      images: allImages,  // ALL images array
+      images_count: allImages.length,
+      videos: allVideos,  // ALL videos array
+      videos_count: videosCount,
       source: 'api_lookup_cache', // Indicate it came from our cache
       cost_status: 'no_charge', // Data from cache is effectively no charge for this lookup
       asin_found: !!cacheData.asin_found,

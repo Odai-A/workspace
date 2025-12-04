@@ -46,24 +46,32 @@ export const getApiUrl = () => {
 
 /**
  * Get the full API endpoint URL
- * @param {string} endpoint - The API endpoint path (e.g., '/api/scan')
+ * @param {string} endpoint - The API endpoint path (e.g., '/scan' or 'scan')
  * @returns {string} The full URL to the API endpoint
  */
 export const getApiEndpoint = (endpoint) => {
   const baseUrl = getApiUrl();
-  const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   
-  // If baseUrl already contains /api, don't add it again
-  if (baseUrl.includes('/api') && cleanEndpoint.startsWith('/api')) {
-    return `${baseUrl}${cleanEndpoint}`;
+  // Normalize endpoint - remove leading/trailing slashes and any /api prefix
+  let normalizedEndpoint = endpoint.trim();
+  
+  // Remove any existing /api prefix to avoid double /api/api/
+  normalizedEndpoint = normalizedEndpoint.replace(/^\/api\//, '/');
+  normalizedEndpoint = normalizedEndpoint.replace(/^\/api$/, '');
+  
+  // Ensure it starts with /
+  if (!normalizedEndpoint.startsWith('/')) {
+    normalizedEndpoint = `/${normalizedEndpoint}`;
   }
   
-  // If endpoint doesn't start with /api, add it
-  if (!cleanEndpoint.startsWith('/api')) {
-    return `${baseUrl}/api${cleanEndpoint}`;
+  // Base URL is http://localhost:5000, so we need to add /api
+  // Only add /api if baseUrl doesn't already have it
+  if (baseUrl.includes('/api')) {
+    return `${baseUrl}${normalizedEndpoint}`;
   }
   
-  return `${baseUrl}${cleanEndpoint}`;
+  // Add /api prefix
+  return `${baseUrl}/api${normalizedEndpoint}`;
 };
 
 /**
