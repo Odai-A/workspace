@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { mockService } from './mockData';
 import { apiCacheService, apiScanLogService } from './databaseService.js';
+import { getApiEndpoint } from '../utils/apiConfig';
 
 // Axios instance for API calls
 const apiClient = axios.create({
@@ -103,22 +104,8 @@ export const externalApiService = {
       console.log(`🔍 Looking up FNSKU: ${fnsku} directly from FNSKU API`);
       
       // Try backend first (if available), then fall back to direct API call
-      // Use environment variable or detect from current origin for production
-      const getBackendUrl = () => {
-        if (import.meta.env.VITE_BACKEND_URL) return import.meta.env.VITE_BACKEND_URL;
-        if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
-        // For production, try to detect backend from current origin
-        if (typeof window !== 'undefined') {
-          const origin = window.location.origin;
-          // If hosted, try same origin for backend
-          if (!origin.includes('localhost') && !origin.includes('127.0.0.1')) {
-            return origin.replace(/:\d+$/, ':5000'); // Replace port with 5000
-          }
-        }
-        return 'http://localhost:5000'; // Fallback for local development
-      };
-      const backendUrl = getBackendUrl();
-      const apiEndpoint = `${backendUrl}/api/external-lookup`;
+      // Use centralized API config
+      const apiEndpoint = getApiEndpoint('/external-lookup');
       
       // Try backend first (RECOMMENDED - avoids API limits)
       try {

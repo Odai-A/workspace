@@ -6,20 +6,7 @@ import { useNavigate } from 'react-router-dom';
 import { getSubscriptionStatus } from '../services/subscriptionService';
 import { supabase } from '../config/supabaseClient';
 import axios from 'axios';
-
-// Get API URL from environment
-const getApiUrl = () => {
-  if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
-  if (import.meta.env.VITE_BACKEND_URL) return import.meta.env.VITE_BACKEND_URL;
-  if (typeof window !== 'undefined') {
-    const origin = window.location.origin;
-    if (!origin.includes('localhost') && !origin.includes('127.0.0.1')) {
-      return origin.replace(/:\d+$/, ':5000');
-    }
-  }
-  return 'http://localhost:5000';
-};
-const API_URL = getApiUrl();
+import { getApiEndpoint } from '../utils/apiConfig';
 
 // Toggle switch component
 const Toggle = ({ enabled, onChange, label, description }) => {
@@ -161,7 +148,7 @@ const Settings = () => {
         return;
       }
 
-      const response = await fetch(`${API_URL}/api/create-customer-portal-session/`, {
+      const response = await fetch(getApiEndpoint('/create-customer-portal-session/'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -539,18 +526,12 @@ const Settings = () => {
                       return;
                     }
                     
-                    setIsSubmittingContact(true);
-                    try {
-                      // Get backend URL
-                      let backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || 'http://localhost:5000';
-                      if (backendUrl.endsWith('/api')) {
-                        backendUrl = backendUrl.replace('/api', '');
-                      }
-                      
-                      const { data: { session } } = await supabase.auth.getSession();
-                      
-                      const response = await axios.post(
-                        `${backendUrl}/api/contact-support`,
+                     setIsSubmittingContact(true);
+                     try {
+                       const { data: { session } } = await supabase.auth.getSession();
+                       
+                       const response = await axios.post(
+                         getApiEndpoint('/contact-support'),
                         {
                           subject: contactForm.subject,
                           type: contactForm.type,

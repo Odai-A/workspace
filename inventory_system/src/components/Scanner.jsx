@@ -13,6 +13,7 @@ import { inventoryService } from '../config/supabaseClient';
 import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, CheckCircleIcon, CurrencyDollarIcon, ArrowTopRightOnSquareIcon, PrinterIcon, QrCodeIcon } from '@heroicons/react/24/outline';
 import { mockService } from '../services/mockData';
 import { useAuth } from '../contexts/AuthContext';
+import { getApiUrl, getApiEndpoint } from '../utils/apiConfig';
 
 /**
  * Scanner component for barcode scanning and product lookup
@@ -118,17 +119,12 @@ const Scanner = () => {
     
     setScanCountLoading(true);
     try {
-      let backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || 'http://localhost:5000';
-      if (backendUrl.endsWith('/api')) {
-        backendUrl = backendUrl.replace('/api', '');
-      }
-      
       // Get Supabase session token for auth
       const { supabase } = await import('../config/supabaseClient');
       const { data: { session } } = await supabase.auth.getSession();
       const token = session?.access_token || '';
       
-      const response = await axios.get(`${backendUrl}/api/scan-count`, {
+      const response = await axios.get(getApiEndpoint('/scan-count'), {
         headers: token ? {
           'Authorization': `Bearer ${token}`
         } : {}
@@ -386,15 +382,8 @@ const Scanner = () => {
       });
       
       try {
-        // Get backend URL from environment
-        let backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || 'http://localhost:5000';
-        
-        // Remove trailing /api if present (VITE_API_URL might include it)
-        if (backendUrl.endsWith('/api')) {
-          backendUrl = backendUrl.replace('/api', '');
-        }
-        
-        const scanUrl = `${backendUrl}/api/scan`;
+        // Use centralized API config
+        const scanUrl = getApiEndpoint('/scan');
         
         console.log("🚀 Calling unified scan endpoint:", scanUrl);
         const response = await axios.post(scanUrl, {
@@ -1718,11 +1707,7 @@ const Scanner = () => {
       try {
         // Retry the API lookup
         // Use backend scan endpoint instead
-        let backendUrl = import.meta.env.VITE_BACKEND_URL || import.meta.env.VITE_API_URL || 'http://localhost:5000';
-        if (backendUrl.endsWith('/api')) {
-          backendUrl = backendUrl.replace('/api', '');
-        }
-        const response = await axios.post(`${backendUrl}/api/scan`, {
+        const response = await axios.post(getApiEndpoint('/scan'), {
           code: code,
           user_id: userId
         }, { timeout: 120000 });

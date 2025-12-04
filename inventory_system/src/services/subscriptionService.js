@@ -1,29 +1,5 @@
 import { supabase } from '../config/supabaseClient';
-
-// Get API URL from environment or detect from current origin for production
-const getApiUrl = () => {
-  let url = '';
-  if (import.meta.env.VITE_API_URL) {
-    url = import.meta.env.VITE_API_URL;
-  } else if (import.meta.env.VITE_BACKEND_URL) {
-    url = import.meta.env.VITE_BACKEND_URL;
-  } else if (typeof window !== 'undefined') {
-    const origin = window.location.origin;
-    if (!origin.includes('localhost') && !origin.includes('127.0.0.1')) {
-      url = origin.replace(/:\d+$/, ':5000');
-    } else {
-      url = 'http://localhost:5000';
-    }
-  } else {
-    url = 'http://localhost:5000';
-  }
-  
-  // Remove trailing slash and /api if present to avoid double /api/api/
-  // Handle both /api and /api/ cases
-  url = url.replace(/\/+$/, '').replace(/\/api\/?$/, '');
-  return url;
-};
-const API_URL = getApiUrl();
+import { getApiEndpoint } from '../utils/apiConfig';
 
 /**
  * Get the current user's subscription status
@@ -36,11 +12,8 @@ export const getSubscriptionStatus = async () => {
       return { status: 'incomplete', hasActiveSubscription: false, subscriptionInfo: null };
     }
 
-    // Build URL - ensure we don't have double /api/
-    let baseUrl = API_URL;
-    // Remove any trailing /api to avoid double /api/api/
-    baseUrl = baseUrl.replace(/\/api\/?$/, '');
-    const endpoint = `${baseUrl}/api/subscription-status`;
+    // Use centralized API endpoint helper
+    const endpoint = getApiEndpoint('/subscription-status');
     
     // Only log in development
     if (import.meta.env.DEV) {

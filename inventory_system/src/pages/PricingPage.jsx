@@ -4,20 +4,7 @@ import { toast } from 'react-toastify';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../config/supabaseClient';
 import PriceIdWarning from '../components/PriceIdWarning';
-
-// Get API URL from environment or detect from current origin for production
-const getApiUrl = () => {
-  if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
-  if (import.meta.env.VITE_BACKEND_URL) return import.meta.env.VITE_BACKEND_URL;
-  if (typeof window !== 'undefined') {
-    const origin = window.location.origin;
-    if (!origin.includes('localhost') && !origin.includes('127.0.0.1')) {
-      return origin.replace(/:\d+$/, ':5000');
-    }
-  }
-  return 'http://localhost:5000'; // Fallback for local development
-};
-const API_URL = getApiUrl();
+import { getApiEndpoint } from '../utils/apiConfig';
 
 // Price IDs from environment variables with validation
 const getValidPriceId = (envVar, fallback = null) => {
@@ -179,10 +166,8 @@ const PricingPage = () => {
     }
 
     try {
-      // Check if API_URL already ends with /api to avoid duplicate /api in the path
-      const apiPath = API_URL.endsWith('/api') 
-        ? `${API_URL}/create-checkout-session/`
-        : `${API_URL}/api/create-checkout-session/`;
+      // Use centralized API endpoint helper
+      const apiPath = getApiEndpoint('/create-checkout-session/');
         
       console.log(`🔄 Creating Stripe checkout session for ${planName}...`);
       console.log(`📍 API Endpoint: ${apiPath}`);

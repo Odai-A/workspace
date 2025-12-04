@@ -44,13 +44,26 @@ app = Flask(__name__)
 # Enable CORS - configure for production
 # In production, set ALLOWED_ORIGINS environment variable (comma-separated)
 # Example: ALLOWED_ORIGINS=https://yourdomain.com,https://www.yourdomain.com
-allowed_origins = os.environ.get('ALLOWED_ORIGINS', '*').split(',')
+# Also supports FRONTEND_BASE_URL for convenience
+allowed_origins_str = os.environ.get('ALLOWED_ORIGINS', '*')
+frontend_base_url = os.environ.get('FRONTEND_BASE_URL', '')
+
+# Build list of allowed origins
+if allowed_origins_str == '*':
+    allowed_origins = ['*']
+else:
+    allowed_origins = [origin.strip() for origin in allowed_origins_str.split(',') if origin.strip()]
+    # Add FRONTEND_BASE_URL if it's set and not already in the list
+    if frontend_base_url and frontend_base_url not in allowed_origins:
+        allowed_origins.append(frontend_base_url.rstrip('/'))
+
 if allowed_origins == ['*']:
     # Development: allow all origins
     CORS(app)
 else:
     # Production: allow specific origins
     CORS(app, resources={r"/api/*": {"origins": allowed_origins}})
+    logger.info(f"CORS configured for origins: {', '.join(allowed_origins)}")
 
 # eBay API Configuration
 EBAY_CLIENT_ID = os.getenv('EBAY_CLIENT_ID')
@@ -3548,7 +3561,8 @@ def contact_support():
         }), 500
 
 if __name__ == '__main__':
-    port = int(os.environ.get("FLASK_RUN_PORT", 5000))
+    # Render uses PORT environment variable, fallback to FLASK_RUN_PORT for local dev
+    port = int(os.environ.get("PORT", os.environ.get("FLASK_RUN_PORT", 5000)))
     debug_mode = os.environ.get("FLASK_DEBUG", "True").lower() == "true"
     
     # Optional: Add CORS if your React app is on a different origin (e.g., localhost:5173 vs localhost:5000)
