@@ -1094,7 +1094,7 @@ def external_lookup():
     """Lookup product data from external API using FNSKU - with Supabase caching to avoid duplicate charges"""
     try:
         data = request.get_json()
-        fnsku = data.get('fnsku', '').strip()
+        fnsku = data.get('fnsku', '').strip().upper()  # Convert to uppercase
         
         if not fnsku:
             return jsonify({
@@ -1476,7 +1476,7 @@ def scan_product():
     """
     try:
         data = request.get_json()
-        code = data.get('code', '').strip()
+        code = data.get('code', '').strip().upper()  # Convert to uppercase
 
         # Prefer authenticated user/tenant from JWT; fall back to body user_id if provided
         user_id_from_token, tenant_id = get_ids_from_request()

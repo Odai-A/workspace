@@ -224,8 +224,8 @@ const Scanner = () => {
       return;
     }
     
-    // Clean the code by removing whitespace and tab characters
-    const cleanedCode = code.trim().replace(/\s+/g, '');
+    // Clean the code by removing whitespace and tab characters, then convert to uppercase
+    const cleanedCode = code.trim().replace(/\s+/g, '').toUpperCase();
     console.log("Detected code via Camera:", cleanedCode);
     
     // Keep camera active for continuous scanning in batch mode
@@ -358,13 +358,15 @@ const Scanner = () => {
   };
 
   async function lookupProductByCode(code) {
-    console.log(`🔍 Looking up product by code: ${code}, UserID: ${userId || 'N/A'}, Batch Mode: ${batchMode}`);
+    // Ensure code is uppercase (safety measure)
+    const upperCode = code.trim().toUpperCase();
+    console.log(`🔍 Looking up product by code: ${upperCode}, UserID: ${userId || 'N/A'}, Batch Mode: ${batchMode}`);
     setLoading(true);
     if (!batchMode) {
       setProductInfo(null); // Clear previous product info only in normal mode
     }
     setIsApiProcessing(false); // Reset processing state
-    setLastScannedCode(code); // Track the last scanned code
+    setLastScannedCode(upperCode); // Track the last scanned code
 
     // Stop any ongoing auto-refresh when starting a new lookup
     if (isAutoRefreshing) {
@@ -376,7 +378,7 @@ const Scanner = () => {
       // Always call backend scan endpoint to ensure scan is logged and counted
       // Backend will check cache first and return cached data quickly if available
       // This ensures all scans are properly logged to scan_history for trial tracking
-      console.log(`Calling backend /api/scan to log scan and get updated count for code: ${code}`);
+      console.log(`Calling backend /api/scan to log scan and get updated count for code: ${upperCode}`);
       toast.info("🔍 Scanning product...", {
         autoClose: 2000
       });
@@ -387,7 +389,7 @@ const Scanner = () => {
         
         console.log("🚀 Calling unified scan endpoint:", scanUrl);
         const response = await axios.post(scanUrl, {
-          code: code,
+          code: upperCode,
           user_id: userId
         }, {
           timeout: 60000 // 60 seconds timeout
@@ -523,8 +525,8 @@ const Scanner = () => {
       return;
     }
     
-    // Clean the input by removing extra whitespace and tab characters
-    const cleanedBarcode = barcodeToScan.trim().replace(/\s+/g, '');
+    // Clean the input by removing extra whitespace and tab characters, then convert to uppercase
+    const cleanedBarcode = barcodeToScan.trim().replace(/\s+/g, '').toUpperCase();
     console.log("Manual scan - original:", barcodeToScan, "cleaned:", cleanedBarcode, `UserID: ${userId || 'N/A'}`);
     
     setIsManualScanning(true);
@@ -1284,7 +1286,7 @@ const Scanner = () => {
   const handleSearchKeyDown = (e) => {
     if (e.key === 'Enter' && searchQuery.trim()) {
       e.preventDefault();
-      const code = searchQuery.trim();
+      const code = searchQuery.trim().toUpperCase(); // Convert to uppercase
       setSearchQuery(''); // Clear immediately for next scan
       lookupProductByCode(code);
       // Refocus after a brief delay to ensure smooth scanning
@@ -1298,7 +1300,8 @@ const Scanner = () => {
 
   // Handle search input change with debounce
   const handleSearchChange = (e) => {
-    const query = e.target.value;
+    // Convert to uppercase as user types for better UX
+    const query = e.target.value.toUpperCase();
     setSearchQuery(query);
     
     // Clear previous timer
@@ -1309,7 +1312,7 @@ const Scanner = () => {
     // Set new timer to search after 500ms of inactivity
     searchDebounceTimer.current = setTimeout(() => {
       if (query.trim().length >= 2) {
-        performSearch(query);
+        performSearch(query); // query is already uppercase from handleSearchChange
       } else {
         setSearchResults([]);
         setShowSearchResults(false);
@@ -1321,7 +1324,9 @@ const Scanner = () => {
   const performSearch = async (query) => {
     setSearchLoading(true);
     try {
-      const results = await dbProductLookupService.searchProducts(query, {
+      // Ensure query is uppercase for consistent searching
+      const upperQuery = query.toUpperCase();
+      const results = await dbProductLookupService.searchProducts(upperQuery, {
         exactMatch: exactMatch,
         fields: ['name', 'sku', 'asin', 'fnsku', 'description', 'category', 'lpn'],
         limit: 10
@@ -1338,7 +1343,8 @@ const Scanner = () => {
   
   // Select product from search results
   const selectProduct = (product) => {
-    const code = product.sku || product.asin || product.fnsku;
+    // Get code and ensure it's uppercase
+    const code = (product.sku || product.asin || product.fnsku || '').toUpperCase();
     
     // In batch mode, add to queue; otherwise set product info
     if (batchMode) {
@@ -1708,7 +1714,7 @@ const Scanner = () => {
         // Retry the API lookup
         // Use backend scan endpoint instead
         const response = await axios.post(getApiEndpoint('/scan'), {
-          code: code,
+          code: code.toUpperCase(),
           user_id: userId
         }, { timeout: 120000 });
         const result = response.data;

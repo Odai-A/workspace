@@ -52,7 +52,7 @@
             <div class="form-group">
                 <label for="manual-fnsku">Enter FNSKU:</label>
                 <div class="input-group">
-                    <input type="text" id="manual-fnsku" class="form-control" placeholder="Enter FNSKU here">
+                    <input type="text" id="manual-fnsku" class="form-control" placeholder="Enter FNSKU here" style="text-transform: uppercase;">
                     <div class="input-group-append">
                         <button id="lookup-btn" class="btn btn-primary">Lookup</button>
                     </div>
@@ -206,7 +206,7 @@ document.addEventListener('DOMContentLoaded', (event) => {
                     const result = await reader.decodeFromCanvas(canvas);
 
                     if (result && result.getText()) {
-                        const fnsku = result.getText().trim();
+                        const fnsku = result.getText().trim().toUpperCase();
                         hasScanned = true;
                         stopScan();
                         scanResultDiv.innerHTML = `<p class="text-success">FNSKU scanned: ${fnsku}</p>`;
@@ -259,12 +259,15 @@ document.addEventListener('DOMContentLoaded', (event) => {
         loadingSpinner.style.display = 'block';
         resultsSection.style.display = 'none';
         
+        // Convert to uppercase before sending
+        const upperFnsku = fnsku.trim().toUpperCase();
+        
         fetch('/api/external-lookup', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ fnsku: fnsku })
+            body: JSON.stringify({ fnsku: upperFnsku })
         })
         .then(response => response.json())
         .then(data => {
@@ -367,7 +370,7 @@ document.addEventListener('DOMContentLoaded', (event) => {
     });
 
     lookupBtn.addEventListener('click', () => {
-        const fnsku = manualFnskuInput.value.trim();
+        const fnsku = manualFnskuInput.value.trim().toUpperCase();
         if (fnsku) {
             performExternalLookup(fnsku);
         } else {
