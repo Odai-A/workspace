@@ -1069,9 +1069,9 @@ def upload_csv():
 def batch_import():
     """
     Optimized bulk batch import endpoint for CSV products.
-    Uses true bulk processing: validates all items in memory, then executes ONE SQL query.
+    Handles CSV column normalization, validation, and ONE bulk upsert per batch.
     
-    Performance target: 200 items in < 1 second
+    Performance target: 1000 items in < 2 seconds
     """
     # Handle CORS preflight
     if request.method == 'OPTIONS':
@@ -1102,117 +1102,162 @@ def batch_import():
                 "message": "Request body is required"
             }), 400
         
-        # Support both batch and single item modes
-        items = []
-        if 'items' in data and isinstance(data['items'], list):
-            items = data['items']
-        elif 'item' in data:
-            items = [data['item']]  # Legacy single item support
-        else:
+        items = data.get('items', [])
+        if not items or not isinstance(items, list):
             return jsonify({
                 "success": False,
                 "error": "invalid_request",
-                "message": "Request must contain 'items' array or 'item' object"
-            }), 400
-        
-        if not items:
-            return jsonify({
-                "success": False,
-                "error": "invalid_request",
-                "message": "No items provided"
+                "message": "Request must contain 'items' array"
             }), 400
         
         batch_number = data.get('batch', 0)
+        csv_headers = data.get('headers', [])  # CSV column headers from frontend
         
-        # Map normalized keys (from frontend) to Supabase column names
-        # Only include columns that actually exist in manifest_data table
-        normalized_to_supabase_map = {
-            'x_z_asin': 'X-Z ASIN',
-            'fn_sku': 'Fn Sku',
-            'b00_asin': 'B00 Asin',
+        # CSV column name mapping to database columns
+        # Handles various CSV column name variations
+        csv_to_db_map = {
+            # FNSKU variations
+            'Fn Sku': 'Fn Sku',
+            'fnsku': 'Fn Sku',
+            'FNSKU': 'Fn Sku',
+            'SKU': 'Fn Sku',
+            'sku': 'Fn Sku',
+            'Sku': 'Fn Sku',
+            'FNSKU #': 'Fn Sku',
+            'fn sku': 'Fn Sku',
+            'FnSku': 'Fn Sku',
+            # ASIN variations
+            'B00 Asin': 'B00 Asin',
+            'B00 ASIN': 'B00 Asin',
+            'asin': 'B00 Asin',
+            'ASIN': 'B00 Asin',
+            'Asin': 'B00 Asin',
+            'ASIN #': 'B00 Asin',
+            'asin #': 'B00 Asin',
+            # LPN/X-Z ASIN variations
+            'X-Z ASIN': 'X-Z ASIN',
+            'XZ ASIN': 'X-Z ASIN',
+            'LPN': 'X-Z ASIN',
+            'lpn': 'X-Z ASIN',
+            'Lpn': 'X-Z ASIN',
+            # Description variations
+            'Description': 'Description',
             'description': 'Description',
+            'ItemDesc': 'Description',
+            'GLDesc': 'Description',
+            'Name': 'Description',
+            'name': 'Description',
+            # MSRP/Price variations
+            'MSRP': 'MSRP',
             'msrp': 'MSRP',
+            'Retail': 'MSRP',
+            'retail': 'MSRP',
+            'price': 'MSRP',
+            'Price': 'MSRP',
+            # Category
+            'Category': 'Category',
             'category': 'Category',
+            # UPC
+            'UPC': 'UPC',
             'upc': 'UPC',
+            'Upc': 'UPC',
+            # Quantity
+            'Quantity': 'Quantity',
             'quantity': 'Quantity',
-            'image_url': 'image_url'
+            'Units': 'Quantity',
+            'units': 'Quantity',
+            # Image URL
+            'image_url': 'image_url',
+            'Image URL': 'image_url',
+            'imageUrl': 'image_url'
         }
         
-        # Note: The following columns don't exist in manifest_data and are ignored:
-        # - 'ext_msrp': 'EXT MSRP'
-        # - 'sub_category': 'Sub-Category'
-        # - 'pallet_id': 'Pallet ID'
-        # - 'package_id': 'Package ID'
-        # - 'seller': 'Seller'
-        # - 'task_id': 'Task ID'
-        # - 'listing_id': 'Listing ID'
+        # Database columns that exist in manifest_data
+        db_columns = ['X-Z ASIN', 'Fn Sku', 'B00 Asin', 'Description', 'MSRP', 
+                     'Category', 'UPC', 'Quantity', 'image_url']
         
-        # All required normalized keys
-        required_normalized_keys = list(normalized_to_supabase_map.keys())
-        
-        # STEP 1: BULK VALIDATION - Validate all items in memory first
+        # STEP 1: BULK VALIDATION & NORMALIZATION - Process all items in memory
         valid_items = []
         invalid_items = []
         
-        for idx, item in enumerate(items):
+        for idx, csv_row in enumerate(items):
             try:
-                # Validation: must have at least one of x_z_asin, fn_sku, or b00_asin
-                has_xz_asin = item.get('x_z_asin') and str(item.get('x_z_asin', '')).strip() != ''
-                has_fn_sku = item.get('fn_sku') and str(item.get('fn_sku', '')).strip() != ''
-                has_b00_asin = item.get('b00_asin') and str(item.get('b00_asin', '')).strip() != ''
+                # Normalize CSV row to database format
+                db_row = {}
                 
-                if not has_xz_asin and not has_fn_sku and not has_b00_asin:
+                # Extract values from CSV row using column mapping
+                fnsku_value = None
+                asin_value = None
+                xz_asin_value = None
+                
+                # Find FNSKU value (try all variations)
+                for csv_col, db_col in csv_to_db_map.items():
+                    if db_col == 'Fn Sku' and csv_col in csv_row:
+                        value = csv_row[csv_col]
+                        if value and str(value).strip():
+                            fnsku_value = str(value).strip()
+                            break
+                
+                # Find ASIN value (try all variations)
+                for csv_col, db_col in csv_to_db_map.items():
+                    if db_col == 'B00 Asin' and csv_col in csv_row:
+                        value = csv_row[csv_col]
+                        if value and str(value).strip():
+                            asin_value = str(value).strip()
+                            break
+                
+                # Find X-Z ASIN/LPN value (try all variations)
+                for csv_col, db_col in csv_to_db_map.items():
+                    if db_col == 'X-Z ASIN' and csv_col in csv_row:
+                        value = csv_row[csv_col]
+                        if value and str(value).strip():
+                            xz_asin_value = str(value).strip()
+                            break
+                
+                # VALIDATION: Must have at least one of fnsku, asin, or xz_asin
+                if not fnsku_value and not asin_value and not xz_asin_value:
                     invalid_items.append({
                         "row_index": idx,
-                        "message": "Missing x_z_asin AND fn_sku AND b00_asin (at least one is required)"
+                        "message": "Missing fnsku AND asin AND x_z_asin (at least one is required)"
                     })
                     continue
                 
-                # Ensure ALL required keys exist (set to None if missing)
-                normalized_item = {}
-                for key in required_normalized_keys:
-                    value = item.get(key)
-                    # Convert empty strings to None
-                    if value is not None and isinstance(value, str) and value.strip() == '':
-                        value = None
-                    normalized_item[key] = value
+                # Map all CSV columns to database columns
+                for csv_col, db_col in csv_to_db_map.items():
+                    if csv_col in csv_row and db_col in db_columns:
+                        value = csv_row[csv_col]
+                        # Convert empty strings to None
+                        if value is not None and isinstance(value, str) and value.strip() == '':
+                            value = None
+                        # Only set if not already set (prefer first match)
+                        if db_col not in db_row or db_row[db_col] is None:
+                            db_row[db_col] = value
                 
-                # Map normalized keys to Supabase column names
-                mapped_data = {}
-                for normalized_key, supabase_column in normalized_to_supabase_map.items():
-                    value = normalized_item.get(normalized_key)
-                    mapped_data[supabase_column] = value
+                # Ensure all required DB columns exist (set to None if missing)
+                for db_col in db_columns:
+                    if db_col not in db_row:
+                        db_row[db_col] = None
                 
                 # Always set user_id
-                mapped_data['user_id'] = user_id
+                db_row['user_id'] = user_id
                 
-                valid_items.append(mapped_data)
+                valid_items.append(db_row)
                 
             except Exception as e:
                 invalid_items.append({
                     "row_index": idx,
-                    "message": f"Validation error: {str(e)}"
+                    "message": f"Validation/normalization error: {str(e)}"
                 })
-                logger.error(f"Validation error for item {idx} in batch {batch_number}: {str(e)}")
+                logger.error(f"Error processing item {idx} in batch {batch_number}: {str(e)}")
         
-        # STEP 2: BULK UPSERT - Execute ONE database query with ON CONFLICT DO UPDATE
+        # STEP 2: ONE BULK UPSERT - Execute single database query for all valid items
         success_count = 0
         bulk_errors = []
         
         if valid_items:
             try:
-                # Ensure all items have ALL the same keys before sending to Supabase
-                all_supabase_keys = list(normalized_to_supabase_map.values()) + ['user_id']
-                
-                # Normalize all rows to have identical keys
-                items_to_upsert = []
-                for mapped_item in valid_items:
-                    normalized_row = {}
-                    for key in all_supabase_keys:
-                        normalized_row[key] = mapped_item.get(key, None)
-                    items_to_upsert.append(normalized_row)
-                
-                # Use PostgREST API directly for proper ON CONFLICT handling
+                # Use PostgREST API for bulk upsert with explicit conflict resolution
+                # This executes ONE SQL query: INSERT ... ON CONFLICT ("X-Z ASIN") DO UPDATE
                 supabase_url = os.environ.get("SUPABASE_URL")
                 service_key = os.environ.get("SUPABASE_SERVICE_KEY")
                 
@@ -1228,29 +1273,29 @@ def batch_import():
                     "Prefer": "resolution=merge-duplicates"
                 }
                 
-                # Use "X-Z ASIN" as conflict target
+                # Use "X-Z ASIN" as conflict target (unique constraint exists on this column)
                 params = {"on_conflict": "X-Z ASIN"}
                 
                 # Execute bulk upsert - ONE SQL query for all items
                 response = requests.post(
                     url,
                     headers=headers,
-                    json=items_to_upsert,
+                    json=valid_items,
                     params=params,
-                    timeout=30
+                    timeout=60  # 60 second timeout for large batches (1000 items)
                 )
                 
                 if response.status_code in [200, 201]:
-                    # Bulk upsert succeeded - PostgreSQL handled all conflicts internally
-                    success_count = len(items_to_upsert)
-                    logger.info(f"✅ Bulk upsert successful for batch {batch_number}: {success_count} items in one query")
+                    # Bulk upsert succeeded
+                    success_count = len(valid_items)
+                    logger.info(f"✅ Bulk upsert successful for batch {batch_number}: {success_count} items in ONE query")
                 else:
                     error_text = response.text
                     error_msg = f"PostgREST upsert failed: {response.status_code} - {error_text[:500]}"
                     logger.error(f"Bulk upsert failed for batch {batch_number}: {error_msg}")
                     
                     # Mark all items as failed
-                    for idx, _ in enumerate(items_to_upsert):
+                    for idx, _ in enumerate(valid_items):
                         bulk_errors.append({
                             "row_index": idx,
                             "message": f"Database error: {error_msg}"
@@ -1272,11 +1317,9 @@ def batch_import():
         # Return batch summary
         return jsonify({
             "success": True,
-            "batch": batch_number,
             "processed": len(items),
             "success": success_count,
-            "failed": failed_count,
-            "errors": all_errors
+            "failed": failed_count
         }), 200
         
     except Exception as e:
