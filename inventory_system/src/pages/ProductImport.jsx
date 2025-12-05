@@ -38,16 +38,34 @@ const normalizeItemForSupabase = (csvRowObject) => {
     return value;
   };
 
+  // Helper to find value from multiple possible header variations (case-insensitive)
+  const findValue = (variations) => {
+    for (const variation of variations) {
+      // Try exact match first
+      if (csvRowObject[variation] !== undefined && csvRowObject[variation] !== null && csvRowObject[variation] !== '') {
+        return csvRowObject[variation];
+      }
+      // Try case-insensitive match
+      const lowerVariation = variation.toLowerCase();
+      for (const key in csvRowObject) {
+        if (key.toLowerCase() === lowerVariation && csvRowObject[key] !== undefined && csvRowObject[key] !== null && csvRowObject[key] !== '') {
+          return csvRowObject[key];
+        }
+      }
+    }
+    return null;
+  };
+
   const normalized = {
-    lpn: toNullIfEmpty(csvRowObject['LPN']),
-    fnsku: toNullIfEmpty(csvRowObject['FNSku']), // From your detected CSV header
-    asin: toNullIfEmpty(csvRowObject['Asin']),   // From your detected CSV header
-    name: csvRowObject['ItemDesc'] || csvRowObject['GLDesc'] || null, // Use ItemDesc or GLDesc
-    description: csvRowObject['ItemDesc'] || csvRowObject['GLDesc'] || null, // Same as name for now
-    price: csvRowObject['Retail'] ? parseFloat(String(csvRowObject['Retail']).replace(/[^0-9.-]+/g, "")) : null, // From CSV 'Retail'
-    category: csvRowObject['Category'] || null, // Assumes CSV might have a 'Category' header
-    upc: toNullIfEmpty(csvRowObject['UPC']),          // From CSV 'UPC'
-    quantity: csvRowObject['Units'] ? parseInt(String(csvRowObject['Units']).replace(/[^0-9.-]+/g, ""), 10) : null, // From CSV 'Units'
+    lpn: toNullIfEmpty(findValue(['LPN', 'X-Z ASIN', 'XZ ASIN', 'Lpn'])),
+    fnsku: toNullIfEmpty(findValue(['FNSku', 'FNSKU', 'Fn Sku', 'fnsku', 'FnSku'])),
+    asin: toNullIfEmpty(findValue(['Asin', 'ASIN', 'B00 Asin', 'B00 ASIN', 'asin'])),
+    name: csvRowObject['ItemDesc'] || csvRowObject['GLDesc'] || csvRowObject['Description'] || csvRowObject['Name'] || null,
+    description: csvRowObject['ItemDesc'] || csvRowObject['GLDesc'] || csvRowObject['Description'] || null,
+    price: csvRowObject['Retail'] ? parseFloat(String(csvRowObject['Retail']).replace(/[^0-9.-]+/g, "")) : null,
+    category: csvRowObject['Category'] || null,
+    upc: toNullIfEmpty(csvRowObject['UPC'] || csvRowObject['Upc']),
+    quantity: csvRowObject['Units'] ? parseInt(String(csvRowObject['Units']).replace(/[^0-9.-]+/g, ""), 10) : null,
   };
 
   // Ensure numeric fields that failed parsing are null
@@ -148,10 +166,21 @@ const ProductImport = () => {
 
         const normalizedItem = normalizeItemForSupabase(csvRowObject);
         
-        // Ensure LPN is set (even if null) - missing LPN is now allowed
+        // Ensure LPN is set (even if null) - missing LPN is optional
         if (!normalizedItem.lpn) {
-          console.warn(`Missing LPN — setting to null for row ${i + 2}`);
           normalizedItem.lpn = null;
+        }
+
+        // VALIDATION: Item MUST have either FNSKU or ASIN to be saved
+        const hasFnsku = normalizedItem.fnsku != null && String(normalizedItem.fnsku).trim() !== '';
+        const hasAsin = normalizedItem.asin != null && String(normalizedItem.asin).trim() !== '';
+        
+        if (!hasFnsku && !hasAsin) {
+          // Skip items without FNSKU or ASIN - they are required
+          console.warn(`Row ${i + 2}: Skipping item - missing both FNSKU and ASIN (at least one is required).`);
+          skippedCount++;
+          setImportProgress(prev => prev + 1);
+          continue;
         }
 
         // Determine conflictKey: use LPN if available, otherwise fallback to fnsku or asin
@@ -161,10 +190,6 @@ const ProductImport = () => {
             conflictKeyToUse = 'fnsku';
           } else if (normalizedItem.asin) {
             conflictKeyToUse = 'asin';
-          } else {
-            // If no identifier at all, we'll still try to save but it may fail
-            console.warn(`Row ${i + 2}: No LPN, FNSKU, or ASIN found. Attempting to save anyway.`);
-            conflictKeyToUse = 'fnsku'; // Default fallback, even if null
           }
         }
 
@@ -186,7 +211,9 @@ const ProductImport = () => {
 
       let summaryMessage = `Import Complete: ${successCount} saved/updated.`;
       if (errorCount > 0) summaryMessage += ` ${errorCount} errors.`;
-      if (skippedCount > 0 && errorCount === 0) summaryMessage += ` ${skippedCount} empty/skipped lines.`; // Only show if no other errors
+      if (skippedCount > 0) {
+        summaryMessage += ` ${skippedCount} skipped (missing FNSKU and ASIN).`;
+      }
       
       if (errorCount > 0) {
         toast.error(summaryMessage + (errorDetails.length > 0 ? " Check console for error details." : ""), { autoClose: 10000 });
