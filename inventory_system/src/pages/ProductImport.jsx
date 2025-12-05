@@ -32,15 +32,21 @@ const parseCSVLine = (line) => {
 
 // Normalize CSV row into the format used for your inventory import
 const normalizeItemForSupabase = (csvRowObject) => {
+  // Helper to convert empty strings to null
+  const toNullIfEmpty = (value) => {
+    if (value === undefined || value === null || value === '') return null;
+    return value;
+  };
+
   const normalized = {
-    lpn: csvRowObject['LPN'] || null,
-    fnsku: csvRowObject['FNSku'] || null, // From your detected CSV header
-    asin: csvRowObject['Asin'] || null,   // From your detected CSV header
+    lpn: toNullIfEmpty(csvRowObject['LPN']),
+    fnsku: toNullIfEmpty(csvRowObject['FNSku']), // From your detected CSV header
+    asin: toNullIfEmpty(csvRowObject['Asin']),   // From your detected CSV header
     name: csvRowObject['ItemDesc'] || csvRowObject['GLDesc'] || null, // Use ItemDesc or GLDesc
     description: csvRowObject['ItemDesc'] || csvRowObject['GLDesc'] || null, // Same as name for now
     price: csvRowObject['Retail'] ? parseFloat(String(csvRowObject['Retail']).replace(/[^0-9.-]+/g, "")) : null, // From CSV 'Retail'
     category: csvRowObject['Category'] || null, // Assumes CSV might have a 'Category' header
-    upc: csvRowObject['UPC'] || null,          // From CSV 'UPC'
+    upc: toNullIfEmpty(csvRowObject['UPC']),          // From CSV 'UPC'
     quantity: csvRowObject['Units'] ? parseInt(String(csvRowObject['Units']).replace(/[^0-9.-]+/g, ""), 10) : null, // From CSV 'Units'
   };
 
@@ -142,19 +148,25 @@ const ProductImport = () => {
 
         const normalizedItem = normalizeItemForSupabase(csvRowObject);
         
-        // LPN ("X-Z ASIN") is now the designated unique key for conflict resolution.
-        // If it's missing, we cannot reliably upsert.
-        if (!normalizedItem.lpn) { 
-          console.warn(`Skipping row ${i + 2}: Missing LPN (X-Z ASIN) after normalization. This is required for import. Original data:`, csvRowObject);
-          errorDetails.push(`Row ${i + 2}: Missing LPN (X-Z ASIN) - required for import.`);
-          errorCount++; // Count as an error because it's a required identifier
-          // skippedCount++; // Not just skipped, it's an error due to missing key
-          setImportProgress(prev => prev + 1);
-          continue;
+        // Ensure LPN is set (even if null) - missing LPN is now allowed
+        if (!normalizedItem.lpn) {
+          console.warn(`Missing LPN — setting to null for row ${i + 2}`);
+          normalizedItem.lpn = null;
         }
 
-        // Always use 'lpn' as the conflictKey since it's the guaranteed unique identifier
-        const conflictKeyToUse = 'lpn';
+        // Determine conflictKey: use LPN if available, otherwise fallback to fnsku or asin
+        let conflictKeyToUse = 'lpn';
+        if (!normalizedItem.lpn) {
+          if (normalizedItem.fnsku) {
+            conflictKeyToUse = 'fnsku';
+          } else if (normalizedItem.asin) {
+            conflictKeyToUse = 'asin';
+          } else {
+            // If no identifier at all, we'll still try to save but it may fail
+            console.warn(`Row ${i + 2}: No LPN, FNSKU, or ASIN found. Attempting to save anyway.`);
+            conflictKeyToUse = 'fnsku'; // Default fallback, even if null
+          }
+        }
 
         try {
           const savedProduct = await productLookupService.saveProductLookup(normalizedItem, { conflictKey: conflictKeyToUse });

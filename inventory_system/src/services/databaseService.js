@@ -561,9 +561,13 @@ export const productLookupService = {
         return null;
     }
     
-    if (!mappedData[conflictColumnSupabase] && conflictKey !== 'id') {
-        console.error(`saveProductToManifest: Value for conflict column "${conflictColumnSupabase}" is missing. Data:`, mappedData);
-        return null; 
+    // Allow null values for conflictKey (e.g., when LPN is null)
+    // We'll handle null conflictKey values by inserting without conflict resolution
+    const conflictValue = mappedData[conflictColumnSupabase];
+    const hasConflictValue = conflictValue !== null && conflictValue !== undefined && conflictValue !== '';
+    
+    if (!hasConflictValue && conflictKey !== 'id') {
+        console.warn(`saveProductToManifest: Value for conflict column "${conflictColumnSupabase}" is null/empty. Will insert without conflict resolution.`);
     }
 
     console.log(`Attempting to save to manifest_data:`, mappedData);
@@ -579,29 +583,32 @@ export const productLookupService = {
       // Always set user_id when saving
       mappedData.user_id = userId;
       
-      // Check if record exists first (since there may not be a unique constraint)
+      // Check if record exists first (only if we have a valid conflict value)
       // Only check within current user's data
-      const searchValue = mappedData[conflictColumnSupabase];
-      const { data: existingData, error: searchError } = await supabase
-        .from(PRODUCT_TABLE)
-        .select('*')
-        .eq(conflictColumnSupabase, searchValue)
-        .eq('user_id', userId) // Only check current user's items
-        .limit(1)
-        .maybeSingle();
-      
-      if (searchError && searchError.code !== 'PGRST116') {
-        console.error('Error checking for existing product:', searchError);
-        return null;
+      let existingData = null;
+      if (hasConflictValue) {
+        const { data, error: searchError } = await supabase
+          .from(PRODUCT_TABLE)
+          .select('*')
+          .eq(conflictColumnSupabase, conflictValue)
+          .eq('user_id', userId) // Only check current user's items
+          .limit(1)
+          .maybeSingle();
+        
+        if (searchError && searchError.code !== 'PGRST116') {
+          console.error('Error checking for existing product:', searchError);
+          return null;
+        }
+        existingData = data;
       }
-
+      
       let result;
-      if (existingData) {
+      if (existingData && hasConflictValue) {
         // Update existing record (only if it belongs to current user)
         const { data, error } = await supabase
           .from(PRODUCT_TABLE)
           .update(mappedData)
-          .eq(conflictColumnSupabase, searchValue)
+          .eq(conflictColumnSupabase, conflictValue)
           .eq('user_id', userId) // Ensure we only update current user's items
           .select()
           .single();
@@ -634,6 +641,11 @@ export const productLookupService = {
       console.error('Exception in saveProductToManifest:', error);
       return null;
     }
+  },
+
+  // Alias for saveProductToManifest for backward compatibility
+  async saveProductLookup(productData, options = {}) {
+    return this.saveProductToManifest(productData, options);
   },
   
   async getRecentLookups(count = 10) {
