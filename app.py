@@ -1065,6 +1065,228 @@ def upload_csv():
     # Or this endpoint might be API-only, and React handles the form.
     return render_template('upload.html')
 
+@app.route('/api/import/batch', methods=['POST', 'OPTIONS'])
+def batch_import():
+    """
+    Optimized bulk batch import endpoint for CSV products.
+    Uses true bulk processing: validates all items in memory, then executes ONE SQL query.
+    
+    Performance target: 200 items in < 1 second
+    """
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        return '', 200
+    
+    try:
+        user_id, tenant_id = get_ids_from_request()
+        
+        if not user_id:
+            return jsonify({
+                "success": False,
+                "error": "unauthorized",
+                "message": "User authentication required"
+            }), 401
+        
+        if not supabase_admin:
+            return jsonify({
+                "success": False,
+                "error": "database_error",
+                "message": "Database not available"
+            }), 500
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                "success": False,
+                "error": "invalid_request",
+                "message": "Request body is required"
+            }), 400
+        
+        # Support both batch and single item modes
+        items = []
+        if 'items' in data and isinstance(data['items'], list):
+            items = data['items']
+        elif 'item' in data:
+            items = [data['item']]  # Legacy single item support
+        else:
+            return jsonify({
+                "success": False,
+                "error": "invalid_request",
+                "message": "Request must contain 'items' array or 'item' object"
+            }), 400
+        
+        if not items:
+            return jsonify({
+                "success": False,
+                "error": "invalid_request",
+                "message": "No items provided"
+            }), 400
+        
+        batch_number = data.get('batch', 0)
+        
+        # Map normalized keys (from frontend) to Supabase column names
+        # Only include columns that actually exist in manifest_data table
+        normalized_to_supabase_map = {
+            'x_z_asin': 'X-Z ASIN',
+            'fn_sku': 'Fn Sku',
+            'b00_asin': 'B00 Asin',
+            'description': 'Description',
+            'msrp': 'MSRP',
+            'category': 'Category',
+            'upc': 'UPC',
+            'quantity': 'Quantity',
+            'image_url': 'image_url'
+        }
+        
+        # Note: The following columns don't exist in manifest_data and are ignored:
+        # - 'ext_msrp': 'EXT MSRP'
+        # - 'sub_category': 'Sub-Category'
+        # - 'pallet_id': 'Pallet ID'
+        # - 'package_id': 'Package ID'
+        # - 'seller': 'Seller'
+        # - 'task_id': 'Task ID'
+        # - 'listing_id': 'Listing ID'
+        
+        # All required normalized keys
+        required_normalized_keys = list(normalized_to_supabase_map.keys())
+        
+        # STEP 1: BULK VALIDATION - Validate all items in memory first
+        valid_items = []
+        invalid_items = []
+        
+        for idx, item in enumerate(items):
+            try:
+                # Validation: must have at least one of x_z_asin, fn_sku, or b00_asin
+                has_xz_asin = item.get('x_z_asin') and str(item.get('x_z_asin', '')).strip() != ''
+                has_fn_sku = item.get('fn_sku') and str(item.get('fn_sku', '')).strip() != ''
+                has_b00_asin = item.get('b00_asin') and str(item.get('b00_asin', '')).strip() != ''
+                
+                if not has_xz_asin and not has_fn_sku and not has_b00_asin:
+                    invalid_items.append({
+                        "row_index": idx,
+                        "message": "Missing x_z_asin AND fn_sku AND b00_asin (at least one is required)"
+                    })
+                    continue
+                
+                # Ensure ALL required keys exist (set to None if missing)
+                normalized_item = {}
+                for key in required_normalized_keys:
+                    value = item.get(key)
+                    # Convert empty strings to None
+                    if value is not None and isinstance(value, str) and value.strip() == '':
+                        value = None
+                    normalized_item[key] = value
+                
+                # Map normalized keys to Supabase column names
+                mapped_data = {}
+                for normalized_key, supabase_column in normalized_to_supabase_map.items():
+                    value = normalized_item.get(normalized_key)
+                    mapped_data[supabase_column] = value
+                
+                # Always set user_id
+                mapped_data['user_id'] = user_id
+                
+                valid_items.append(mapped_data)
+                
+            except Exception as e:
+                invalid_items.append({
+                    "row_index": idx,
+                    "message": f"Validation error: {str(e)}"
+                })
+                logger.error(f"Validation error for item {idx} in batch {batch_number}: {str(e)}")
+        
+        # STEP 2: BULK UPSERT - Execute ONE database query with ON CONFLICT DO UPDATE
+        success_count = 0
+        bulk_errors = []
+        
+        if valid_items:
+            try:
+                # Ensure all items have ALL the same keys before sending to Supabase
+                all_supabase_keys = list(normalized_to_supabase_map.values()) + ['user_id']
+                
+                # Normalize all rows to have identical keys
+                items_to_upsert = []
+                for mapped_item in valid_items:
+                    normalized_row = {}
+                    for key in all_supabase_keys:
+                        normalized_row[key] = mapped_item.get(key, None)
+                    items_to_upsert.append(normalized_row)
+                
+                # Use PostgREST API directly for proper ON CONFLICT handling
+                supabase_url = os.environ.get("SUPABASE_URL")
+                service_key = os.environ.get("SUPABASE_SERVICE_KEY")
+                
+                if not supabase_url or not service_key:
+                    raise Exception("Supabase URL or service key not configured")
+                
+                # PostgREST endpoint for bulk upsert with ON CONFLICT
+                url = f"{supabase_url}/rest/v1/manifest_data"
+                headers = {
+                    "apikey": service_key,
+                    "Authorization": f"Bearer {service_key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates"
+                }
+                
+                # Use "X-Z ASIN" as conflict target
+                params = {"on_conflict": "X-Z ASIN"}
+                
+                # Execute bulk upsert - ONE SQL query for all items
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    json=items_to_upsert,
+                    params=params,
+                    timeout=30
+                )
+                
+                if response.status_code in [200, 201]:
+                    # Bulk upsert succeeded - PostgreSQL handled all conflicts internally
+                    success_count = len(items_to_upsert)
+                    logger.info(f"✅ Bulk upsert successful for batch {batch_number}: {success_count} items in one query")
+                else:
+                    error_text = response.text
+                    error_msg = f"PostgREST upsert failed: {response.status_code} - {error_text[:500]}"
+                    logger.error(f"Bulk upsert failed for batch {batch_number}: {error_msg}")
+                    
+                    # Mark all items as failed
+                    for idx, _ in enumerate(items_to_upsert):
+                        bulk_errors.append({
+                            "row_index": idx,
+                            "message": f"Database error: {error_msg}"
+                        })
+                    
+            except Exception as e:
+                logger.error(f"Bulk operation error for batch {batch_number}: {str(e)}")
+                # Mark all items as failed
+                for idx, _ in enumerate(valid_items):
+                    bulk_errors.append({
+                        "row_index": idx,
+                        "message": f"Bulk operation failed: {str(e)}"
+                    })
+        
+        # Combine validation errors and bulk operation errors
+        all_errors = invalid_items + bulk_errors
+        failed_count = len(all_errors)
+        
+        # Return batch summary
+        return jsonify({
+            "success": True,
+            "batch": batch_number,
+            "processed": len(items),
+            "success": success_count,
+            "failed": failed_count,
+            "errors": all_errors
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error in batch_import: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": "server_error",
+            "message": str(e)
+        }), 500
+
 @app.route('/search', methods=['GET'])
 def search():
     query = request.args.get('query', '').strip()

@@ -3,7 +3,8 @@ import { toast } from 'react-toastify';
 import Button from '../components/ui/Button';
 import Card from '../components/ui/Card';
 import { ArrowUpTrayIcon } from '@heroicons/react/24/outline';
-import { productLookupService } from '../services/databaseService'; // Ensure this path is correct
+import { supabase } from '../config/supabaseClient';
+import { getApiEndpoint } from '../utils/apiConfig';
 
 // Helper function to parse a single CSV line, handling quoted fields
 const parseCSVLine = (line) => {
@@ -241,10 +242,22 @@ const ProductImport = () => {
         return;
       }
 
-      let successCount = 0;
-      let errorCount = 0;
+      // STEP 1: Collect and validate all rows first
+      const BATCH_SIZE = 200;
+      const validItems = [];
       let skippedCount = 0;
       const errorDetails = [];
+
+      // Define normalization mapping and required keys
+      // Only include columns that actually exist in manifest_data table
+      const REQUIRED_KEYS = [
+        'x_z_asin', 'fn_sku', 'b00_asin', 'description', 'msrp',
+        'category', 'upc', 'quantity', 'image_url'
+      ];
+      
+      // Note: The following columns don't exist in manifest_data and are ignored:
+      // - 'ext_msrp', 'sub_category', 'pallet_id', 'package_id', 
+      // - 'seller', 'task_id', 'listing_id'
 
       for (let i = 0; i < dataLines.length; i++) {
         const line = dataLines[i];
@@ -258,7 +271,7 @@ const ProductImport = () => {
         if (rowValues.length !== headers.length) {
           console.warn(`Skipping row ${i + 2}: Column count mismatch. Expected ${headers.length}, got ${rowValues.length}. Line: "${line}"`);
           errorDetails.push(`Row ${i + 2}: Column count mismatch (expected ${headers.length}, got ${rowValues.length}).`);
-          errorCount++;
+          skippedCount++;
           setImportProgress(prev => prev + 1);
           continue;
         }
@@ -279,7 +292,6 @@ const ProductImport = () => {
 
         // VALIDATION: Row is valid if EITHER internal_fnsku OR internal_asin has a non-empty value
         if (!internalFnsku && !internalAsin) {
-          // Skip rows without FNSKU or ASIN - at least one is required
           console.warn(`Row ${i + 2}: Skipping item - missing both FNSKU and ASIN (at least one is required).`);
           skippedCount++;
           setImportProgress(prev => prev + 1);
@@ -289,36 +301,117 @@ const ProductImport = () => {
         // Normalize the item using the column map
         const normalizedItem = normalizeItemForSupabase(csvRowObject, columnMap);
         
-        // Ensure LPN is set (even if null) - missing LPN is optional
-        if (!normalizedItem.lpn) {
-          normalizedItem.lpn = null;
-        }
+        // Map to normalized keys for batch API
+        // Normalize to batch format
+        // Only include columns that exist in manifest_data table
+        const batchItem = {};
+        batchItem.x_z_asin = normalizedItem.lpn || null;
+        batchItem.fn_sku = normalizedItem.fnsku || null;
+        batchItem.b00_asin = normalizedItem.asin || null;
+        batchItem.description = normalizedItem.name || normalizedItem.description || null;
+        batchItem.msrp = normalizedItem.price || null;
+        batchItem.category = normalizedItem.category || null;
+        batchItem.upc = normalizedItem.upc || null;
+        batchItem.quantity = normalizedItem.quantity || null;
+        batchItem.image_url = normalizedItem.image_url || null;
 
-        // Determine conflictKey: use LPN if available, otherwise fallback to fnsku or asin
-        let conflictKeyToUse = 'lpn';
-        if (!normalizedItem.lpn) {
-          if (normalizedItem.fnsku) {
-            conflictKeyToUse = 'fnsku';
-          } else if (normalizedItem.asin) {
-            conflictKeyToUse = 'asin';
+        // Ensure all required keys exist
+        for (const key of REQUIRED_KEYS) {
+          if (!batchItem.hasOwnProperty(key)) {
+            batchItem[key] = null;
           }
         }
 
-        try {
-          const savedProduct = await productLookupService.saveProductLookup(normalizedItem, { conflictKey: conflictKeyToUse });
-          if (savedProduct) {
-            successCount++;
-          } else {
-            errorDetails.push(`Row ${i + 2}: Failed to save (saveProductLookup returned null - check console for details from service). Item: ${JSON.stringify(normalizedItem)}`);
-            errorCount++;
-          }
-        } catch (err) {
-          console.error(`Error processing row ${i + 2} with saveProductLookup:`, err, "Item:", normalizedItem, "ConflictKey:", conflictKeyToUse);
-          errorDetails.push(`Row ${i + 2}: Exception during save - ${err.message}`);
-          errorCount++;
-        }
+        // Store row index for error tracking
+        batchItem._rowIndex = i + 2;
+        validItems.push(batchItem);
         setImportProgress(prev => prev + 1);
       }
+
+      // STEP 2: Send items in batches
+      let successCount = 0;
+      let errorCount = 0;
+      let batchNumber = 0;
+
+      const sendBatch = async (batchToSend, batchNum, rowIndices) => {
+        try {
+          // Get auth token for API call
+          const { data: { session } } = await supabase.auth.getSession();
+          const token = session?.access_token;
+
+          const response = await fetch(getApiEndpoint('/import/batch'), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': token ? `Bearer ${token}` : ''
+            },
+            body: JSON.stringify({
+              items: batchToSend,
+              batch: batchNum
+            })
+          });
+
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ message: 'Unknown error' }));
+            throw new Error(errorData.message || `HTTP ${response.status}`);
+          }
+
+          const result = await response.json();
+          console.log(`✅ Batch ${batchNum} uploaded:`, result);
+
+          // Update counts from batch result
+          successCount += result.success || 0;
+          errorCount += result.failed || 0;
+
+          // Add batch errors to error details with correct row numbers
+          if (result.errors && result.errors.length > 0) {
+            result.errors.forEach(err => {
+              const rowNum = rowIndices[err.row_index] || `batch-${batchNum}-row-${err.row_index}`;
+              errorDetails.push(`Row ${rowNum}: ${err.message}`);
+            });
+          }
+
+          return result;
+        } catch (error) {
+          console.error(`❌ Batch ${batchNum} failed:`, error);
+          errorCount += batchToSend.length;
+          rowIndices.forEach((rowNum) => {
+            errorDetails.push(`Row ${rowNum}: Batch upload failed - ${error.message}`);
+          });
+          return { success: false, failed: batchToSend.length };
+        }
+      };
+
+      // Process batches
+      for (let i = 0; i < validItems.length; i += BATCH_SIZE) {
+        batchNumber++;
+        const batch = validItems.slice(i, i + BATCH_SIZE);
+        
+        // Store row indices for error tracking
+        const batchRowIndices = batch.map(item => item._rowIndex);
+        
+        // Remove internal tracking field and ensure all keys are present
+        const batchToSend = batch.map(item => {
+          const { _rowIndex, ...itemToSend } = item;
+          
+          // Ensure ALL required keys are present (defensive check)
+          const normalizedItem = {};
+          for (const key of REQUIRED_KEYS) {
+            normalizedItem[key] = itemToSend[key] !== undefined ? itemToSend[key] : null;
+          }
+          
+          return normalizedItem;
+        });
+
+        await sendBatch(batchToSend, batchNumber, batchRowIndices);
+        
+        // Update progress after each batch
+        const processedSoFar = Math.min(i + BATCH_SIZE, validItems.length);
+        setImportProgress(processedSoFar + skippedCount);
+      }
+
+      // Final progress update
+      setImportProgress(dataLines.length);
 
       let summaryMessage = `Import Complete: ${successCount} saved/updated.`;
       if (errorCount > 0) summaryMessage += ` ${errorCount} errors.`;
@@ -326,12 +419,14 @@ const ProductImport = () => {
         summaryMessage += ` ${skippedCount} skipped (missing FNSKU and ASIN identifiers).`;
       }
       
-      // Log column mapping summary
+      // Log column mapping and batch summary
       if (fnskuColumn || asinColumn) {
-        console.log('📊 Column Mapping Summary:', {
+        console.log('📊 Import Summary:', {
           fnskuColumn: fnskuColumn || 'Not found',
           asinColumn: asinColumn || 'Not found',
           totalRows: dataLines.length,
+          validItems: validItems.length,
+          batches: batchNumber,
           processed: successCount,
           skipped: skippedCount,
           errors: errorCount
