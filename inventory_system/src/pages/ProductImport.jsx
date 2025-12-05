@@ -30,36 +30,110 @@ const parseCSVLine = (line) => {
   return result;
 };
 
-// Normalize CSV row into the format used for your inventory import
-const normalizeItemForSupabase = (csvRowObject) => {
-  // Helper to convert empty strings to null
-  const toNullIfEmpty = (value) => {
-    if (value === undefined || value === null || value === '') return null;
-    return value;
-  };
+// Accepted column name variations with priority order (higher priority first)
+const ACCEPTED_FNSKU_COLUMNS = [
+  'fnsku',
+  'sku',
+  'FNSKU',
+  'SKU',
+  'Sku',
+  'FNSKU #',
+  'fn sku',
+  'Fn Sku',
+  'FnSku',
+  'FNSku'
+];
 
-  // Helper to find value from multiple possible header variations (case-insensitive)
-  const findValue = (variations) => {
-    for (const variation of variations) {
-      // Try exact match first
-      if (csvRowObject[variation] !== undefined && csvRowObject[variation] !== null && csvRowObject[variation] !== '') {
-        return csvRowObject[variation];
+const ACCEPTED_ASIN_COLUMNS = [
+  'asin',
+  'ASIN',
+  'B00 ASIN',
+  'ASIN #',
+  'asin #',
+  'Asin',
+  'B00 Asin'
+];
+
+// Helper to normalize strings for comparison (remove extra spaces, handle special chars)
+const normalizeForComparison = (str) => {
+  return str.toLowerCase()
+    .trim()
+    .replace(/\s+/g, ' ')  // Multiple spaces to single space
+    .replace(/[#]/g, '')   // Remove # symbols
+    .replace(/[-_]/g, '')  // Remove dashes and underscores
+    .trim();
+};
+
+// Helper to find matching column in headers (case-insensitive, with priority)
+const findMatchingColumn = (headers, acceptedColumns) => {
+  // First, try exact matches in priority order
+  for (const acceptedCol of acceptedColumns) {
+    for (const header of headers) {
+      if (header === acceptedCol) {
+        return header;
       }
-      // Try case-insensitive match
-      const lowerVariation = variation.toLowerCase();
-      for (const key in csvRowObject) {
-        if (key.toLowerCase() === lowerVariation && csvRowObject[key] !== undefined && csvRowObject[key] !== null && csvRowObject[key] !== '') {
-          return csvRowObject[key];
+    }
+  }
+  
+  // Then try case-insensitive exact matches in priority order
+  for (const acceptedCol of acceptedColumns) {
+    const lowerAccepted = acceptedCol.toLowerCase().trim();
+    for (const header of headers) {
+      const lowerHeader = header.toLowerCase().trim();
+      if (lowerHeader === lowerAccepted) {
+        return header;
+      }
+    }
+  }
+  
+  // Finally, try normalized matches (handles variations with #, spaces, dashes, etc.)
+  for (const acceptedCol of acceptedColumns) {
+    const normalizedAccepted = normalizeForComparison(acceptedCol);
+    for (const header of headers) {
+      const normalizedHeader = normalizeForComparison(header);
+      
+      // Check if normalized strings match or one contains the other
+      if (normalizedHeader === normalizedAccepted) {
+        return header;
+      }
+      
+      // For partial matches, check if one is a substring of the other
+      // (e.g., "B00 ASIN" matches "ASIN")
+      if (normalizedAccepted.length >= 3 && normalizedHeader.length >= 3) {
+        if (normalizedHeader.includes(normalizedAccepted) || 
+            normalizedAccepted.includes(normalizedHeader)) {
+          return header;
         }
       }
     }
-    return null;
+  }
+  
+  return null;
+};
+
+// Normalize CSV row into the format used for your inventory import
+// Now uses column mapping from detected headers
+const normalizeItemForSupabase = (csvRowObject, columnMap) => {
+  // Helper to convert empty strings to null
+  const toNullIfEmpty = (value) => {
+    if (value === undefined || value === null || value === '') return null;
+    const str = String(value).trim();
+    return str === '' ? null : str;
   };
 
+  // Get values using mapped column names
+  const internalFnsku = columnMap.fnskuColumn 
+    ? toNullIfEmpty(csvRowObject[columnMap.fnskuColumn])
+    : null;
+  
+  const internalAsin = columnMap.asinColumn
+    ? toNullIfEmpty(csvRowObject[columnMap.asinColumn])
+    : null;
+
   const normalized = {
-    lpn: toNullIfEmpty(findValue(['LPN', 'X-Z ASIN', 'XZ ASIN', 'Lpn'])),
-    fnsku: toNullIfEmpty(findValue(['FNSku', 'FNSKU', 'Fn Sku', 'fnsku', 'FnSku'])),
-    asin: toNullIfEmpty(findValue(['Asin', 'ASIN', 'B00 Asin', 'B00 ASIN', 'asin'])),
+    lpn: toNullIfEmpty(csvRowObject['LPN'] || csvRowObject['X-Z ASIN'] || csvRowObject['XZ ASIN'] || csvRowObject['Lpn']),
+    fnsku: internalFnsku,
+    asin: internalAsin,
     name: csvRowObject['ItemDesc'] || csvRowObject['GLDesc'] || csvRowObject['Description'] || csvRowObject['Name'] || null,
     description: csvRowObject['ItemDesc'] || csvRowObject['GLDesc'] || csvRowObject['Description'] || null,
     price: csvRowObject['Retail'] ? parseFloat(String(csvRowObject['Retail']).replace(/[^0-9.-]+/g, "")) : null,
@@ -129,10 +203,40 @@ const ProductImport = () => {
       const dataLines = lines.slice(1);
       setTotalRows(dataLines.length);
 
-      const headers = headerLine.split(',').map(header => header.trim().replace(/^"(.*)"$/, '$1'));
+      // Parse headers using CSV parser to handle quoted fields
+      const headers = parseCSVLine(headerLine).map(header => header.trim().replace(/^"(.*)"$/, '$1'));
       console.log("Detected CSV Headers:", headers);
       if(headers.length === 0 || (headers.length === 1 && headers[0] === '')) {
         toast.error('Could not parse headers from CSV. Please check file format.');
+        setIsLoading(false);
+        return;
+      }
+
+      // STEP 1: Detect and map FNSKU and ASIN columns BEFORE processing rows
+      const fnskuColumn = findMatchingColumn(headers, ACCEPTED_FNSKU_COLUMNS);
+      const asinColumn = findMatchingColumn(headers, ACCEPTED_ASIN_COLUMNS);
+
+      const columnMap = {
+        fnskuColumn: fnskuColumn,
+        asinColumn: asinColumn
+      };
+
+      // Log detected columns for debugging
+      if (fnskuColumn) {
+        console.log(`✅ Detected FNSKU column: "${fnskuColumn}"`);
+      } else {
+        console.warn('⚠️ No FNSKU column detected. Accepted variations:', ACCEPTED_FNSKU_COLUMNS);
+      }
+
+      if (asinColumn) {
+        console.log(`✅ Detected ASIN column: "${asinColumn}"`);
+      } else {
+        console.warn('⚠️ No ASIN column detected. Accepted variations:', ACCEPTED_ASIN_COLUMNS);
+      }
+
+      if (!fnskuColumn && !asinColumn) {
+        toast.error('CSV file must contain at least one FNSKU or ASIN column. Accepted column names: ' + 
+          ACCEPTED_FNSKU_COLUMNS.join(', ') + ' or ' + ACCEPTED_ASIN_COLUMNS.join(', '));
         setIsLoading(false);
         return;
       }
@@ -164,23 +268,30 @@ const ProductImport = () => {
           csvRowObject[header] = rowValues[index];
         });
 
-        const normalizedItem = normalizeItemForSupabase(csvRowObject);
+        // Extract internal FNSKU and ASIN values using mapped columns
+        const internalFnsku = columnMap.fnskuColumn 
+          ? (csvRowObject[columnMap.fnskuColumn] || '').toString().trim()
+          : '';
         
-        // Ensure LPN is set (even if null) - missing LPN is optional
-        if (!normalizedItem.lpn) {
-          normalizedItem.lpn = null;
-        }
+        const internalAsin = columnMap.asinColumn
+          ? (csvRowObject[columnMap.asinColumn] || '').toString().trim()
+          : '';
 
-        // VALIDATION: Item MUST have either FNSKU or ASIN to be saved
-        const hasFnsku = normalizedItem.fnsku != null && String(normalizedItem.fnsku).trim() !== '';
-        const hasAsin = normalizedItem.asin != null && String(normalizedItem.asin).trim() !== '';
-        
-        if (!hasFnsku && !hasAsin) {
-          // Skip items without FNSKU or ASIN - they are required
+        // VALIDATION: Row is valid if EITHER internal_fnsku OR internal_asin has a non-empty value
+        if (!internalFnsku && !internalAsin) {
+          // Skip rows without FNSKU or ASIN - at least one is required
           console.warn(`Row ${i + 2}: Skipping item - missing both FNSKU and ASIN (at least one is required).`);
           skippedCount++;
           setImportProgress(prev => prev + 1);
           continue;
+        }
+
+        // Normalize the item using the column map
+        const normalizedItem = normalizeItemForSupabase(csvRowObject, columnMap);
+        
+        // Ensure LPN is set (even if null) - missing LPN is optional
+        if (!normalizedItem.lpn) {
+          normalizedItem.lpn = null;
         }
 
         // Determine conflictKey: use LPN if available, otherwise fallback to fnsku or asin
@@ -212,7 +323,19 @@ const ProductImport = () => {
       let summaryMessage = `Import Complete: ${successCount} saved/updated.`;
       if (errorCount > 0) summaryMessage += ` ${errorCount} errors.`;
       if (skippedCount > 0) {
-        summaryMessage += ` ${skippedCount} skipped (missing FNSKU and ASIN).`;
+        summaryMessage += ` ${skippedCount} skipped (missing FNSKU and ASIN identifiers).`;
+      }
+      
+      // Log column mapping summary
+      if (fnskuColumn || asinColumn) {
+        console.log('📊 Column Mapping Summary:', {
+          fnskuColumn: fnskuColumn || 'Not found',
+          asinColumn: asinColumn || 'Not found',
+          totalRows: dataLines.length,
+          processed: successCount,
+          skipped: skippedCount,
+          errors: errorCount
+        });
       }
       
       if (errorCount > 0) {
