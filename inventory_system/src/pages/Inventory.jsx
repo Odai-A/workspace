@@ -297,8 +297,14 @@ const Inventory = () => {
 
   // Create print label HTML (similar to Scanner.jsx)
   const createPrintLabelHTML = (productInfo) => {
-    if (!productInfo || !productInfo.asin) {
+    if (!productInfo) {
       return '<html><body><p>Error: Product information not available</p></body></html>';
+    }
+
+    // Get product code (ASIN, UPC, FNSKU, or code)
+    const productCode = productInfo.asin || productInfo.upc || productInfo.fnsku || productInfo.code || '';
+    if (!productCode) {
+      return '<html><body><p>Error: No product code (ASIN, UPC, or FNSKU) available</p></body></html>';
     }
 
     // Get discount percentage from settings
@@ -307,8 +313,22 @@ const Inventory = () => {
     
     const retailPrice = parseFloat(productInfo.price) || 0;
     const ourPrice = retailPrice * discountMultiplier;
-    const amazonUrl = `https://www.amazon.com/dp/${productInfo.asin}`;
-    const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(amazonUrl)}`;
+    
+    // Generate Amazon URL based on available code
+    let amazonUrl = '';
+    if (productInfo.asin) {
+      amazonUrl = `https://www.amazon.com/dp/${productInfo.asin}`;
+    } else if (productInfo.upc) {
+      amazonUrl = `https://www.amazon.com/s?k=${productInfo.upc}`;
+    } else if (productInfo.fnsku) {
+      amazonUrl = `https://www.amazon.com/s?k=${productInfo.fnsku}`;
+    } else {
+      amazonUrl = `https://www.amazon.com/s?k=${productCode}`;
+    }
+    
+    // Use Amazon URL or product code for QR code
+    const qrData = amazonUrl || productCode;
+    const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=80x80&data=${encodeURIComponent(qrData)}`;
     const qrCodeHtml = `<img src="${qrCodeUrl}" alt="QR Code" style="width: 80px; height: 80px;" />`;
 
     const escapeHtml = (text) => {
@@ -532,7 +552,7 @@ const Inventory = () => {
           </div>
 
           <div class="asin-display">
-            ASIN: ${productInfo.asin}
+            ${productInfo.asin ? `ASIN: ${productInfo.asin}` : (productInfo.upc ? `UPC: ${productInfo.upc}` : (productInfo.fnsku ? `FNSKU: ${productInfo.fnsku}` : 'Product Code'))}
           </div>
 
           ${productInfo.image_url ? `
@@ -548,9 +568,9 @@ const Inventory = () => {
               <div class="retail-price">
                 <span class="retail-price-label">RETAIL:</span> $${retailPrice.toFixed(2)}
               </div>
-              <div class="our-price-label">OUR PRICE (${discountPercent}% OFF):</div>
+              <div class="our-price-label">OUR PRICE:</div>
               <div class="our-price">
-                $${ourPrice.toFixed(2)}
+                $${ourPrice.toFixed(2)} <span style="font-size: 12pt; color: #059669;">(${discountPercent}% OFF)</span>
               </div>
             </div>
           ` : ''}
@@ -978,16 +998,24 @@ const Inventory = () => {
         // Handle print label
         const handlePrintLabel = (e) => {
           e.stopPropagation();
-          if (!rowData['B00 Asin']) {
-            toast.error('ASIN not available for this product');
+          
+          // Allow printing with ASIN, UPC, FNSKU, or any product code
+          const asin = rowData['B00 Asin'] || '';
+          const upc = rowData['UPC'] || rowData['Upc'] || '';
+          const fnsku = rowData['Fn Sku'] || rowData['FNSKU'] || '';
+          const productCode = asin || upc || fnsku || '';
+          
+          if (!productCode) {
+            toast.error('No product code (ASIN, UPC, or FNSKU) available for this product');
             return;
           }
           
           // Create product info object for printing
           const productInfo = {
             name: rowData['Description'] || 'Unknown Product',
-            asin: rowData['B00 Asin'],
-            fnsku: rowData['Fn Sku'] || '',
+            asin: asin,
+            upc: upc,
+            fnsku: fnsku,
             lpn: rowData['X-Z ASIN'] || '',
             price: rowData['MSRP'] || 0,
             image_url: rowData.image_url || rowData._rawData?.image_url || ''

@@ -129,6 +129,12 @@ STRIPE_ENTREPRENEUR_USAGE_PRICE_ID = os.environ.get('STRIPE_ENTREPRENEUR_USAGE_P
 # Number of free scans allowed per tenant before requiring upgrade
 FREE_TRIAL_SCAN_LIMIT = int(os.environ.get('FREE_TRIAL_SCAN_LIMIT', '50'))
 
+# --- Creator/CEO Configuration ---
+# Only the creator of the software can have CEO role
+# Set this to your email address or user ID in the .env file
+CREATOR_EMAIL = os.environ.get('CREATOR_EMAIL', '').strip().lower()
+CREATOR_USER_ID = os.environ.get('CREATOR_USER_ID', '').strip()
+
 PLAN_CONFIG = {
     'basic': {
         'name': 'Basic',
@@ -437,6 +443,81 @@ def get_ids_from_request():
     else:
         logger.debug("No Authorization Bearer token found in request headers.")
     return user_id, tenant_id
+
+def get_user_role(user_id):
+    """
+    Get the user's role from app_metadata or users table.
+    Returns the role string ('employee', 'manager', 'admin', 'ceo') or None.
+    """
+    if not user_id or not supabase_admin:
+        return None
+    
+    try:
+        # First try to get from auth.users app_metadata
+        user_response = supabase_admin.auth.admin.get_user_by_id(user_id)
+        if user_response and hasattr(user_response, 'user'):
+            user = user_response.user
+            app_meta = getattr(user, 'app_metadata', getattr(user, 'raw_app_meta_data', {}))
+            if app_meta and 'role' in app_meta:
+                return app_meta['role']
+            # Also check user_metadata
+            user_meta = getattr(user, 'user_metadata', getattr(user, 'raw_user_meta_data', {}))
+            if user_meta and 'role' in user_meta:
+                return user_meta['role']
+        
+        # Fallback: check users table
+        user_res = supabase_admin.from_('users').select('role').eq('id', user_id).maybe_single().execute()
+        if user_res.data and 'role' in user_res.data:
+            return user_res.data['role']
+    except Exception as e:
+        logger.error(f"Error getting user role for {user_id}: {e}")
+    
+    return None
+
+def is_ceo_or_admin(user_id):
+    """
+    Check if the user has CEO or admin role.
+    CEO and admin accounts have unlimited scanning without pricing restrictions.
+    """
+    if not user_id:
+        return False
+    
+    role = get_user_role(user_id)
+    is_ceo_admin = role in ['ceo', 'admin']
+    
+    # Log for debugging
+    if is_ceo_admin:
+        logger.info(f"✅ CEO/Admin detected: user_id={user_id}, role={role}")
+    else:
+        logger.debug(f"Regular user: user_id={user_id}, role={role}")
+    
+    return is_ceo_admin
+
+def is_creator(user_id):
+    """
+    Check if the user is the creator of the software.
+    Only the creator can have or grant CEO role.
+    """
+    if not user_id:
+        return False
+    
+    # Check by user ID if configured
+    if CREATOR_USER_ID and user_id == CREATOR_USER_ID:
+        return True
+    
+    # Check by email if configured
+    if CREATOR_EMAIL and supabase_admin:
+        try:
+            user_response = supabase_admin.auth.admin.get_user_by_id(user_id)
+            if user_response and hasattr(user_response, 'user'):
+                user = user_response.user
+                user_email = getattr(user, 'email', '').strip().lower()
+                if user_email == CREATOR_EMAIL:
+                    return True
+        except Exception as e:
+            logger.error(f"Error checking creator status: {e}")
+    
+    return False
 
 # --- Helper Function to Validate Stripe Price ID ---
 def validate_price_id(price_id):
@@ -1458,7 +1539,108 @@ def external_lookup():
                         except Exception as video_error:
                             logger.warning(f"Could not extract videos from cache: {video_error}")
                     
-                    # Return cached data
+                    # Check if cache has complete product data (Rainforest data)
+                    cached_asin = cached.get('asin') or ''
+                    has_rainforest_data = cached.get('rainforest_raw_data') is not None
+                    product_name = cached.get('product_name') or ''
+                    
+                    # Check if product_name is a placeholder (incomplete data)
+                    is_placeholder = (
+                        not product_name or 
+                        product_name == f"Product {fnsku}" or 
+                        product_name.startswith("Amazon Product (ASIN:") or
+                        product_name.startswith("FNSKU:") or
+                        len(product_name) < 10  # Too short to be a real product name
+                    )
+                    
+                    # Check if we have essential product data
+                    has_price = cached.get('price') and float(cached.get('price') or 0) > 0
+                    has_image = cached.get('image_url') and len(str(cached.get('image_url', ''))) > 0
+                    has_complete_data = not is_placeholder and has_price and (has_image or has_rainforest_data)
+                    
+                    logger.info(f"📊 Cache completeness check for {fnsku}: ASIN={cached_asin}, has_rainforest={has_rainforest_data}, is_placeholder={is_placeholder}, has_price={has_price}, has_image={has_image}, complete={has_complete_data}")
+                    
+                    # If we have ASIN but incomplete data, fetch from Rainforest API to enrich
+                    if cached_asin and len(cached_asin) >= 10 and RAINFOREST_API_KEY and not has_complete_data:
+                        logger.info(f"📦 Cache has ASIN {cached_asin} but incomplete data - fetching from Rainforest API to enrich...")
+                        try:
+                            rainforest_response = requests.get(
+                                'https://api.rainforestapi.com/request',
+                                params={
+                                    'api_key': RAINFOREST_API_KEY,
+                                    'type': 'product',
+                                    'amazon_domain': 'amazon.com',
+                                    'asin': cached_asin
+                                },
+                                timeout=15
+                            )
+                            
+                            if rainforest_response.status_code == 200:
+                                response_json = rainforest_response.json()
+                                if response_json.get('product'):
+                                    product = response_json['product']
+                                    
+                                    # Collect all images
+                                    all_images_rainforest = []
+                                    main_image = product.get('main_image', {}).get('link')
+                                    if main_image:
+                                        all_images_rainforest.append(main_image)
+                                    images_array = product.get('images', [])
+                                    for img in images_array:
+                                        img_link = img.get('link') if isinstance(img, dict) else img
+                                        if img_link and img_link not in all_images_rainforest:
+                                            all_images_rainforest.append(img_link)
+                                    
+                                    # Use Rainforest data to enrich cached response
+                                    enriched_title = product.get('title', '') or cached.get('product_name', '')
+                                    enriched_price = product.get('buybox_winner', {}).get('price', {}).get('value') or product.get('price', {}).get('value') or cached.get('price', 0)
+                                    enriched_brand = product.get('brand', '') or ''
+                                    enriched_category = product.get('category', {}).get('name', '') if isinstance(product.get('category'), dict) else (product.get('category') or cached.get('category', ''))
+                                    enriched_description = product.get('description', '') or cached.get('description', '')
+                                    
+                                    # Use Rainforest images if available, otherwise use cached
+                                    if all_images_rainforest:
+                                        all_images = all_images_rainforest
+                                    
+                                    # Extract videos
+                                    if product.get('videos_additional'):
+                                        videos = product.get('videos_additional', [])
+                                        videos_count = product.get('videos_count', len(videos))
+                                    
+                                    logger.info(f"✅ Enriched cached data with Rainforest API: title={enriched_title[:50]}, price={enriched_price}, brand={enriched_brand}")
+                                    
+                                    # Return enriched data
+                                    product_data = {
+                                        "success": True,
+                                        "source": "api_cache_enriched",
+                                        "asin": cached_asin,
+                                        "title": enriched_title,
+                                        "price": str(enriched_price) if enriched_price else '',
+                                        "fnsku": fnsku,
+                                        "image": all_images[0] if all_images else '',
+                                        "images": all_images,
+                                        "images_count": len(all_images),
+                                        "videos": videos,
+                                        "videos_count": videos_count,
+                                        "image_url": all_images[0] if all_images else '',
+                                        "description": enriched_description,
+                                        "category": enriched_category,
+                                        "brand": enriched_brand,
+                                        "upc": cached.get('upc') or '',
+                                        "amazon_url": f"https://www.amazon.com/dp/{cached_asin}",
+                                        "scan_task_id": cached.get('scan_task_id') or '',
+                                        "task_state": cached.get('task_state') or '',
+                                        "asin_found": True,
+                                        "cost_status": "charged",  # We called Rainforest API
+                                        "cached": True,
+                                        "message": "Found in cache, enriched with Rainforest API"
+                                    }
+                                    return jsonify(product_data)
+                        except Exception as enrich_error:
+                            logger.warning(f"⚠️ Could not enrich cache with Rainforest API: {enrich_error}")
+                            # Fall through to return cached data
+                    
+                    # Return cached data (either complete or incomplete)
                     product_data = {
                         "success": True,
                         "source": "api_cache",
@@ -1474,6 +1656,7 @@ def external_lookup():
                         "image_url": all_images[0] if all_images else (cached.get('image_url') or ''),
                         "description": cached.get('description') or '',
                         "category": cached.get('category') or '',
+                        "brand": '',  # Brand not in cache table
                         "upc": cached.get('upc') or '',
                         "amazon_url": f"https://www.amazon.com/dp/{cached.get('asin')}" if cached.get('asin') else '',
                         "scan_task_id": cached.get('scan_task_id') or '',
@@ -1762,11 +1945,24 @@ def get_scan_count():
                 "message": "Database not available"
             }), 500
         
+        # Check if user is CEO/admin (unlimited scanning)
+        is_ceo_admin = is_ceo_or_admin(user_id)
+        user_role = get_user_role(user_id) if user_id else None
+        
+        # Log CEO/admin status for debugging
+        logger.info(f"👤 Scan-count: user_id={user_id}, role={user_role}, is_ceo_admin={is_ceo_admin}")
+        
+        # CEO accounts completely bypass ALL pricing and trial restrictions
+        # Note: Creator check is only for upgrading TO CEO, not for using CEO privileges
+        
         # Check if tenant has paid subscription
         is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
         
-        # Get trial start date to exclude old test scans
-        trial_start_date = get_trial_start_date(tenant_id, user_id) if not is_paid else None
+        # CEO/admin accounts and paid accounts have unlimited scanning
+        has_unlimited = is_ceo_admin or is_paid
+        
+        # Get trial start date to exclude old test scans (only for non-CEO/admin, non-paid users)
+        trial_start_date = get_trial_start_date(tenant_id, user_id) if not has_unlimited else None
         
         # Count scans (only after trial start date for free trial users)
         if tenant_id:
@@ -1791,9 +1987,10 @@ def get_scan_count():
         return jsonify({
             "success": True,
             "used_scans": used_scans,
-            "limit": None if is_paid else FREE_TRIAL_SCAN_LIMIT,
+            "limit": None if has_unlimited else FREE_TRIAL_SCAN_LIMIT,
             "is_paid": is_paid,
-            "remaining": None if is_paid else max(0, FREE_TRIAL_SCAN_LIMIT - used_scans)
+            "is_ceo_admin": is_ceo_admin,
+            "remaining": None if has_unlimited else max(0, FREE_TRIAL_SCAN_LIMIT - used_scans)
         }), 200
         
     except Exception as e:
@@ -1859,12 +2056,47 @@ def scan_product():
                 "message": "User is required to scan products"
             }), 401
 
+        # Get API keys from environment (needed for ASIN, UPC, and FNSKU handling)
+        FNSKU_API_KEY = os.environ.get('FNSKU_API_KEY')
+        RAINFOREST_API_KEY = os.environ.get('RAINFOREST_API_KEY')
+
         # --- Free trial enforcement (per tenant, fallback per user) ---
-        if supabase_admin:
+        # CEO and admin accounts bypass all limits and pricing restrictions
+        # Check CEO/admin status FIRST before any trial checks
+        is_ceo_admin = False
+        user_role = None
+        
+        # ALWAYS check CEO status first, even if supabase_admin is None (we'll try anyway)
+        try:
+            if user_id:
+                user_role = get_user_role(user_id) if supabase_admin else None
+                is_ceo_admin = is_ceo_or_admin(user_id) if supabase_admin else False
+                
+                # Log CEO/admin status for debugging
+                logger.info(f"👤 User role check: user_id={user_id}, role={user_role}, is_ceo_admin={is_ceo_admin}")
+                print(f"👤 User role check: user_id={user_id}, role={user_role}, is_ceo_admin={is_ceo_admin}")
+                
+                # CEO accounts completely bypass ALL pricing and trial restrictions
+                # Note: Creator check is only for upgrading TO CEO, not for using CEO privileges
+                if is_ceo_admin:
+                    logger.info(f"✅✅✅ CEO/Admin account detected - BYPASSING ALL TRIAL LIMITS AND PRICING RESTRICTIONS")
+                    print(f"✅✅✅ CEO/Admin account - UNLIMITED SCANNING - NO TRIAL CHECKS - SKIPPING ALL PRICING CHECKS")
+        except Exception as role_error:
+            logger.error(f"Error checking user role: {role_error}")
+            print(f"❌ Error checking user role: {role_error}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+        
+        # If CEO/admin, completely skip all trial/pricing checks
+        if is_ceo_admin:
+            logger.info(f"🚀 CEO/Admin account - proceeding with scan without any trial/pricing checks")
+            print(f"🚀 CEO/Admin account - proceeding with scan without any trial/pricing checks")
+        elif supabase_admin:
             try:
                 # Treat tenants without an active subscription as on the free trial
                 is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
 
+                # Only check trial limits for non-CEO, non-paid accounts
                 if not is_paid:
                     # Get trial start date to exclude old test scans
                     trial_start_date = get_trial_start_date(tenant_id, user_id)
@@ -1913,6 +2145,323 @@ def scan_product():
                     "success": False,
                     "error": "trial_check_failed",
                     "message": "Unable to verify trial usage. Please contact support or try again later."
+                }), 500
+        
+        # Handle ASIN codes directly with Rainforest API
+        if code_type == 'ASIN':
+            logger.info(f"📦 Detected ASIN code - using Rainforest API directly")
+            asin = code
+            
+            # Check cache first (by ASIN)
+            if supabase_admin:
+                try:
+                    cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('asin', asin).maybe_single().execute()
+                    
+                    if cache_result and hasattr(cache_result, 'data') and cache_result.data:
+                        cached = cache_result.data
+                        from datetime import timedelta
+                        now = datetime.now(timezone.utc)
+                        cached_date = datetime.fromisoformat(cached.get('updated_at', cached.get('created_at', now.isoformat())))
+                        age_days = (now - cached_date).days
+                        
+                        # Update access tracking
+                        current_count = cached.get('lookup_count') or 0
+                        supabase_admin.table('api_lookup_cache').update({
+                            'last_accessed': now.isoformat(),
+                            'lookup_count': current_count + 1
+                        }).eq('id', cached['id']).execute()
+                        
+                        # Check if cache has complete product data
+                        product_name = cached.get('product_name') or ''
+                        is_placeholder = (
+                            not product_name or 
+                            product_name.startswith("Amazon Product (ASIN:") or
+                            product_name.startswith("FNSKU:") or
+                            len(product_name) < 10
+                        )
+                        has_price = cached.get('price') and float(cached.get('price') or 0) > 0
+                        has_image = cached.get('image_url') and len(str(cached.get('image_url', ''))) > 0
+                        has_rainforest_data = cached.get('rainforest_raw_data') is not None
+                        has_complete_data = not is_placeholder and has_price and (has_image or has_rainforest_data)
+                        
+                        logger.info(f"📊 ASIN cache completeness: is_placeholder={is_placeholder}, has_price={has_price}, has_image={has_image}, complete={has_complete_data}")
+                        
+                        # If cache is fresh and complete, return it
+                        if age_days < 30 and has_complete_data:
+                            # Extract images
+                            all_images = []
+                            try:
+                                image_url_data = cached.get('image_url', '')
+                                if image_url_data:
+                                    parsed = json.loads(image_url_data) if isinstance(image_url_data, str) else image_url_data
+                                    if isinstance(parsed, list):
+                                        all_images = parsed
+                                    else:
+                                        all_images = [image_url_data] if image_url_data else []
+                            except:
+                                all_images = [cached.get('image_url')] if cached.get('image_url') else []
+                            
+                            # Extract videos
+                            videos = []
+                            videos_count = 0
+                            if cached.get('rainforest_raw_data'):
+                                try:
+                                    raw_data = cached.get('rainforest_raw_data')
+                                    if isinstance(raw_data, str):
+                                        raw_data = json.loads(raw_data)
+                                    if raw_data and raw_data.get('product'):
+                                        product = raw_data.get('product')
+                                        if product.get('videos_additional') and isinstance(product.get('videos_additional'), list):
+                                            videos = product.get('videos_additional', [])
+                                            videos_count = product.get('videos_count', len(videos))
+                                except Exception as video_error:
+                                    logger.warning(f"Could not extract videos from cache: {video_error}")
+                            
+                            # Log scan to history
+                            scan_was_logged = log_scan_to_history(user_id, tenant_id, asin, asin, supabase_admin)
+                            
+                            # Get scan count
+                            scan_count_data = None
+                            if supabase_admin and user_id:
+                                try:
+                                    is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
+                                    if not is_paid and not is_ceo_admin:
+                                        trial_start_date = get_trial_start_date(tenant_id, user_id)
+                                        if tenant_id:
+                                            query = supabase_admin.from_('scan_history').select('*', count='exact').eq('tenant_id', tenant_id)
+                                            if trial_start_date:
+                                                query = query.gte('scanned_at', trial_start_date.isoformat())
+                                            scan_res = query.execute()
+                                        else:
+                                            query = supabase_admin.from_('scan_history').select('*', count='exact').eq('user_id', user_id)
+                                            if trial_start_date:
+                                                query = query.gte('scanned_at', trial_start_date.isoformat())
+                                            scan_res = query.execute()
+                                        
+                                        used_scans = getattr(scan_res, 'count', None) or len(scan_res.data) if getattr(scan_res, 'data', None) else 0
+                                        scan_count_data = {
+                                            'used': used_scans,
+                                            'limit': None if is_ceo_admin or is_paid else FREE_TRIAL_SCAN_LIMIT,
+                                            'remaining': None if is_ceo_admin or is_paid else max(0, FREE_TRIAL_SCAN_LIMIT - used_scans),
+                                            'is_paid': is_paid,
+                                            'is_ceo_admin': is_ceo_admin
+                                        }
+                                    else:
+                                        scan_count_data = {
+                                            'used': 0,
+                                            'limit': None,
+                                            'remaining': None,
+                                            'is_paid': is_paid,
+                                            'is_ceo_admin': is_ceo_admin
+                                        }
+                                except Exception as count_error:
+                                    logger.error(f"Error getting scan count: {count_error}")
+                            
+                            response_data = {
+                                "success": True,
+                                "asin": asin,
+                                "title": cached.get('product_name', ''),
+                                "price": str(cached.get('price', 0)) if cached.get('price') else '',
+                                "image": all_images[0] if all_images else (cached.get('image_url') or ''),
+                                "images": all_images,
+                                "images_count": len(all_images),
+                                "videos": videos,
+                                "videos_count": videos_count,
+                                "brand": cached.get('brand', ''),
+                                "category": cached.get('category', ''),
+                                "description": cached.get('description', ''),
+                                "upc": cached.get('upc', ''),
+                                "fnsku": cached.get('fnsku', ''),
+                                "amazon_url": f"https://www.amazon.com/dp/{asin}",
+                                "source": "cache",
+                                "cost_status": "no_charge",
+                                "cached": True,
+                                "raw": cached
+                            }
+                            if scan_count_data:
+                                response_data['scan_count'] = scan_count_data
+                            
+                            logger.info(f"✅ Returning cached ASIN data: {asin}")
+                            return jsonify(response_data)
+                        # If cache is incomplete, fetch fresh data below
+                except Exception as cache_error:
+                    logger.error(f"Error checking ASIN cache: {cache_error}")
+            
+            # Not in cache or incomplete - fetch from Rainforest API
+            if not RAINFOREST_API_KEY:
+                return jsonify({
+                    "success": False,
+                    "error": "api_key_missing",
+                    "message": "Rainforest API key not configured"
+                }), 500
+            
+            logger.info(f"💰 ASIN {asin} not in cache or incomplete - calling Rainforest API (will be charged)")
+            
+            try:
+                rainforest_response = requests.get(
+                    'https://api.rainforestapi.com/request',
+                    params={
+                        'api_key': RAINFOREST_API_KEY,
+                        'type': 'product',
+                        'amazon_domain': 'amazon.com',
+                        'asin': asin
+                    },
+                    timeout=15
+                )
+                
+                if rainforest_response.status_code == 200:
+                    response_json = rainforest_response.json()
+                    if response_json.get('product'):
+                        product = response_json['product']
+                        
+                        # Collect all images
+                        all_images = []
+                        main_image = product.get('main_image', {}).get('link')
+                        if main_image:
+                            all_images.append(main_image)
+                        images_array = product.get('images', [])
+                        for img in images_array:
+                            img_link = img.get('link') if isinstance(img, dict) else img
+                            if img_link and img_link not in all_images:
+                                all_images.append(img_link)
+                        
+                        # Extract product data
+                        title = product.get('title', '')
+                        price_obj = product.get('buybox_winner', {}).get('price', {}) or product.get('price', {})
+                        price = price_obj.get('value') if isinstance(price_obj, dict) else price_obj
+                        brand = product.get('brand', '')
+                        category_obj = product.get('category', {})
+                        category = category_obj.get('name') if isinstance(category_obj, dict) else (category_obj or '')
+                        description = product.get('description', '')
+                        
+                        # Extract videos
+                        videos = product.get('videos_additional', []) or []
+                        videos_count = product.get('videos_count', len(videos))
+                        
+                        # Extract UPC if available
+                        upc = ''
+                        if product.get('upc'):
+                            upc = str(product.get('upc'))
+                        elif product.get('upcs') and len(product.get('upcs', [])) > 0:
+                            upc = str(product.get('upcs')[0])
+                        
+                        # Log scan to history
+                        scan_was_logged = log_scan_to_history(user_id, tenant_id, asin, asin, supabase_admin)
+                        
+                        # Get scan count
+                        scan_count_data = None
+                        if supabase_admin and user_id:
+                            try:
+                                is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
+                                if not is_paid and not is_ceo_admin:
+                                    trial_start_date = get_trial_start_date(tenant_id, user_id)
+                                    if tenant_id:
+                                        query = supabase_admin.from_('scan_history').select('*', count='exact').eq('tenant_id', tenant_id)
+                                        if trial_start_date:
+                                            query = query.gte('scanned_at', trial_start_date.isoformat())
+                                        scan_res = query.execute()
+                                    else:
+                                        query = supabase_admin.from_('scan_history').select('*', count='exact').eq('user_id', user_id)
+                                        if trial_start_date:
+                                            query = query.gte('scanned_at', trial_start_date.isoformat())
+                                        scan_res = query.execute()
+                                    
+                                    used_scans = getattr(scan_res, 'count', None) or len(scan_res.data) if getattr(scan_res, 'data', None) else 0
+                                    scan_count_data = {
+                                        'used': used_scans,
+                                        'limit': None if is_ceo_admin or is_paid else FREE_TRIAL_SCAN_LIMIT,
+                                        'remaining': None if is_ceo_admin or is_paid else max(0, FREE_TRIAL_SCAN_LIMIT - used_scans),
+                                        'is_paid': is_paid,
+                                        'is_ceo_admin': is_ceo_admin
+                                    }
+                                else:
+                                    scan_count_data = {
+                                        'used': 0,
+                                        'limit': None,
+                                        'remaining': None,
+                                        'is_paid': is_paid,
+                                        'is_ceo_admin': is_ceo_admin
+                                    }
+                            except Exception as count_error:
+                                logger.error(f"Error getting scan count: {count_error}")
+                        
+                        # Save to cache
+                        if supabase_admin:
+                            try:
+                                now = datetime.now(timezone.utc).isoformat()
+                                
+                                # Check if entry already exists
+                                existing = supabase_admin.table('api_lookup_cache').select('id').eq('asin', asin).maybe_single().execute()
+                                
+                                cache_data = {
+                                    'asin': asin,
+                                    'product_name': title,
+                                    'price': price if price else None,
+                                    'brand': brand,
+                                    'category': category,
+                                    'description': description,
+                                    'upc': upc if upc else None,
+                                    'image_url': json.dumps(all_images) if all_images else None,
+                                    'rainforest_raw_data': json.dumps(response_json),
+                                    'last_accessed': now,
+                                    'lookup_count': 1,
+                                    'updated_at': now
+                                }
+                                
+                                if existing and existing.data:
+                                    supabase_admin.table('api_lookup_cache').update(cache_data).eq('id', existing.data['id']).execute()
+                                    logger.info(f"✅ Updated cache entry for ASIN {asin}")
+                                else:
+                                    cache_data['created_at'] = now
+                                    supabase_admin.table('api_lookup_cache').insert(cache_data).execute()
+                                    logger.info(f"✅ Saved new cache entry for ASIN {asin}")
+                            except Exception as cache_save_error:
+                                logger.error(f"Error saving ASIN to cache: {cache_save_error}")
+                        
+                        response_data = {
+                            "success": True,
+                            "asin": asin,
+                            "title": title,
+                            "price": str(price) if price else '',
+                            "image": all_images[0] if all_images else '',
+                            "images": all_images,
+                            "images_count": len(all_images),
+                            "videos": videos,
+                            "videos_count": videos_count,
+                            "brand": brand,
+                            "category": category,
+                            "description": description,
+                            "upc": upc,
+                            "fnsku": '',
+                            "amazon_url": f"https://www.amazon.com/dp/{asin}",
+                            "source": "rainforest_api",
+                            "cost_status": "charged",
+                            "cached": False
+                        }
+                        if scan_count_data:
+                            response_data['scan_count'] = scan_count_data
+                        
+                        logger.info(f"✅ Successfully fetched ASIN {asin} from Rainforest API")
+                        return jsonify(response_data)
+                    else:
+                        return jsonify({
+                            "success": False,
+                            "error": "product_not_found",
+                            "message": f"Product with ASIN {asin} not found on Amazon"
+                        }), 404
+                else:
+                    logger.error(f"Rainforest API error: {rainforest_response.status_code}")
+                    return jsonify({
+                        "success": False,
+                        "error": "api_error",
+                        "message": f"Rainforest API returned status {rainforest_response.status_code}"
+                    }), 500
+            except Exception as rainforest_error:
+                logger.error(f"Error calling Rainforest API for ASIN {asin}: {rainforest_error}")
+                return jsonify({
+                    "success": False,
+                    "error": "api_error",
+                    "message": f"Failed to fetch product data: {str(rainforest_error)}"
                 }), 500
         
         # Handle UPC codes with free UPCitemdb API
@@ -2340,10 +2889,7 @@ def scan_product():
         
         # Continue with existing FNSKU logic for non-UPC codes
         
-        # Get API keys from environment
-        FNSKU_API_KEY = os.environ.get('FNSKU_API_KEY')
-        RAINFOREST_API_KEY = os.environ.get('RAINFOREST_API_KEY')
-        
+        # API keys already retrieved above (at the start of the function)
         if not FNSKU_API_KEY:
             logger.error("FNSKU_API_KEY not found in environment variables")
             return jsonify({
@@ -2496,6 +3042,109 @@ def scan_product():
                                         videos_count = product.get('videos_count', len(videos))
                             except Exception as video_error:
                                 logger.warning(f"Could not extract videos from cache: {video_error}")
+                        
+                        # Check if cache has complete product data (Rainforest data)
+                        cached_asin = cached.get('asin') or ''
+                        has_rainforest_data = cached.get('rainforest_raw_data') is not None
+                        product_name = cached.get('product_name') or ''
+                        
+                        # Check if product_name is a placeholder (incomplete data)
+                        is_placeholder = (
+                            not product_name or 
+                            product_name == f"Product {code}" or 
+                            product_name.startswith("Amazon Product (ASIN:") or
+                            product_name.startswith("FNSKU:") or
+                            len(product_name) < 10  # Too short to be a real product name
+                        )
+                        
+                        # Check if we have essential product data
+                        has_price = cached.get('price') and float(cached.get('price') or 0) > 0
+                        has_image = cached.get('image_url') and len(str(cached.get('image_url', ''))) > 0
+                        has_complete_data = not is_placeholder and has_price and (has_image or has_rainforest_data)
+                        
+                        logger.info(f"📊 Cache completeness check for {code}: ASIN={cached_asin}, has_rainforest={has_rainforest_data}, is_placeholder={is_placeholder}, has_price={has_price}, has_image={has_image}, complete={has_complete_data}")
+                        
+                        # If we have ASIN but incomplete data, fetch from Rainforest API to enrich
+                        if cached_asin and len(cached_asin) >= 10 and RAINFOREST_API_KEY and not has_complete_data:
+                            logger.info(f"📦 Cache has ASIN {cached_asin} but incomplete data - fetching from Rainforest API to enrich...")
+                            try:
+                                rainforest_response = requests.get(
+                                    'https://api.rainforestapi.com/request',
+                                    params={
+                                        'api_key': RAINFOREST_API_KEY,
+                                        'type': 'product',
+                                        'amazon_domain': 'amazon.com',
+                                        'asin': cached_asin
+                                    },
+                                    timeout=15
+                                )
+                                
+                                if rainforest_response.status_code == 200:
+                                    response_json = rainforest_response.json()
+                                    if response_json.get('product'):
+                                        product = response_json['product']
+                                        
+                                        # Collect all images
+                                        all_images_rainforest = []
+                                        main_image = product.get('main_image', {}).get('link')
+                                        if main_image:
+                                            all_images_rainforest.append(main_image)
+                                        images_array = product.get('images', [])
+                                        for img in images_array:
+                                            img_link = img.get('link') if isinstance(img, dict) else img
+                                            if img_link and img_link not in all_images_rainforest:
+                                                all_images_rainforest.append(img_link)
+                                        
+                                        # Use Rainforest data to enrich cached response
+                                        enriched_title = product.get('title', '') or cached.get('product_name', '')
+                                        enriched_price = product.get('buybox_winner', {}).get('price', {}).get('value') or product.get('price', {}).get('value') or cached.get('price', 0)
+                                        enriched_brand = product.get('brand', '') or ''
+                                        enriched_category = product.get('category', {}).get('name', '') if isinstance(product.get('category'), dict) else (product.get('category') or cached.get('category', ''))
+                                        enriched_description = product.get('description', '') or cached.get('description', '')
+                                        
+                                        # Use Rainforest images if available, otherwise use cached
+                                        if all_images_rainforest:
+                                            all_images = all_images_rainforest
+                                        
+                                        # Extract videos
+                                        if product.get('videos_additional'):
+                                            videos = product.get('videos_additional', [])
+                                            videos_count = product.get('videos_count', len(videos))
+                                        
+                                        logger.info(f"✅ Enriched cached data with Rainforest API: title={enriched_title[:50]}, price={enriched_price}, brand={enriched_brand}")
+                                        
+                                        # Build enriched response
+                                        response_data = {
+                                            "success": True,
+                                            "fnsku": cached.get('fnsku', code),
+                                            "asin": cached_asin,
+                                            "title": enriched_title,
+                                            "price": str(enriched_price) if enriched_price else '',
+                                            "image": all_images[0] if all_images else '',
+                                            "images": all_images,
+                                            "images_count": len(all_images),
+                                            "videos": videos,
+                                            "videos_count": videos_count,
+                                            "brand": enriched_brand,
+                                            "category": enriched_category,
+                                            "description": enriched_description,
+                                            "upc": cached.get('upc', ''),
+                                            "amazon_url": f"https://www.amazon.com/dp/{cached_asin}",
+                                            "source": "cache_enriched",
+                                            "cost_status": "charged",  # We called Rainforest API
+                                            "cached": True,
+                                            "raw": cached
+                                        }
+                                        
+                                        # Add scan_count if available
+                                        if scan_count_data:
+                                            response_data['scan_count'] = scan_count_data
+                                        
+                                        logger.info(f"✅ Returning enriched cached data for {code_type} {code}")
+                                        return jsonify(response_data)
+                            except Exception as enrich_error:
+                                logger.warning(f"⚠️ Could not enrich cache with Rainforest API: {enrich_error}")
+                                # Fall through to return cached data
                         
                         response_data = {
                             "success": True,
@@ -3806,6 +4455,124 @@ def delete_user(user_id):
 
     except Exception as e:
         logger.error(f"Error deleting user: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/users/<user_id>/upgrade-to-ceo', methods=['POST'])
+def upgrade_user_to_ceo(user_id):
+    """
+    Upgrade a user to CEO role.
+    CEO accounts have unlimited scanning without pricing restrictions.
+    SECURITY: Only the creator of the software can upgrade users to CEO role.
+    This ensures only the creator has unlimited access.
+    """
+    try:
+        current_user_id, tenant_id = get_ids_from_request()
+        if not current_user_id:
+            return jsonify({'error': 'Unauthorized'}), 401
+
+        # SECURITY CHECK: Only the creator can upgrade to CEO
+        if not is_creator(current_user_id):
+            logger.warning(f"Unauthorized CEO upgrade attempt by {current_user_id} (not creator)")
+            return jsonify({
+                'error': 'Unauthorized',
+                'message': 'Only the creator of the software can upgrade users to CEO role'
+            }), 403
+
+        # Additional check: Only allow upgrading the creator's own account or if creator is upgrading themselves
+        if user_id != current_user_id and not is_creator(user_id):
+            logger.warning(f"Attempt to upgrade non-creator user {user_id} to CEO by {current_user_id}")
+            return jsonify({
+                'error': 'Unauthorized',
+                'message': 'Only the creator can have CEO role'
+            }), 403
+
+        if not supabase_admin:
+            return jsonify({'error': 'Admin client not configured'}), 500
+
+        # Verify the target user is actually the creator
+        if not is_creator(user_id):
+            logger.warning(f"Attempt to upgrade non-creator {user_id} to CEO")
+            return jsonify({
+                'error': 'Unauthorized',
+                'message': 'Only the creator can have CEO role'
+            }), 403
+
+        # Update user role to CEO in both app_metadata and users table
+        try:
+            # Update auth.users app_metadata and user_metadata
+            update_response = supabase_admin.auth.admin.update_user_by_id(
+                user_id,
+                {
+                    'app_metadata': {'role': 'ceo'},
+                    'user_metadata': {'role': 'ceo'}
+                }
+            )
+            
+            if hasattr(update_response, 'error') and update_response.error:
+                return jsonify({'error': f'Failed to update user metadata: {str(update_response.error)}'}), 500
+
+            # Also update users table
+            user_update = supabase_admin.from_('users').update({'role': 'ceo'}).eq('id', user_id).execute()
+            
+            if hasattr(user_update, 'error') and user_update.error:
+                logger.warning(f"Could not update users table for {user_id}: {user_update.error}")
+                # Don't fail if users table update fails, auth metadata is more important
+
+            logger.info(f"Creator {user_id} upgraded to CEO role by {current_user_id}")
+            return jsonify({
+                'message': 'User upgraded to CEO role successfully',
+                'user_id': user_id,
+                'role': 'ceo'
+            }), 200
+
+        except Exception as upgrade_error:
+            logger.error(f"Error upgrading user to CEO: {upgrade_error}")
+            return jsonify({'error': f'Failed to upgrade user: {str(upgrade_error)}'}), 500
+
+    except Exception as e:
+        logger.error(f"Error in upgrade_user_to_ceo: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/creator/check-status', methods=['GET'])
+def check_creator_status():
+    """
+    Check if the current user is the creator.
+    This helps verify that CREATOR_EMAIL or CREATOR_USER_ID is set correctly.
+    """
+    try:
+        user_id, tenant_id = get_ids_from_request()
+        if not user_id:
+            return jsonify({'error': 'Unauthorized'}), 401
+
+        if not supabase_admin:
+            return jsonify({'error': 'Admin client not configured'}), 500
+
+        # Get user email for verification
+        user_email = None
+        try:
+            user_response = supabase_admin.auth.admin.get_user_by_id(user_id)
+            if user_response and hasattr(user_response, 'user'):
+                user = user_response.user
+                user_email = getattr(user, 'email', '').strip().lower()
+        except Exception as e:
+            logger.error(f"Error getting user email: {e}")
+
+        is_creator_user = is_creator(user_id)
+        current_role = get_user_role(user_id)
+
+        return jsonify({
+            'is_creator': is_creator_user,
+            'user_id': user_id,
+            'user_email': user_email,
+            'current_role': current_role,
+            'creator_email_configured': bool(CREATOR_EMAIL),
+            'creator_user_id_configured': bool(CREATOR_USER_ID),
+            'can_upgrade_to_ceo': is_creator_user,
+            'message': 'Creator status check complete'
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error checking creator status: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/marketplace/pricing-suggestions', methods=['POST'])

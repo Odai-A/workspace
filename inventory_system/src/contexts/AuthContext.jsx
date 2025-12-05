@@ -174,16 +174,55 @@ export const AuthProvider = ({ children }) => {
     console.log('SignOut attempt');
     setLoading(true);
     try {
-      const { error } = await supabase.auth.signOut();
-      if (error) throw error;
+      // Try to sign out - if it fails, we'll still clear local state
+      const { error } = await supabase.auth.signOut({ scope: 'local' });
+      
+      // Even if there's an error, clear local state and redirect
+      // This handles cases where the session is already expired or invalid
+      if (error) {
+        console.warn('Sign out API error (clearing local state anyway):', error.message);
+        // Clear local storage manually
+        try {
+          localStorage.removeItem('sb-' + supabase.supabaseUrl.split('//')[1].split('.')[0] + '-auth-token');
+          // Clear all Supabase-related localStorage items
+          Object.keys(localStorage).forEach(key => {
+            if (key.startsWith('sb-')) {
+              localStorage.removeItem(key);
+            }
+          });
+        } catch (clearError) {
+          console.warn('Error clearing localStorage:', clearError);
+        }
+      }
+      
+      // Clear user and session state immediately
+      setUser(null);
+      setSession(null);
+      
       // setUser and setSession to null will be handled by onAuthStateChange
       toast.success('Signed out successfully.');
       return { success: true };
     } catch (error) {
       console.error('Error signing out:', error.message);
-      toast.error(error.message || 'Failed to sign out.');
+      
+      // Even on error, try to clear local state
+      try {
+        setUser(null);
+        setSession(null);
+        // Clear localStorage
+        Object.keys(localStorage).forEach(key => {
+          if (key.startsWith('sb-')) {
+            localStorage.removeItem(key);
+          }
+        });
+      } catch (clearError) {
+        console.warn('Error clearing state:', clearError);
+      }
+      
+      // Don't show error toast if we successfully cleared local state
+      // The user is effectively signed out even if the API call failed
       logAuthState('signout-exception', { error });
-      return { success: false, error: error.message };
+      return { success: true }; // Return success since we cleared local state
     } finally {
       setLoading(false);
     }

@@ -9,7 +9,7 @@ import ShopifyListing from './ShopifyListing';
 // Removed: import { getProductLookup, externalApiService } from '../services/api';
 // All API calls now go through backend /api/scan endpoint
 import { productLookupService as dbProductLookupService, apiCacheService } from '../services/databaseService';
-import { inventoryService } from '../config/supabaseClient';
+import { inventoryService, supabase } from '../config/supabaseClient';
 import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, CheckCircleIcon, CurrencyDollarIcon, ArrowTopRightOnSquareIcon, PrinterIcon, QrCodeIcon } from '@heroicons/react/24/outline';
 import { mockService } from '../services/mockData';
 import { useAuth } from '../contexts/AuthContext';
@@ -85,8 +85,9 @@ const Scanner = () => {
   const countdownIntervalRef = useRef(null);
 
   // State for scan count (free trial tracking)
-  const [scanCount, setScanCount] = useState({ used: 0, limit: 50, remaining: 50, isPaid: false });
+  const [scanCount, setScanCount] = useState({ used: 0, limit: 50, remaining: 50, isPaid: false, is_ceo_admin: false });
   const [scanCountLoading, setScanCountLoading] = useState(false);
+  const [isCEOAdmin, setIsCEOAdmin] = useState(false);
 
   // Cleanup intervals on unmount
   useEffect(() => {
@@ -131,11 +132,16 @@ const Scanner = () => {
       });
       
       if (response.data?.success) {
+        const isCEO = response.data.is_ceo_admin || false;
+        setIsCEOAdmin(isCEO);
         setScanCount({
           used: response.data.used_scans || 0,
           limit: response.data.limit || null,
-          remaining: response.data.remaining || null,
-          isPaid: response.data.is_paid || false
+          remaining: response.data.remaining !== null && response.data.remaining !== undefined 
+            ? response.data.remaining 
+            : (response.data.limit ? Math.max(0, response.data.limit - (response.data.used_scans || 0)) : null),
+          isPaid: response.data.is_paid || false,
+          is_ceo_admin: isCEO
         });
       }
     } catch (error) {
@@ -464,13 +470,16 @@ const Scanner = () => {
             console.log("📊 Scan response scan_count:", apiResult.scan_count);
             if (apiResult.scan_count) {
                 console.log("✅ Updating scan count from response:", apiResult.scan_count);
+                const isCEO = apiResult.scan_count.is_ceo_admin || false;
+                setIsCEOAdmin(isCEO);
                 setScanCount({
                   used: apiResult.scan_count.used || 0,
                   limit: apiResult.scan_count.limit || null,
                   remaining: apiResult.scan_count.remaining !== null && apiResult.scan_count.remaining !== undefined 
                     ? apiResult.scan_count.remaining 
                     : (apiResult.scan_count.limit ? Math.max(0, apiResult.scan_count.limit - (apiResult.scan_count.used || 0)) : null),
-                  isPaid: apiResult.scan_count.is_paid || false
+                  isPaid: apiResult.scan_count.is_paid || false,
+                  is_ceo_admin: isCEO
                 });
             } else {
                 console.log("⚠️ No scan_count in response, fetching...");
@@ -490,26 +499,61 @@ const Scanner = () => {
           const status = error.response.status;
           const data = error.response.data || {};
 
-          // Handle free-trial limit reached
+          // Handle free-trial limit reached - but check if user is CEO/admin first
           if (data.error === 'trial_limit_reached' || status === 402) {
-            const used = data.used_scans ?? 'all';
-            const limit = data.limit ?? 50;
-            toast.error(
-              `🚫 Free trial limit reached: ${used}/${limit} scans used. Redirecting to upgrade...`,
-              { autoClose: 3000 }
-            );
-            // Refresh scan count to show updated count
-            fetchScanCount();
-            // Redirect to pricing page after a short delay to let the toast show
-            setTimeout(() => {
-              navigate('/pricing?upgrade=required', { 
-                state: { 
-                  message: 'Your free trial of 50 scans has been used. Please upgrade to continue scanning.',
-                  usedScans: used,
-                  limit: limit
-                } 
-              });
-            }, 1500);
+            // Check if user is CEO/admin - if so, this is a backend error, don't redirect
+            const checkIfCEO = async () => {
+              try {
+                const { data: { session } } = await supabase.auth.getSession();
+                if (session?.user) {
+                  const appMetadata = session.user.app_metadata || {};
+                  const userMetadata = session.user.user_metadata || {};
+                  const role = appMetadata.role || userMetadata.role;
+                  
+                  // Also check users table
+                  const { data: userProfile } = await supabase
+                    .from('users')
+                    .select('role')
+                    .eq('id', session.user.id)
+                    .maybeSingle();
+                  
+                  const userRole = role || userProfile?.role;
+                  const isCEO = userRole === 'ceo' || userRole === 'admin';
+                  
+                  if (isCEO) {
+                    console.error('⚠️ CEO/Admin account received 402 error - backend issue!');
+                    toast.error('⚠️ Backend error: CEO account should have unlimited scanning. Please contact support or try again.', { autoClose: 5000 });
+                    return true; // Don't redirect
+                  }
+                }
+              } catch (err) {
+                console.error('Error checking CEO status:', err);
+              }
+              return false; // Not CEO, proceed with redirect
+            };
+            
+            checkIfCEO().then(isCEO => {
+              if (!isCEO) {
+                const used = data.used_scans ?? 'all';
+                const limit = data.limit ?? 50;
+                toast.error(
+                  `🚫 Free trial limit reached: ${used}/${limit} scans used. Redirecting to upgrade...`,
+                  { autoClose: 3000 }
+                );
+                // Refresh scan count to show updated count
+                fetchScanCount();
+                // Redirect to pricing page after a short delay to let the toast show
+                setTimeout(() => {
+                  navigate('/pricing?upgrade=required', { 
+                    state: { 
+                      message: 'Your free trial of 50 scans has been used. Please upgrade to continue scanning.',
+                      usedScans: used,
+                      limit: limit
+                    } 
+                  });
+                }, 1500);
+              }
+            });
           } else {
             const errorMsg = data.message || data.error || "Backend error";
             toast.error(`❌ ${errorMsg}`, { autoClose: 5000 });
@@ -1003,9 +1047,9 @@ const Scanner = () => {
               <div class="retail-price">
                 <span class="retail-price-label">RETAIL:</span> $${retailPrice.toFixed(2)}
               </div>
-              <div class="our-price-label">OUR PRICE (${discountPercent}% OFF):</div>
+              <div class="our-price-label">OUR PRICE:</div>
               <div class="our-price">
-                $${ourPrice.toFixed(2)}
+                $${ourPrice.toFixed(2)} <span style="font-size: 12pt; color: #059669;">(${discountPercent}% OFF)</span>
               </div>
             </div>
           ` : ''}
@@ -1023,8 +1067,10 @@ const Scanner = () => {
 
   // Helper function to create a single label body (without HTML wrapper)
   const createLabelBody = (productInfo, amazonUrl, qrCodeHtml) => {
+    const discountPercent = parseFloat(localStorage.getItem('labelDiscountPercent')) || 50;
+    const discountMultiplier = (100 - discountPercent) / 100;
     const retailPrice = productInfo.price != null ? parseFloat(productInfo.price) : 0;
-    const ourPrice = retailPrice / 2;
+    const ourPrice = retailPrice * discountMultiplier;
     const productName = productInfo.name || 'Product';
 
     return `
@@ -1059,7 +1105,7 @@ const Scanner = () => {
             </div>
             <div class="our-price-label">OUR PRICE:</div>
             <div class="our-price">
-              $${ourPrice.toFixed(2)}
+              $${ourPrice.toFixed(2)} <span style="font-size: 12pt; color: #059669;">(${discountPercent}% OFF)</span>
             </div>
           </div>
         ` : ''}
@@ -1915,11 +1961,15 @@ const Scanner = () => {
       return;
     }
 
-    // Filter out items without ASIN
-    const validItems = batchQueue.filter(item => item.product && item.product.asin);
+    // Filter out items without any product code (ASIN, UPC, FNSKU, or code)
+    const validItems = batchQueue.filter(item => {
+      if (!item.product) return false;
+      // Allow items with ASIN, UPC, FNSKU, or code
+      return item.product.asin || item.product.upc || item.product.fnsku || item.product.code || item.code;
+    });
     
     if (validItems.length === 0) {
-      toast.error("No valid items with ASIN to print");
+      toast.error("No valid items with product code to print");
       return;
     }
 
@@ -2134,8 +2184,8 @@ const Scanner = () => {
   return (
     <div className="p-4 md:p-6 lg:p-8">
 
-      {/* Scan Count Display (Free Trial) */}
-      {!scanCount.isPaid && (
+      {/* Scan Count Display (Free Trial) - Hidden for CEO/Admin */}
+      {!scanCount.isPaid && !isCEOAdmin && (
         <div className="mb-4 bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 border border-indigo-200 dark:border-indigo-800 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">

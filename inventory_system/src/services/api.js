@@ -2,6 +2,7 @@ import axios from 'axios';
 import { mockService } from './mockData';
 import { apiCacheService, apiScanLogService } from './databaseService.js';
 import { getApiEndpoint } from '../utils/apiConfig';
+import { supabase } from '../config/supabaseClient';
 
 // Axios instance for API calls
 const apiClient = axios.create({
@@ -751,14 +752,77 @@ export const getProductLookup = async (code, userId) => {
     console.log(`🏷️ Detected code type: ${codeInfo.type} (${codeInfo.description})`);
     
     if (codeInfo.type === 'ASIN') {
-      console.log('📋 Code is an ASIN - creating direct product data (no API charge)');
+      console.log('📋 Code is an ASIN - checking cache first, then fetching full product data');
+      
+      // STEP 1: Check cache first for ASINs
+      let cachedProduct = await apiCacheService.getCachedLookup(codeInfo.code);
+      
+      if (cachedProduct) {
+        console.log('✅ Found ASIN in api_lookup_cache - no API charge!');
+        return apiCacheService.mapCacheToDisplay(cachedProduct);
+      }
+      
+      // STEP 2: If not in cache, call backend to fetch full product data from Rainforest API
+      console.log('📦 ASIN not in cache - calling backend to fetch full product data from Rainforest API...');
+      try {
+        const endpoint = getApiEndpoint('/scan');
+        
+        const { data: { session } } = await supabase.auth.getSession();
+        const token = session?.access_token;
+        
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            code: codeInfo.code,
+            user_id: userId
+          }),
+          timeout: 60000
+        });
+        
+        if (response.ok) {
+          const apiResult = await response.json();
+          
+          if (apiResult && apiResult.success) {
+            // Map backend response to frontend format
+            const productData = {
+              fnsku: apiResult.fnsku || '',
+              asin: apiResult.asin || codeInfo.code,
+              name: apiResult.title || '',
+              image_url: apiResult.image || '',
+              images: apiResult.images || (apiResult.image ? [apiResult.image] : []),
+              images_count: apiResult.images?.length || (apiResult.image ? 1 : 0),
+              videos: apiResult.videos || [],
+              videos_count: apiResult.videos_count || 0,
+              price: apiResult.price || '',
+              brand: apiResult.brand || '',
+              category: apiResult.category || '',
+              description: apiResult.description || '',
+              upc: apiResult.upc || '',
+              amazon_url: apiResult.amazon_url || `https://www.amazon.com/dp/${codeInfo.code}`,
+              source: apiResult.source || 'rainforest_api',
+              cost_status: apiResult.cost_status || (apiResult.cached ? 'no_charge' : 'charged'),
+              code_type: 'ASIN'
+            };
+            
+            console.log('✅ Successfully fetched full product data for ASIN from backend');
+            return productData;
+          }
+        }
+      } catch (backendError) {
+        console.warn('⚠️ Backend API call failed for ASIN, using placeholder data:', backendError);
+      }
+      
+      // STEP 3: Fallback to placeholder data if backend call fails
+      console.log('📋 Using placeholder ASIN data (backend unavailable or failed)');
       const asinData = generateAsinProductData(codeInfo.code);
       
       try {
-        // For ASINs, we might still want to cache them if they are frequently accessed
-        // This uses apiCacheService which we will update to save to 'api_lookup_cache'
         await apiCacheService.saveLookup(asinData); 
-        console.log('✅ ASIN data saved to api_lookup_cache');
+        console.log('✅ ASIN placeholder data saved to api_lookup_cache');
       } catch (saveError) {
         console.warn('⚠️ Could not save ASIN data to api_lookup_cache:', saveError);
       }
