@@ -1207,6 +1207,7 @@ def batch_import():
             'FNSKU #': 'Fn Sku',
             'fn sku': 'Fn Sku',
             'FnSku': 'Fn Sku',
+            'FNSku': 'Fn Sku',  # Added: capital FNSku variation
             # ASIN variations
             'B00 Asin': 'B00 Asin',
             'B00 ASIN': 'B00 Asin',
@@ -1395,12 +1396,23 @@ def batch_import():
         all_errors = invalid_items + bulk_errors
         failed_count = len(all_errors)
         
-        # Return batch summary
+        # Get sample error messages for debugging (first 5 unique messages)
+        error_samples = []
+        seen_messages = set()
+        for err in all_errors[:20]:  # Check first 20 errors
+            msg = err.get("message", "Unknown error")
+            if msg not in seen_messages and len(error_samples) < 5:
+                error_samples.append(msg)
+                seen_messages.add(msg)
+        
+        # Return batch summary with error details
         return jsonify({
             "success": True,
             "processed": len(items),
             "success": success_count,
-            "failed": failed_count
+            "failed": failed_count,
+            "error_samples": error_samples,  # Sample error messages for debugging
+            "total_errors": len(all_errors)
         }), 200
         
     except Exception as e:

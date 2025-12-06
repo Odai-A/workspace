@@ -312,6 +312,17 @@ const ProductImport = () => {
           const result = await response.json();
           console.log(`✅ Batch ${batchNum} uploaded:`, result);
 
+          // Log error samples if any failures occurred
+          if (result.failed > 0 && result.error_samples && result.error_samples.length > 0) {
+            console.warn(`⚠️ Batch ${batchNum} had ${result.failed} failures. Sample errors:`, result.error_samples);
+            // Store error samples for display
+            result.error_samples.forEach(errMsg => {
+              if (!errorDetails.includes(errMsg)) {
+                errorDetails.push(errMsg);
+              }
+            });
+          }
+
           // Update counts from batch result
           successCount += result.success || 0;
           errorCount += result.failed || 0;
