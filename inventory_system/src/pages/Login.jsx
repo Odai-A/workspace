@@ -19,11 +19,10 @@ const Login = () => {
       const { success, error } = await signIn(email, password);
       
       if (success) {
-        toast.success("Authentication successful. Redirecting to dashboard.");
+        // Toast message is already shown in AuthContext.signIn
         navigate("/dashboard");
-      } else {
-        toast.error(error || "Authentication failed. Please verify your credentials and try again.");
       }
+      // Error toast is already shown in AuthContext.signIn, no need to show again
     } catch (error) {
       console.error("Login error:", error);
       toast.error("An unexpected error occurred during authentication. Please try again.");

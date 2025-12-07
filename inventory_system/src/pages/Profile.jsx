@@ -20,18 +20,20 @@ const Profile = () => {
   const handleLogout = async () => {
     try {
       setIsLoggingOut(true);
-      const { success, error } = await signOut();
+      const { success } = await signOut();
       
       if (success) {
-        toast.success('Logged out successfully');
+        // Toast message is already shown in AuthContext.signOut
         navigate('/login');
       } else {
-        toast.error(error || 'Failed to log out');
         setIsLoggingOut(false);
       }
+      // Error toast is already shown in AuthContext.signOut if there's an error
     } catch (error) {
       console.error('Logout error:', error);
-      toast.error('An unexpected error occurred');
+      // AuthContext.signOut handles errors and shows toast, but if there's an unexpected error
+      // (like from navigate), we might want to show it. However, signOut always returns success: true
+      // even on error (it clears local state), so this catch is unlikely to be hit.
       setIsLoggingOut(false);
     }
   };

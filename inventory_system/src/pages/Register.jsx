@@ -37,11 +37,10 @@ const Register = () => {
       const { success, error } = await signUp(email, password);
       
       if (success) {
-        toast.success('Registration completed successfully. Please check your email for confirmation instructions.');
+        // Toast message is already shown in AuthContext.signUp
         navigate('/login');
-      } else {
-        toast.error(error || 'Registration failed. Please verify your information and try again.');
       }
+      // Error toast is already shown in AuthContext.signUp, no need to show again
     } catch (error) {
       console.error('Registration error:', error);
       toast.error('An unexpected error occurred during registration. Please try again.');
