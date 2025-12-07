@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
 import { useAuth } from './AuthContext';
+import { supabase } from '../config/supabaseClient';
 import { getSubscriptionStatus } from '../services/subscriptionService';
 
 // Create the navigation context
@@ -26,7 +27,91 @@ export const NavigationProvider = ({ children }) => {
   
   // Get location for active route tracking
   const location = useLocation();
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, hasRole } = useAuth();
+  
+  // Get user role from app_metadata, user_metadata, or users table
+  const [userRole, setUserRole] = useState(null);
+  
+  useEffect(() => {
+    const fetchUserRole = async () => {
+      if (!user) {
+        setUserRole(null);
+        return;
+      }
+      
+      // Try to get role from session user object first
+      try {
+        const { data: { session: currentSession } } = await supabase.auth.getSession();
+        if (currentSession?.user) {
+          const sessionUser = currentSession.user;
+          const appMetadata = sessionUser.app_metadata || sessionUser.raw_app_meta_data || {};
+          const userMetadata = sessionUser.user_metadata || sessionUser.raw_user_meta_data || {};
+          const role = appMetadata.role || userMetadata.role;
+          
+          if (role) {
+            setUserRole(role);
+            return;
+          }
+        }
+      } catch (error) {
+        console.warn('Error getting role from session:', error);
+      }
+      
+      // Fallback: try user object directly
+      try {
+        const appMetadata = user.app_metadata || user.raw_app_meta_data || {};
+        const userMetadata = user.user_metadata || user.raw_user_meta_data || {};
+        const role = appMetadata.role || userMetadata.role;
+        
+        if (role) {
+          setUserRole(role);
+          return;
+        }
+      } catch (error) {
+        console.warn('Error getting role from user object:', error);
+      }
+      
+      // Final fallback: check users table
+      try {
+        const { data: userProfile } = await supabase
+          .from('users')
+          .select('role')
+          .eq('id', user.id)
+          .maybeSingle();
+        
+        if (userProfile?.role) {
+          setUserRole(userProfile.role);
+          return;
+        }
+      } catch (error) {
+        console.warn('Error getting role from users table:', error);
+      }
+      
+      // If no role found, check if user might be CEO or admin
+      // First check users table one more time with a broader query
+      try {
+        const { data: userProfile } = await supabase
+          .from('users')
+          .select('role')
+          .eq('id', user.id)
+          .maybeSingle();
+        
+        if (userProfile?.role) {
+          setUserRole(userProfile.role);
+          return;
+        }
+      } catch (error) {
+        console.warn('Error getting role from users table (final check):', error);
+      }
+      
+      // If still no role found, default to 'admin' for backward compatibility
+      // This ensures existing admin accounts still see all tabs
+      console.warn('No role found for user, defaulting to admin for backward compatibility');
+      setUserRole('admin');
+    };
+    
+    fetchUserRole();
+  }, [user]);
 
   // Fetch subscription status
   useEffect(() => {
@@ -52,64 +137,106 @@ export const NavigationProvider = ({ children }) => {
   }, [user, isAuthenticated]);
 
   // Base navigation items configuration
+  // CEO has full access to everything (same as admin)
   const baseNavigationItems = [
     {
       name: 'Dashboard',
       path: '/dashboard',
       icon: 'HomeIcon',
-      permission: null
+      permission: null,
+      roles: ['ceo', 'admin', 'manager', 'employee'] // All roles can access
     },
     {
       name: 'Inventory',
       path: '/inventory',
       icon: 'ArchiveBoxIcon',
-      permission: 'view_inventory'
+      permission: 'view_inventory',
+      roles: ['ceo', 'admin', 'manager', 'employee'] // All roles can access
     },
     {
       name: 'Scanner',
       path: '/scanner',
       icon: 'QrCodeIcon',
-      permission: 'use_scanner'
+      permission: 'use_scanner',
+      roles: ['ceo', 'admin', 'manager', 'employee'] // All roles can scan
     },
     {
       name: 'Product Import',
       path: '/product-import',
       icon: 'ArchiveBoxIcon',
-      permission: 'import_products'
+      permission: 'import_products',
+      roles: ['ceo', 'admin', 'manager'] // CEO, admin and manager can import
     },
     {
       name: 'Reports',
       path: '/reports',
       icon: 'ChartBarIcon',
-      permission: 'view_reports'
+      permission: 'view_reports',
+      roles: ['ceo', 'admin', 'manager'] // CEO, admin and manager can view reports
     },
     {
       name: 'Users',
       path: '/users',
       icon: 'UsersIcon',
       permission: 'manage_users',
-      role: 'admin'
+      roles: ['ceo', 'admin'] // CEO and admin can manage users
     },
     {
       name: 'Settings',
       path: '/settings',
       icon: 'Cog6ToothIcon',
-      permission: 'manage_settings'
+      permission: 'manage_settings',
+      roles: ['ceo', 'admin', 'manager'] // CEO, admin and manager can access settings
     }
   ];
 
+  // Filter navigation items based on user role
+  const filterNavigationByRole = (items) => {
+    // If no role detected, show all items (for backward compatibility with existing admin accounts)
+    if (!userRole) {
+      console.log('No user role detected, showing all navigation items');
+      return items;
+    }
+    
+    // CEO and admin have full access to everything
+    const hasFullAccess = userRole === 'ceo' || userRole === 'admin';
+    
+    return items.filter(item => {
+      // CEO and admin bypass role checks - they get everything
+      if (hasFullAccess) {
+        return true;
+      }
+      
+      // If item has roles array, check if user role is included
+      if (item.roles && Array.isArray(item.roles)) {
+        const hasAccess = item.roles.includes(userRole);
+        if (!hasAccess) {
+          console.log(`Filtering out ${item.name} - user role ${userRole} not in allowed roles:`, item.roles);
+        }
+        return hasAccess;
+      }
+      // If no roles specified, allow access (backward compatibility)
+      return true;
+    });
+  };
+
   // Conditionally add Pricing tab - only show if user doesn't have active subscription
-  const navigationItems = [
-    ...baseNavigationItems.slice(0, 5), // Dashboard through Reports
-    // Only show Pricing if user doesn't have active subscription (trial/incomplete users)
-    ...(!hasActiveSubscription && !subscriptionLoading ? [{
-      name: 'Pricing',
-      path: '/pricing',
-      icon: 'CurrencyDollarIcon',
-      permission: null
-    }] : []),
-    ...baseNavigationItems.slice(5) // Users and Settings
+  // CEO and admins can see pricing (they manage subscriptions)
+  const pricingItem = (!hasActiveSubscription && !subscriptionLoading && (userRole === 'ceo' || userRole === 'admin')) ? [{
+    name: 'Pricing',
+    path: '/pricing',
+    icon: 'CurrencyDollarIcon',
+    permission: null,
+    roles: ['ceo', 'admin']
+  }] : [];
+  
+  // Filter all navigation items by role
+  const allNavigationItems = [
+    ...baseNavigationItems,
+    ...pricingItem
   ];
+  
+  const navigationItems = filterNavigationByRole(allNavigationItems);
 
   // Set current active route
   const setCurrentRoute = (path) => {

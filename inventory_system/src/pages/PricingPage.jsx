@@ -104,7 +104,7 @@ const PricingPage = () => {
       }
     }
 
-    // Check if the current user is an admin
+    // Check if the current user is CEO or admin (both have full access)
     const checkIfAdmin = async () => {
       if (!user) return;
       
@@ -113,8 +113,9 @@ const PricingPage = () => {
         if (session) {
           const { user } = session;
           const appMetadata = user?.app_metadata || {};
-          // Check both app_metadata and user table for admin role
-          const isAdminFromMetadata = appMetadata.roles?.includes('admin') || appMetadata.role === 'admin';
+          // Check both app_metadata and user table for CEO or admin role
+          const userRole = appMetadata.role || appMetadata.roles?.[0];
+          const isAdminFromMetadata = userRole === 'admin' || userRole === 'ceo';
           
           if (!isAdminFromMetadata) {
             // Also check users table
@@ -124,13 +125,14 @@ const PricingPage = () => {
               .eq('id', user.id)
               .maybeSingle();
             
-            setIsAdmin(userProfile?.role === 'admin' || false);
+            const role = userProfile?.role;
+            setIsAdmin(role === 'admin' || role === 'ceo' || false);
           } else {
             setIsAdmin(true);
           }
         }
       } catch (error) {
-        console.error('Error checking admin status:', error);
+        console.error('Error checking admin/CEO status:', error);
       }
     };
     
@@ -139,16 +141,16 @@ const PricingPage = () => {
 
   const handleChoosePlan = async (priceId, planName) => {
     if (!priceId) {
-      toast.error(`The ${planName} plan is not properly configured. Please contact the administrator.`);
+      toast.error(`The ${planName} plan is not properly configured. Please contact the system administrator.`);
       return;
     }
 
     setIsLoading(true);
-    toast.info(`Processing ${planName} plan...`);
+    toast.info(`Processing ${planName} plan subscription. Please wait...`);
 
     // Check if user is authenticated
     if (!user) {
-      toast.error('Please log in to choose a plan.');
+      toast.error('Authentication required. Please log in to select a plan.');
       navigate('/login');
       setIsLoading(false);
       return;
@@ -159,7 +161,7 @@ const PricingPage = () => {
     const token = session?.access_token;
 
     if (!token) {
-      toast.error('Your session has expired. Please log in again.');
+      toast.error('Your session has expired. Please log in again to continue.');
       navigate('/login');
       setIsLoading(false);
       return;
@@ -191,12 +193,12 @@ const PricingPage = () => {
         
         // Special handling for price ID errors
         if (errorMsg.includes('No such price') || errorMsg.includes('Invalid price')) {
-          toast.error(`Invalid price configuration for ${planName} plan. Please contact the administrator.`);
+          toast.error(`Invalid price configuration for ${planName} plan. Please contact the system administrator.`);
           console.error(`The price ID "${priceId}" does not exist in your Stripe account.`);
         } else if (errorMsg.includes('Stripe not configured') || errorMsg.includes('Server configuration error')) {
-          toast.error('Payment system is not configured. Please contact support.');
+          toast.error('Payment system is not configured. Please contact support for assistance.');
         } else {
-          toast.error(`Failed to start checkout: ${errorMsg}`);
+          toast.error(`Failed to initiate checkout process: ${errorMsg}`);
         }
         setIsLoading(false);
         return;

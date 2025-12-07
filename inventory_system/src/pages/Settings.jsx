@@ -138,12 +138,12 @@ const Settings = () => {
   // Handle manage subscription (Stripe Customer Portal)
   const handleManageSubscription = async () => {
     setIsManagingSubscription(true);
-    toast.info('Redirecting to customer portal...');
+    toast.info('Redirecting to customer portal. Please wait...');
     
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
-        toast.error('Please log in again');
+        toast.error('Your session has expired. Please log in again.');
         navigate('/login');
         return;
       }
@@ -160,11 +160,11 @@ const Settings = () => {
       if (response.ok && data.portal_url) {
         window.location.href = data.portal_url;
       } else {
-        toast.error(data.error || 'Failed to open customer portal.');
+        toast.error(data.error || 'Failed to open customer portal. Please try again.');
       }
     } catch (error) {
       console.error('Portal error:', error);
-      toast.error('An error occurred.');
+      toast.error('An unexpected error occurred. Please try again.');
     } finally {
       setIsManagingSubscription(false);
     }
@@ -176,7 +176,7 @@ const Settings = () => {
   const handleDarkModeToggle = () => {
     const newMode = !darkMode;
     setDarkMode(newMode);
-    toast.success(`Theme switched to ${newMode ? 'dark' : 'light'} mode`);
+    toast.success(`Theme has been switched to ${newMode ? 'dark' : 'light'} mode.`);
   };
 
   // Toggle auto scan
@@ -184,7 +184,7 @@ const Settings = () => {
     const newValue = !autoScan;
     setAutoScan(newValue);
     localStorage.setItem('autoScan', newValue.toString());
-    toast.success(`Auto scan ${newValue ? 'enabled' : 'disabled'}`);
+    toast.success(`Auto scan feature has been ${newValue ? 'enabled' : 'disabled'}.`);
   };
 
   // Save notification settings
@@ -192,7 +192,7 @@ const Settings = () => {
     localStorage.setItem('emailNotifications', emailNotifications.toString());
     localStorage.setItem('stockAlerts', stockAlerts.toString());
     localStorage.setItem('activityUpdates', activityUpdates.toString());
-    toast.success('Notification preferences saved');
+    toast.success('Notification preferences have been saved successfully.');
   };
 
   // Handle password reset

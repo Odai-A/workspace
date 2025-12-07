@@ -141,6 +141,7 @@ PLAN_CONFIG = {
         'monthly_price': 150.00,
         'included_scans': 1000,
         'overage_rate': 0.11,
+        'max_users': 1,  # Basic plan allows 1 user
         'base_price_id': STRIPE_BASIC_PLAN_PRICE_ID,
         'usage_price_id': STRIPE_BASIC_USAGE_PRICE_ID,
     },
@@ -149,6 +150,7 @@ PLAN_CONFIG = {
         'monthly_price': 300.00,
         'included_scans': 5000,
         'overage_rate': 0.11,
+        'max_users': 3,  # Pro plan allows 3 users
         'base_price_id': STRIPE_PRO_PLAN_PRICE_ID,
         'usage_price_id': STRIPE_PRO_USAGE_PRICE_ID,
     },
@@ -157,6 +159,7 @@ PLAN_CONFIG = {
         'monthly_price': 500.00,
         'included_scans': 20000,
         'overage_rate': 0.11,
+        'max_users': 5,  # Entrepreneur plan allows 5 users
         'base_price_id': STRIPE_ENTREPRENEUR_PLAN_PRICE_ID,
         'usage_price_id': STRIPE_ENTREPRENEUR_USAGE_PRICE_ID,
     },
@@ -168,6 +171,83 @@ def get_plan_config_by_price_id(price_id):
         if config['base_price_id'] == price_id:
             return plan_id, config
     return None, None
+
+def get_tenant_plan_and_limit(tenant_id):
+    """
+    Get the current subscription plan and user limit for a tenant.
+    Returns (plan_id, plan_config, max_users) or (None, None, None) if no active subscription.
+    """
+    try:
+        if not tenant_id or not stripe.api_key:
+            return None, None, None
+        
+        subscription_info = get_tenant_subscription_info(tenant_id)
+        if not subscription_info:
+            return None, None, None
+        
+        subscription = subscription_info.get('subscription')
+        if not subscription:
+            return None, None, None
+        
+        # Check if subscription is active
+        status = subscription_info.get('status') or getattr(subscription, 'status', None)
+        if status not in ['active', 'trialing', 'past_due']:
+            return None, None, None
+        
+        # Determine plan type from subscription items
+        plan_id = None
+        for item in subscription.items.data:
+            price_id = item.price.id
+            found_plan_id, _ = get_plan_config_by_price_id(price_id)
+            if found_plan_id:
+                plan_id = found_plan_id
+                break
+        
+        if not plan_id:
+            return None, None, None
+        
+        plan_config = PLAN_CONFIG[plan_id]
+        max_users = plan_config.get('max_users', 0)
+        
+        return plan_id, plan_config, max_users
+    except Exception as e:
+        logger.error(f"Error getting tenant plan for {tenant_id}: {e}")
+        return None, None, None
+
+def count_tenant_users(tenant_id):
+    """
+    Count the number of users in a tenant by checking all users' app_metadata.
+    This ensures we count all users, including those who haven't scanned anything yet.
+    """
+    try:
+        if not tenant_id or not supabase_admin:
+            return 0
+        
+        # Count by checking all users in users table and verifying their tenant_id
+        try:
+            users_res = supabase_admin.from_('users').select('id').execute()
+            tenant_user_count = 0
+            if users_res.data:
+                for user_record in users_res.data:
+                    user_id = user_record.get('id')
+                    if user_id:
+                        try:
+                            user_res = supabase_admin.auth.admin.get_user_by_id(user_id)
+                            if user_res and hasattr(user_res, 'user'):
+                                user = user_res.user
+                                app_meta = getattr(user, 'app_metadata', getattr(user, 'raw_app_meta_data', {}))
+                                if app_meta and app_meta.get('tenant_id') == tenant_id:
+                                    tenant_user_count += 1
+                        except Exception as e:
+                            logger.debug(f"Error checking user {user_id} tenant_id: {e}")
+                            continue
+            return tenant_user_count
+        except Exception as e:
+            logger.warning(f"Error counting users from users table: {e}")
+            return 0
+    except Exception as e:
+        logger.error(f"Error counting users for tenant {tenant_id}: {e}")
+        return 0
 
 
 def tenant_has_paid_subscription(tenant_id):
@@ -1090,61 +1170,32 @@ def inventory_list():
 # 3. Use the RLS-aware `supabase` client for all data interactions with tenant-specific tables.
 #    The RLS policies on your Supabase tables will handle the data isolation.
 #
-# Example placeholder for upload:
-@app.route('/upload', methods=['GET', 'POST'])
-def upload_csv():
-    user_id, tenant_id = get_ids_from_request()
-    if not tenant_id:
-        # For GET, redirect to login/pricing. For POST, return 403.
-        if request.method == 'POST':
-            return jsonify({"error": "Access denied. Tenant not identified."}), 403
-        else: # GET request
-            # Assuming you have a frontend route for this, or redirect to login
-            return render_template('upload.html', error_message="Access Denied. Please log in.")
-
-
-    # TODO: Check tenant subscription status before allowing upload
-    # tenant_q = supabase_admin.table('tenants').select('subscription_status').eq('id', tenant_id).single().execute()
-    # if not tenant_q.data or tenant_q.data['subscription_status'] not in ['active', 'trialing']:
-    #     return jsonify({"error": "Access denied. Subscription is not active."}), 403
-
-
-    if request.method == 'POST':
-        if 'csvfile' not in request.files:
-            flash('No file part', 'danger') # flash might not be visible if frontend is pure React
-            return jsonify({"error": "No file part in request"}), 400
-        
-        file = request.files['csvfile']
-        if file.filename == '':
-            flash('No selected file', 'danger')
-            return jsonify({"error": "No file selected"}), 400
-
-        if file and file.filename.endswith('.csv'):
-            try:
-                # Read CSV, for each row, add tenant_id before inserting
-                # df = pd.read_csv(file, dtype=str, encoding='utf-8') or 'latin1'
-                # items_to_insert = []
-                # for _, row in df.iterrows():
-                #    item = { ... map columns ... , "tenant_id": tenant_id }
-                #    items_to_insert.append(item)
-                # if items_to_insert:
-                #    insert_res = supabase.table('manifest_data').insert(items_to_insert).execute()
-                #    if insert_res.error: raise Exception(insert_res.error.message)
-                # flash('CSV processed and data added for your tenant.', 'success')
-                logger.info(f"CSV upload attempt by tenant {tenant_id}. Processing logic to be implemented fully.")
-                return jsonify({"message": "CSV processing logic needs full implementation with tenant_id."}), 200 # Placeholder
-            except Exception as e:
-                logger.error(f"Error processing CSV for tenant {tenant_id}: {e}")
-                # db.session.rollback() # If using SQLAlchemy transactions
-                flash(f'Error processing CSV: {str(e)}', 'danger')
-                return jsonify({"error": f"Error processing CSV: {str(e)}"}), 500
-        else:
-            flash('Invalid file type. Please upload a CSV file.', 'danger')
-            return jsonify({"error": "Invalid file type. Must be CSV."}), 400
-
-    # For GET request, render the upload form (if still using Flask templates for this)
-    # Or this endpoint might be API-only, and React handles the form.
-    return render_template('upload.html')
+# OLD HTML TEMPLATE ROUTE - COMMENTED OUT (React frontend uses /api/import/batch instead)
+# The /api/import/batch endpoint handles CSV imports properly with tenant_id
+# @app.route('/upload', methods=['GET', 'POST'])
+# def upload_csv():
+#     user_id, tenant_id = get_ids_from_request()
+#     if not tenant_id:
+#         if request.method == 'POST':
+#             return jsonify({"error": "Access denied. Tenant not identified."}), 403
+#         else:
+#             return render_template('upload.html', error_message="Access Denied. Please log in.")
+#     if request.method == 'POST':
+#         if 'csvfile' not in request.files:
+#             return jsonify({"error": "No file part in request"}), 400
+#         file = request.files['csvfile']
+#         if file.filename == '':
+#             return jsonify({"error": "No file selected"}), 400
+#         if file and file.filename.endswith('.csv'):
+#             try:
+#                 logger.info(f"CSV upload attempt by tenant {tenant_id}. Use /api/import/batch instead.")
+#                 return jsonify({"message": "Please use /api/import/batch endpoint for CSV imports."}), 200
+#             except Exception as e:
+#                 logger.error(f"Error processing CSV for tenant {tenant_id}: {e}")
+#                 return jsonify({"error": f"Error processing CSV: {str(e)}"}), 500
+#         else:
+#             return jsonify({"error": "Invalid file type. Must be CSV."}), 400
+#     return render_template('upload.html')
 
 # ============================================================================
 # HELPER FUNCTIONS FOR CSV IMPORT
@@ -1323,9 +1374,10 @@ def batch_import():
         batch_number = data.get('batch', 0)
         csv_headers = data.get('headers', [])
         
-        # CSV column mapping (lowercase headers from frontend)
+        # CSV column mapping - handle both raw CSV rows and pre-normalized data from frontend
         def get_value(row, key):
-            """Get value from row, trying various case variations"""
+            """Get value from row, trying various case variations and field names"""
+            # Direct key match
             if key in row:
                 return row[key]
             # Try lowercase
@@ -1337,6 +1389,22 @@ def batch_import():
             # Try title case
             if key.title() in row:
                 return row[key.title()]
+            # Try common variations
+            variations = {
+                'fnsku': ['fnsku', 'fn_sku', 'fn-sku', 'sku'],
+                'asin': ['asin', 'b00_asin', 'b00-asin'],
+                'lpn': ['lpn', 'x-z_asin', 'x-z-asin', 'xz_asin'],
+                'upc': ['upc', 'barcode', 'ean', 'gtin'],
+                'product_name': ['product_name', 'name', 'title', 'description', 'item_name', 'item_desc'],
+                'price': ['price', 'retail', 'msrp', 'cost', 'unit_price'],
+                'category': ['category', 'type', 'department'],
+                'quantity': ['quantity', 'qty', 'units', 'count'],
+                'brand': ['brand', 'manufacturer', 'vendor']
+            }
+            if key in variations:
+                for var in variations[key]:
+                    if var in row:
+                        return row[var]
             return None
         
         # Process each row
@@ -1347,7 +1415,8 @@ def batch_import():
         
         for idx, csv_row in enumerate(items):
             try:
-                # Extract and normalize identifiers
+                # Extract values - frontend may send pre-normalized data or raw CSV rows
+                # Check if data is already normalized (has clean field names)
                 raw_fnsku = get_value(csv_row, 'fnsku')
                 raw_asin = get_value(csv_row, 'asin')
                 raw_lpn = get_value(csv_row, 'lpn')
@@ -1355,6 +1424,8 @@ def batch_import():
                 raw_product_name = get_value(csv_row, 'product_name') or get_value(csv_row, 'name') or get_value(csv_row, 'description')
                 raw_price = get_value(csv_row, 'price')
                 raw_category = get_value(csv_row, 'category')
+                raw_brand = get_value(csv_row, 'brand')
+                raw_quantity = get_value(csv_row, 'quantity')
                 
                 # Normalize identifiers
                 normalized = normalize_identifiers(
@@ -1380,15 +1451,27 @@ def batch_import():
                 if fnsku or asin:
                     # IMPORTANT: All objects must have the same keys for bulk insert
                     # Keep all keys even if None (PostgREST requirement)
+                    # Clean price: convert to string if numeric, handle None
+                    price_str = None
+                    if raw_price is not None:
+                        if isinstance(raw_price, (int, float)):
+                            price_str = str(raw_price)
+                        else:
+                            try:
+                                price_str = str(float(raw_price))
+                            except (ValueError, TypeError):
+                                price_str = None
+                    
                     product_data = {
                         'fnsku': fnsku,
                         'asin': asin,
                         'upc': upc,
                         'title': raw_product_name,
-                        'brand': None,  # Always include, even if None
+                        'brand': raw_brand,  # Use brand from CSV if available
                         'category': raw_category,
                         'image': None,  # Always include, even if None
-                        'price': str(raw_price) if raw_price else None
+                        'price': price_str,
+                        'tenant_id': tenant_id  # Add tenant_id for multi-tenancy
                     }
                     products_to_insert.append(product_data)
                 
@@ -1396,15 +1479,27 @@ def batch_import():
                 if lpn:
                     # Map to manifest_data table columns
                     # IMPORTANT: All objects must have the same keys for bulk insert
+                    # Clean price: convert to string if numeric, handle None
+                    msrp_str = None
+                    if raw_price is not None:
+                        if isinstance(raw_price, (int, float)):
+                            msrp_str = str(raw_price)
+                        else:
+                            try:
+                                msrp_str = str(float(raw_price))
+                            except (ValueError, TypeError):
+                                msrp_str = None
+                    
                     manifest_row = {
                         'X-Z ASIN': lpn,  # LPN goes in "X-Z ASIN" column
                         'Fn Sku': fnsku,
                         'B00 Asin': asin,
                         'Description': raw_product_name,
-                        'MSRP': str(raw_price) if raw_price else None,
+                        'MSRP': msrp_str,
                         'Category': raw_category,
                         'UPC': upc,
-                        'user_id': user_id  # Required for RLS
+                        'user_id': user_id,  # Required for RLS
+                        'tenant_id': tenant_id  # Add tenant_id for multi-tenancy
                     }
                     manifest_data_to_insert.append(manifest_row)
                 
@@ -1421,10 +1516,10 @@ def batch_import():
         products_inserted = 0
         if products_to_insert:
             try:
-                # Deduplicate products by (fnsku, asin) before inserting
+                # Deduplicate products by (fnsku, asin, tenant_id) before inserting
                 unique_products = {}
                 for product in products_to_insert:
-                    key = (product.get('fnsku'), product.get('asin'))
+                    key = (product.get('fnsku'), product.get('asin'), product.get('tenant_id'))
                     if key not in unique_products:
                         unique_products[key] = product
                 
@@ -1599,65 +1694,57 @@ def batch_import():
             "message": str(e)
         }), 500
 
-@app.route('/search', methods=['GET'])
-def search():
-    query = request.args.get('query', '').strip()
-    product = None
-    search_performed = bool(query) # True if query is not empty
+# OLD HTML TEMPLATE ROUTES - COMMENTED OUT (React frontend handles routing)
+# These routes conflict with React Router and are no longer used
+# @app.route('/search', methods=['GET'])
+# def search():
+#     query = request.args.get('query', '').strip()
+#     product = None
+#     search_performed = bool(query)
+#     if query:
+#         product = Product.query.filter(
+#             (Product.lpn == query) |
+#             (Product.asin == query) |
+#             (Product.fnsku == query)
+#         ).first()
+#         if product:
+#             try:
+#                 history_entry = ScanHistory(product_id=product.id)
+#                 db.session.add(history_entry)
+#                 db.session.commit()
+#             except Exception as e:
+#                 db.session.rollback()
+#                 print(f"Error logging scan history: {e}")
+#     return render_template('search.html', product=product, search_performed=search_performed)
 
-    if query:
-        # Search by LPN, ASIN, or FNSKU
-        product = Product.query.filter(
-            (Product.lpn == query) |
-            (Product.asin == query) |
-            (Product.fnsku == query)
-        ).first()
+# @app.route('/inventory')
+# def inventory():
+#     search_query = request.args.get('search_query', '').strip()
+#     page = request.args.get('page', 1, type=int)
+#     per_page = 25
+#     query = Product.query
+#     if search_query:
+#         search_term = f"%{search_query}%"
+#         query = query.filter(
+#             Product.lpn.ilike(search_term) |
+#             Product.title.ilike(search_term) |
+#             Product.asin.ilike(search_term) |
+#             Product.fnsku.ilike(search_term)
+#         )
+#     pagination = query.order_by(Product.title).paginate(page=page, per_page=per_page, error_out=False)
+#     products_on_page = pagination.items
+#     return render_template('inventory.html', 
+#                            products=products_on_page, 
+#                            pagination=pagination, 
+#                            search_query=search_query)
 
-        if product:
-            # Log this successful search to history
-            try:
-                history_entry = ScanHistory(product_id=product.id)
-                db.session.add(history_entry)
-                db.session.commit()
-            except Exception as e:
-                db.session.rollback()
-                print(f"Error logging scan history: {e}") # Log to server console
-    
-    return render_template('search.html', product=product, search_performed=search_performed)
+# @app.route('/scan')
+# def scan_barcode():
+#     return render_template('scan.html')
 
-@app.route('/inventory')
-def inventory():
-    search_query = request.args.get('search_query', '').strip()
-    page = request.args.get('page', 1, type=int) # Get current page number, default to 1
-    per_page = 25  # Number of items per page
-
-    query = Product.query
-
-    if search_query:
-        search_term = f"%{search_query}%"
-        query = query.filter(
-            Product.lpn.ilike(search_term) |
-            Product.title.ilike(search_term) |
-            Product.asin.ilike(search_term) |
-            Product.fnsku.ilike(search_term)
-        )
-    
-    # Use paginate instead of .all()
-    pagination = query.order_by(Product.title).paginate(page=page, per_page=per_page, error_out=False)
-    products_on_page = pagination.items
-    
-    return render_template('inventory.html', 
-                           products=products_on_page, 
-                           pagination=pagination, 
-                           search_query=search_query)
-
-@app.route('/scan')
-def scan_barcode():
-    return render_template('scan.html')
-
-@app.route('/external-scan')
-def external_scan():
-    return render_template('external_scan.html')
+# @app.route('/external-scan')
+# def external_scan():
+#     return render_template('external_scan.html')
 
 @app.route('/api/external-lookup', methods=['POST'])
 def external_lookup():
@@ -2696,7 +2783,8 @@ def scan_product():
                                     'category': category,
                                     'image': all_images[0] if all_images else None,
                                     'price': str(price) if price else None,
-                                    'upc': upc if upc else None
+                                    'upc': upc if upc else None,
+                                    'tenant_id': tenant_id  # Add tenant_id for multi-tenancy
                                 }
                                 product_data = {k: v for k, v in product_data.items() if v is not None}
                                 
@@ -2712,7 +2800,7 @@ def scan_product():
                                             "Prefer": "resolution=ignore"  # ON CONFLICT DO NOTHING
                                         }
                                         requests.post(url, headers=headers, json=product_data, timeout=10)
-                                        logger.info(f"✅ Saved to products table: ASIN {asin}")
+                                        logger.info(f"✅ Saved to products table: ASIN {asin}, tenant_id: {tenant_id}")
                                 except Exception as product_save_error:
                                     logger.warning(f"Error saving to products table: {str(product_save_error)}")
                                 
@@ -4243,21 +4331,19 @@ def scan_product():
             "message": f"Error performing scan: {str(e)}"
         }), 500
 
-@app.route('/dashboard')
-def dashboard():
-    total_products = Product.query.count()
-    total_scans = ScanHistory.query.count()
-    # You could add more sophisticated stats here later, e.g., scans today, unique items scanned, etc.
-    return render_template('dashboard.html', 
-                           total_products=total_products, 
-                           total_scans=total_scans)
+# OLD HTML TEMPLATE ROUTES - COMMENTED OUT (React frontend handles routing)
+# @app.route('/dashboard')
+# def dashboard():
+#     total_products = Product.query.count()
+#     total_scans = ScanHistory.query.count()
+#     return render_template('dashboard.html', 
+#                            total_products=total_products, 
+#                            total_scans=total_scans)
 
-@app.route('/history')
-def scan_history_list():
-    # Fetch history, ordering by most recent, joining with Product to get details
-    # Limit to a reasonable number, e.g., last 50 scans, for performance
-    history_items = ScanHistory.query.join(Product).order_by(ScanHistory.scanned_at.desc()).limit(50).all()
-    return render_template('history.html', history_items=history_items)
+# @app.route('/history')
+# def scan_history_list():
+#     history_items = ScanHistory.query.join(Product).order_by(ScanHistory.scanned_at.desc()).limit(50).all()
+#     return render_template('history.html', history_items=history_items)
 
 # ===== MARKETPLACE API ENDPOINTS =====
 
@@ -4528,6 +4614,44 @@ def upload_shopify_image():
         }), 500
 
 # --- User Management Endpoints ---
+@app.route('/api/users/limits', methods=['GET'])
+def get_user_limits():
+    """Get the current user count and limit for the tenant"""
+    try:
+        user_id, tenant_id = get_ids_from_request()
+        if not user_id:
+            return jsonify({'error': 'Unauthorized'}), 401
+        
+        if not tenant_id:
+            return jsonify({
+                'current_count': 0,
+                'max_users': 0,
+                'plan': None,
+                'has_subscription': False
+            }), 200
+        
+        plan_id, plan_config, max_users = get_tenant_plan_and_limit(tenant_id)
+        current_count = count_tenant_users(tenant_id)
+        is_paid = tenant_has_paid_subscription(tenant_id)
+        
+        return jsonify({
+            'current_count': current_count,
+            'max_users': max_users if max_users else 0,
+            'plan': plan_config.get('name') if plan_config else None,
+            'plan_id': plan_id,
+            'has_subscription': is_paid,
+            'can_add_users': is_paid and (max_users is None or current_count < max_users)
+        }), 200
+    except Exception as e:
+        logger.error(f"Error getting user limits: {e}")
+        return jsonify({
+            'current_count': 0,
+            'max_users': 0,
+            'plan': None,
+            'has_subscription': False,
+            'error': str(e)
+        }), 200
+
 @app.route('/api/users', methods=['GET'])
 def list_users():
     """List all users with their scan statistics"""
@@ -4650,6 +4774,66 @@ def create_user():
         if not supabase_admin:
             return jsonify({'error': 'Admin client not configured'}), 500
 
+        # Ensure admin has a tenant_id - create one if they don't
+        if not tenant_id:
+            logger.info(f"Admin user {user_id} doesn't have tenant_id, creating tenant...")
+            try:
+                # Get admin user email for tenant name
+                admin_user_res = supabase_admin.auth.admin.get_user_by_id(user_id)
+                admin_email = admin_user_res.user.email if hasattr(admin_user_res, 'user') else None
+                tenant_name = f"{admin_email}'s Organization" if admin_email else f"Organization for {user_id[:8]}"
+                
+                # Create tenant
+                tenant_res = supabase_admin.table('tenants').insert({"name": tenant_name}).execute()
+                if not tenant_res.data or not tenant_res.data[0]:
+                    raise Exception("Failed to create tenant")
+                
+                new_tenant_id = tenant_res.data[0]['id']
+                logger.info(f"Created tenant {new_tenant_id} for admin {user_id}")
+                
+                # Update admin user's app_metadata with tenant_id
+                supabase_admin.auth.admin.update_user_by_id(
+                    user_id,
+                    {'app_metadata': {'tenant_id': new_tenant_id, 'role': 'admin'}}
+                )
+                
+                tenant_id = new_tenant_id
+                logger.info(f"Updated admin user {user_id} with tenant_id {tenant_id}")
+            except Exception as tenant_error:
+                logger.error(f"Error creating tenant for admin: {tenant_error}")
+                return jsonify({'error': f'Failed to create tenant for admin: {str(tenant_error)}'}), 500
+
+        # Check user limit based on subscription plan
+        plan_id, plan_config, max_users = get_tenant_plan_and_limit(tenant_id)
+        
+        if plan_id and max_users:
+            # Count current users in tenant
+            current_user_count = count_tenant_users(tenant_id)
+            logger.info(f"Tenant {tenant_id} ({plan_id} plan): {current_user_count}/{max_users} users")
+            
+            if current_user_count >= max_users:
+                plan_name = plan_config.get('name', plan_id.capitalize())
+                return jsonify({
+                    'error': f'User limit reached',
+                    'message': f'Your {plan_name} plan allows up to {max_users} user(s). You currently have {current_user_count} user(s). Please upgrade your plan to add more users.',
+                    'current_count': current_user_count,
+                    'max_users': max_users,
+                    'plan': plan_name
+                }), 403
+        else:
+            # No active subscription - check if this is a free trial
+            # For free trial, we might want to allow 1 user (the admin)
+            # Or we could require a paid plan to add users
+            # Let's require a paid plan to add users
+            is_paid = tenant_has_paid_subscription(tenant_id)
+            if not is_paid:
+                return jsonify({
+                    'error': 'Subscription required',
+                    'message': 'A paid subscription plan is required to add users. Please subscribe to a plan first.',
+                    'current_count': count_tenant_users(tenant_id),
+                    'max_users': 0
+                }), 403
+
         # Create user
         try:
             response = supabase_admin.auth.admin.create_user({
@@ -4663,7 +4847,7 @@ def create_user():
                 },
                 'app_metadata': {
                     'role': role,
-                    'tenant_id': tenant_id  # Associate with tenant
+                    'tenant_id': tenant_id  # Associate with tenant - all employees share same tenant
                 }
             })
 

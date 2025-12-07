@@ -3,24 +3,21 @@ import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
 import { ToastContainer } from 'react-toastify';
 import { useAuth } from './contexts/AuthContext';
 import { NavigationProvider } from './contexts/NavigationContext';
+import ErrorBoundary from './components/ErrorBoundary';
 import 'react-toastify/dist/ReactToastify.css';
 import './index.css'
-// import InventoryDisplay from './components/InventoryDisplay' // Removed - debug component showing raw JSON
 
 // Pages
 import Home from './pages/Home';
 import Dashboard from './pages/Dashboard';
 import Inventory from './pages/Inventory';
 import Reports from './pages/Reports';
-// import Scanner from './pages/Scanner'; // Commenting out the old Page-based scanner
-import Scanner from './components/Scanner'; // This is the advanced scanner with external API
+import Scanner from './components/Scanner';
 import Settings from './pages/Settings';
 import Profile from './pages/Profile';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import Users from './pages/Users';
-// import ScanTasks from './pages/ScanTasks'; // REMOVED
-// import ScanTaskDetail from './pages/ScanTaskDetail'; // REMOVED
 import ProductImport from './pages/ProductImport';
 import PricingPage from './pages/PricingPage';
 import CustomerDashboardPage from './pages/CustomerDashboardPage';
@@ -43,7 +40,7 @@ function App() {
   }
   
   return (
-    <>
+    <ErrorBoundary>
       <ToastContainer
         position="top-right"
         autoClose={3000}
@@ -79,7 +76,6 @@ function App() {
               <Route path="profile" element={<Profile />} />
               <Route path="users" element={<Users />} />
               <Route path="pricing" element={<PricingPage />} />
-              {/* <Route path="scan-tasks" element={<ScanTasks />} /> */}
               <Route path="product-import" element={<ProductImport />} />
             </Route>
             
@@ -88,7 +84,7 @@ function App() {
           </Routes>
         </NavigationProvider>
       </Router>
-    </>
+    </ErrorBoundary>
   );
 }
 

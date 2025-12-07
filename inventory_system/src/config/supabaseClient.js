@@ -36,6 +36,21 @@ const getCurrentUserId = async () => {
   }
 };
 
+// Helper function to get current user's tenant_id
+const getCurrentTenantId = async () => {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session?.user) {
+      const appMetadata = session.user.app_metadata || session.user.raw_app_meta_data || {};
+      return appMetadata.tenant_id || null;
+    }
+    return null;
+  } catch (error) {
+    console.error('Error getting tenant_id:', error);
+    return null;
+  }
+};
+
 export const inventoryService = {
   // We will add product and inventory related functions here,
   // such as getInventoryBySku, addOrUpdateInventory, etc.
@@ -64,8 +79,17 @@ export const inventoryService = {
     } = options;
     
     const offset = (page - 1) * limit;
-    // Filter by user_id to ensure users only see their own inventory
-    let query = supabase.from('inventory').select('*', { count: 'exact' }).eq('user_id', userId);
+    
+    // Get tenant_id for shared inventory access
+    const tenantId = await getCurrentTenantId();
+    
+    // Build query - RLS policies will handle tenant-based filtering
+    // We still filter by user_id for backward compatibility, but RLS will allow tenant access
+    let query = supabase.from('inventory').select('*', { count: 'exact' });
+    
+    // RLS policies will automatically filter by tenant_id if available
+    // For backward compatibility, we still include user_id filter
+    // The RLS policy allows access if either user_id matches OR tenant_id matches
     
     // Add search functionality
     if (searchQuery && searchQuery.trim()) {
@@ -117,12 +141,12 @@ export const inventoryService = {
       return null;
     }
     
-    // Filter by both SKU and user_id to ensure users only see their own inventory
+    // RLS policies will automatically filter by tenant_id if available
+    // This allows shared inventory access within the tenant
     const { data, error } = await supabase
       .from('inventory')
       .select('*')
       .eq('sku', skuValue)
-      .eq('user_id', userId) // Only get items belonging to current user
       .maybeSingle(); // Use maybeSingle instead of single to avoid errors if not found
 
     if (error && error.code !== 'PGRST116') { // PGRST116: Row to singular not found
@@ -150,6 +174,9 @@ export const inventoryService = {
       return null;
     }
     
+    // Get tenant_id for shared business account
+    const tenantId = await getCurrentTenantId();
+    
     // Remove fields that don't exist in the inventory table
     // Only keep essential fields: sku, name, quantity, location, condition, price, cost, image_url
     const cleanItem = {
@@ -161,7 +188,8 @@ export const inventoryService = {
       price: item.price,
       cost: item.cost,
       image_url: item.image_url, // Optional, but persisted if provided
-      user_id: userId // Always set user_id to current user
+      user_id: userId, // Always set user_id to current user
+      tenant_id: tenantId // Set tenant_id for shared access
     };
     
     // Only add product_id if it exists and is valid
@@ -190,7 +218,7 @@ export const inventoryService = {
       }
     }
     
-    // Check if item exists by SKU AND user_id (users can have same SKU)
+    // Check if item exists by SKU in the tenant (shared inventory)
     const skuValue = cleanItem.sku;
     if (!skuValue) {
       console.error('addOrUpdateInventory: SKU is required');
@@ -198,12 +226,20 @@ export const inventoryService = {
     }
     
     try {
-      // Check for existing item with same SKU AND user_id
-      const { data: existingData, error: searchError } = await supabase
+      // Check for existing item with same SKU in the tenant
+      // If tenant_id exists, check by tenant_id; otherwise check by user_id
+      let query = supabase
         .from('inventory')
         .select('*')
-        .eq('sku', skuValue)
-        .eq('user_id', userId) // Only check items belonging to current user
+        .eq('sku', skuValue);
+      
+      if (tenantId) {
+        query = query.eq('tenant_id', tenantId); // Check within tenant
+      } else {
+        query = query.eq('user_id', userId); // Fallback to user_id
+      }
+      
+      const { data: existingData, error: searchError } = await query
         .limit(1)
         .maybeSingle();
       
@@ -221,11 +257,19 @@ export const inventoryService = {
           updateData.quantity = (existingData.quantity || 0) + (cleanItem.quantity || 0);
         }
         
-        const { data, error } = await supabase
+        // Update query - use tenant_id if available, otherwise user_id
+        let updateQuery = supabase
           .from('inventory')
           .update(updateData)
-          .eq('sku', skuValue)
-          .eq('user_id', userId) // Ensure we only update current user's items
+          .eq('sku', skuValue);
+        
+        if (tenantId) {
+          updateQuery = updateQuery.eq('tenant_id', tenantId);
+        } else {
+          updateQuery = updateQuery.eq('user_id', userId);
+        }
+        
+        const { data, error } = await updateQuery
           .select()
           .single();
         

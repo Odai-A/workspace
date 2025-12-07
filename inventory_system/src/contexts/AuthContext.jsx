@@ -55,13 +55,39 @@ export const AuthProvider = ({ children }) => {
     const fetchSession = async () => {
       try {
         const { data: { session: currentSession }, error } = await supabase.auth.getSession();
-        if (error) throw error;
-        setSession(currentSession);
-        setUser(currentSession?.user ?? null);
-        logAuthState('init-success', { userId: currentSession?.user?.id });
+        
+        // Handle refresh token errors gracefully - these are common when tokens are expired/invalid
+        if (error) {
+          // If it's a refresh token error, clear the invalid session silently
+          if (error.message?.includes('Refresh Token') || error.message?.includes('refresh_token')) {
+            console.log('🔄 Invalid refresh token detected, clearing session...');
+            // Clear invalid session from storage
+            try {
+              await supabase.auth.signOut({ scope: 'local' });
+            } catch (signOutError) {
+              // Ignore sign out errors - we're just cleaning up
+            }
+            setSession(null);
+            setUser(null);
+            logAuthState('init-no-session', { reason: 'invalid_refresh_token' });
+          } else {
+            // For other errors, log them but don't throw
+            console.warn('AuthProvider: Session fetch warning:', error.message);
+            setSession(null);
+            setUser(null);
+            logAuthState('init-no-session', { error: error.message });
+          }
+        } else {
+          setSession(currentSession);
+          setUser(currentSession?.user ?? null);
+          logAuthState('init-success', { userId: currentSession?.user?.id });
+        }
       } catch (error) {
-        console.error('AuthProvider: Error fetching initial session:', error);
-        logAuthState('init-no-session');
+        // Catch any unexpected errors
+        console.warn('AuthProvider: Error fetching initial session:', error.message);
+        setSession(null);
+        setUser(null);
+        logAuthState('init-no-session', { error: error.message });
       } finally {
         setLoading(false);
       }
@@ -72,9 +98,16 @@ export const AuthProvider = ({ children }) => {
     const { data: authListener } = supabase.auth.onAuthStateChange(
       async (_event, newSession) => {
         console.log('AuthProvider: onAuthStateChange event:', _event);
+        
+        // Suppress refresh token errors in the console - they're handled gracefully
+        if (_event === 'SIGNED_OUT' && !newSession) {
+          // This is expected when clearing invalid sessions
+          console.log('🔄 Session cleared (this is normal if refresh token was invalid)');
+        }
+        
         setSession(newSession);
         setUser(newSession?.user ?? null);
-        logAuthState('auth-state-change', { newSession });
+        logAuthState('auth-state-change', { event: _event, hasSession: !!newSession });
         setLoading(false); // Ensure loading is false after auth state changes
       }
     );
@@ -105,7 +138,7 @@ export const AuthProvider = ({ children }) => {
       console.error('❌', errorMsg);
       console.error('Current URL:', supabaseUrl ? supabaseUrl.substring(0, 30) + '...' : 'MISSING');
       console.error('Current Key:', supabaseAnonKey ? supabaseAnonKey.substring(0, 20) + '...' : 'MISSING');
-      toast.error(errorMsg + ' Check the browser console for details.');
+      toast.error('Supabase is not configured. Please add your Supabase credentials to the environment configuration file. Check the browser console for additional details.');
       return { success: false, error: errorMsg };
     }
     
@@ -124,11 +157,11 @@ export const AuthProvider = ({ children }) => {
       
       console.log('✅ Sign in successful!', { userId: data.user?.id, email: data.user?.email });
       // setUser and setSession will be handled by onAuthStateChange
-      toast.success('Signed in successfully!');
+      toast.success('Authentication successful. You have been signed in.');
       return { success: true, user: data.user, session: data.session };
     } catch (error) {
       console.error('❌ Error signing in:', error);
-      const errorMessage = error.message || 'Failed to sign in. Please check your credentials.';
+      const errorMessage = error.message || 'Authentication failed. Please verify your credentials and try again.';
       toast.error(errorMessage);
       logAuthState('signin-exception', { error });
       return { success: false, error: errorMessage };
@@ -154,14 +187,14 @@ export const AuthProvider = ({ children }) => {
       // but data.session will be null until confirmation.
       // onAuthStateChange will update user state upon confirmation and login.
       if (data.user && !data.session) {
-        toast.info('Sign up successful! Please check your email to confirm your account.');
+        toast.info('Registration completed successfully. Please check your email to confirm your account.');
       } else if (data.user && data.session) {
-        toast.success('Sign up successful and signed in!');
+        toast.success('Registration completed successfully. You have been signed in.');
       }
       return { success: true, user: data.user, session: data.session };
     } catch (error) {
       console.error('Error signing up:', error.message);
-      toast.error(error.message || 'Failed to sign up.');
+      toast.error(error.message || 'Registration failed. Please verify your information and try again.');
       logAuthState('signup-exception', { error });
       return { success: false, error: error.message };
     } finally {
@@ -237,10 +270,38 @@ export const AuthProvider = ({ children }) => {
 
   // Check if user has a specific role
   const hasRole = (role) => {
-    // console.log('Role check:', role, 'User:', user);
-    // TODO: Implement actual role logic (e.g., based on user.app_metadata.roles)
-    // Example: return user?.app_metadata?.roles?.includes(role);
-    return true; // Defaulting to true for now
+    if (!user || !session) return false;
+    
+    // Get user role from session or user object
+    const sessionUser = session?.user || user;
+    const appMetadata = sessionUser.app_metadata || sessionUser.raw_app_meta_data || {};
+    const userMetadata = sessionUser.user_metadata || sessionUser.raw_user_meta_data || {};
+    const userRole = appMetadata.role || userMetadata.role;
+    
+    // CEO has all roles (full access)
+    if (userRole === 'ceo') {
+      return true;
+    }
+    
+    // Check if user has the requested role
+    return userRole === role;
+  };
+
+  // Helper to get tenant_id from user's app_metadata
+  const getTenantId = () => {
+    if (!user || !session) return null;
+    // Check app_metadata from session or user object
+    // Supabase stores it in different places depending on how it's accessed
+    const appMetadata = 
+      session?.user?.app_metadata || 
+      session?.user?.raw_app_meta_data ||
+      user?.app_metadata || 
+      user?.raw_app_meta_data ||
+      user?.user_metadata?.app_metadata;
+    
+    // tenant_id might be a string UUID, so handle both string and object access
+    const tenantId = appMetadata?.tenant_id;
+    return tenantId || null;
   };
 
   // Value object to be provided to consumers
@@ -249,6 +310,7 @@ export const AuthProvider = ({ children }) => {
     session, // Expose session if needed
     loading,
     isAuthenticated: !!user && !!session, // Let's make this dependent on session too
+    tenantId: getTenantId(), // Expose tenant_id for multi-tenant support
     signIn,
     signUp,
     signOut,

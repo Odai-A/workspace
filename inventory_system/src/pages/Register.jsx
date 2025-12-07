@@ -17,17 +17,17 @@ const Register = () => {
     
     // Form validation
     if (!email || !password || !confirmPassword) {
-      toast.error('Please fill in all fields');
+      toast.error('Please complete all required fields.');
       return;
     }
     
     if (password !== confirmPassword) {
-      toast.error('Passwords do not match');
+      toast.error('The passwords entered do not match. Please verify and try again.');
       return;
     }
     
     if (password.length < 6) {
-      toast.error('Password must be at least 6 characters long');
+      toast.error('Password must contain at least 6 characters.');
       return;
     }
     
@@ -37,14 +37,14 @@ const Register = () => {
       const { success, error } = await signUp(email, password);
       
       if (success) {
-        toast.success('Registration successful! Please check your email for confirmation');
+        toast.success('Registration completed successfully. Please check your email for confirmation instructions.');
         navigate('/login');
       } else {
-        toast.error(error || 'Failed to register');
+        toast.error(error || 'Registration failed. Please verify your information and try again.');
       }
     } catch (error) {
       console.error('Registration error:', error);
-      toast.error('An unexpected error occurred');
+      toast.error('An unexpected error occurred during registration. Please try again.');
     } finally {
       setIsSubmitting(false);
     }

@@ -266,7 +266,7 @@ const Inventory = () => {
     } catch (err) {
       console.error('Error loading inventory:', err);
       setError('Failed to load inventory data');
-      toast.error('Failed to load inventory data');
+      toast.error('Failed to load inventory data. Please try again.');
       setProducts([]);
       setTotalItems(0);
     } finally {
@@ -590,7 +590,7 @@ const Inventory = () => {
   // Reset filters
   const handleResetFilters = () => {
     setSearchTerm('');
-    toast.info('Filters have been reset');
+    toast.info('Filters have been reset to default values.');
   };
 
   // Export to CSV
@@ -631,10 +631,10 @@ const Inventory = () => {
       link.click();
       document.body.removeChild(link);
       
-      toast.success('Inventory data has been exported to CSV');
+      toast.success('Inventory data has been exported to CSV successfully.');
     } catch (error) {
       console.error('Error exporting inventory:', error);
-      toast.error('Failed to export inventory data');
+      toast.error('Failed to export inventory data. Please try again.');
     }
   };
 
@@ -684,7 +684,7 @@ const Inventory = () => {
           });
           
           addedItems.push(updatedItem);
-          toast.info(`Updated quantity for existing item: ${newItem.Description}`);
+          toast.info(`Quantity updated for existing item: ${newItem.Description}`);
         } else {
           // Add new inventory item
           const inventoryData = {
@@ -709,10 +709,10 @@ const Inventory = () => {
       fetchInventory();
       
       // Show success message
-      toast.success(`Added ${addedItems.length} items to inventory`);
+      toast.success(`Successfully added ${addedItems.length} items to inventory.`);
     } catch (error) {
       console.error('Error adding inventory items:', error);
-      toast.error('Failed to add items to inventory. Please try again.');
+      toast.error('Failed to add items to inventory. Please verify the data and try again.');
     }
   };
 

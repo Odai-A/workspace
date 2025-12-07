@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../config/supabaseClient';
+import { getApiEndpoint } from '../utils/apiConfig';
 import PageHeader from '../components/ui/PageHeader';
 import Button from '../components/ui/Button';
 import Card from '../components/ui/Card';
@@ -32,11 +33,41 @@ function Users() {
     role: 'employee'
   });
   const { user: currentUser } = useAuth();
+  const [userLimits, setUserLimits] = useState({
+    current_count: 0,
+    max_users: 0,
+    plan: null,
+    can_add_users: false
+  });
 
   // Fetch users from Supabase
   useEffect(() => {
     fetchUsers();
+    fetchUserLimits();
   }, []);
+
+  // Fetch user limits
+  const fetchUserLimits = async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+
+      const response = await fetch(getApiEndpoint('/users/limits'), {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`
+        }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setUserLimits(data);
+      }
+    } catch (error) {
+      console.error('Error fetching user limits:', error);
+    }
+  };
 
   const fetchUsers = async () => {
     setIsLoading(true);
@@ -56,9 +87,9 @@ function Users() {
         
         // If RLS blocks access, provide helpful guidance
         if (usersError.code === '42501') {
-          toast.error('❌ Permission denied. Make sure your user has admin role in the users table. Check RLS policies in Supabase.', { autoClose: 10000 });
+          toast.error('Permission denied. Please ensure your account has administrator privileges. Verify Row Level Security policies in Supabase if the issue persists.', { autoClose: 10000 });
         } else {
-          toast.error(`Failed to load users: ${usersError.message}`);
+          toast.error(`Failed to load user list: ${usersError.message}`);
         }
         throw usersError;
       }
@@ -67,7 +98,7 @@ function Users() {
 
       if (!usersData || usersData.length === 0) {
         console.warn('No users found in users table');
-        toast.info('ℹ️ No users found. Add your first employee to get started.', { autoClose: 3000 });
+        toast.info('No users found. Please add your first employee to begin.', { autoClose: 3000 });
         setUsers([]);
         setIsLoading(false);
         return;
@@ -91,7 +122,7 @@ function Users() {
       
       // Don't show duplicate error toast if we already showed one above
       if (error.code !== '42501') {
-        toast.error(`Failed to load users: ${error.message || 'Unknown error'}`);
+        toast.error(`Failed to load user list: ${error.message || 'An unknown error occurred'}`);
       }
     } finally {
       setIsLoading(false);
@@ -160,135 +191,58 @@ function Users() {
   // Handle add user
   const handleAddUser = async () => {
     if (!newUser.email || !newUser.password || !newUser.firstName) {
-      toast.error('Please fill in all required fields');
+      toast.error('Please complete all required fields.');
       return;
     }
 
     try {
-      console.log('Creating user:', newUser.email);
+      console.log('Creating user via backend API:', newUser.email);
       
-      // Create user in Supabase Auth directly
-      // The trigger should automatically create a profile in the users table
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email: newUser.email,
-        password: newUser.password,
-        options: {
-          data: {
-            first_name: newUser.firstName,
-            last_name: newUser.lastName,
-            role: newUser.role // Put in user_metadata for trigger
-          },
-          emailRedirectTo: window.location.origin
-        }
+      // Get the current session token for authentication
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        toast.error('Authentication required. Please log in to create users.');
+        return;
+      }
+
+      // Use backend API to create user with admin privileges
+      // This auto-confirms the user so they can log in immediately
+      const response = await fetch(getApiEndpoint('/users'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`
+        },
+        body: JSON.stringify({
+          email: newUser.email,
+          password: newUser.password,
+          firstName: newUser.firstName,
+          lastName: newUser.lastName,
+          role: newUser.role || 'employee'
+        })
       });
 
-      if (authError) {
-        console.error('Auth error:', authError);
-        throw authError;
+      const result = await response.json();
+
+      if (!response.ok) {
+        // Show specific error message from backend (e.g., user limit reached)
+        const errorMessage = result.message || result.error || `Failed to create user: ${response.statusText}`;
+        toast.error(errorMessage, { autoClose: 6000 });
+        throw new Error(errorMessage);
       }
 
-      console.log('Auth data:', authData);
-
-      if (authData.user) {
-        console.log('User created in auth, ID:', authData.user.id);
-        
-        // Wait for trigger to create profile (trigger runs asynchronously)
-        let retries = 0;
-        const maxRetries = 10;
-        let profileCreated = false;
-        
-        while (retries < maxRetries && !profileCreated) {
-          await new Promise(resolve => setTimeout(resolve, 500));
-          
-          // Check if profile exists
-          const { data: existingProfile, error: checkError } = await supabase
-            .from('users')
-            .select('id')
-            .eq('id', authData.user.id)
-            .maybeSingle();
-          
-          if (existingProfile) {
-            console.log('Profile found, updating role');
-            profileCreated = true;
-            
-            // Update the role in the users table
-            const { error: profileError } = await supabase
-              .from('users')
-              .update({
-                role: newUser.role,
-                first_name: newUser.firstName,
-                last_name: newUser.lastName
-              })
-              .eq('id', authData.user.id);
-
-            if (profileError) {
-              console.error('Error updating profile:', profileError);
-              toast.warning('User created but role update failed. Please update manually.');
-            } else {
-              console.log('Profile updated successfully');
-            }
-          } else if (checkError) {
-            console.error('Error checking profile:', checkError);
-          } else {
-            console.log(`Profile not found yet, retry ${retries + 1}/${maxRetries}`);
-          }
-          
-          retries++;
-        }
-        
-        if (!profileCreated) {
-          console.warn('⚠️ Profile was not created by trigger after', maxRetries, 'retries');
-          console.warn('Attempting manual creation...');
-          
-          // Try to create manually as fallback
-          const { data: insertedData, error: insertError } = await supabase
-            .from('users')
-            .insert({
-              id: authData.user.id,
-              email: newUser.email,
-              first_name: newUser.firstName,
-              last_name: newUser.lastName,
-              role: newUser.role
-            })
-            .select()
-            .single();
-          
-          if (insertError) {
-            console.error('❌ Error creating profile manually:', insertError);
-            console.error('Error details:', {
-              code: insertError.code,
-              message: insertError.message,
-              details: insertError.details,
-              hint: insertError.hint
-            });
-            
-            // Provide helpful error message
-            if (insertError.code === '42501') {
-              toast.error('Permission denied. Please check RLS policies. You may need to run the migration script.');
-            } else if (insertError.code === '23505') {
-              toast.warning('User profile may already exist. Refreshing list...');
-              await fetchUsers();
-            } else {
-              toast.error(`Profile creation failed: ${insertError.message}. Check console for details.`);
-            }
-          } else {
-            console.log('✅ Profile created manually:', insertedData);
-            toast.success('User profile created successfully!');
-          }
-        }
-
-        toast.success('User created successfully. They will receive an email confirmation.');
-        setShowAddModal(false);
-        setNewUser({ email: '', password: '', firstName: '', lastName: '', role: 'employee' });
-        
-        // Refresh users list
-        await fetchUsers();
-      } else {
-        throw new Error('Failed to create user - no user data returned');
-      }
+      console.log('✅ User created successfully via backend API');
+      toast.success(`Employee account created successfully. The employee may now log in using the email address: ${newUser.email}`);
+      
+      setShowAddModal(false);
+      setNewUser({ email: '', password: '', firstName: '', lastName: '', role: 'employee' });
+      
+      // Refresh users list and limits
+      await fetchUsers();
+      await fetchUserLimits();
     } catch (error) {
       console.error('Error creating user:', error);
-      toast.error(`Failed to create user: ${error.message}`);
+      toast.error(`Failed to create user account: ${error.message}`);
     }
   };
 
@@ -312,16 +266,16 @@ function Users() {
       // Update password if provided (requires admin API, which we can't use from client)
       // For password updates, you'll need to use Supabase Edge Functions or have users reset their own passwords
       if (editingUser.newPassword) {
-        toast.info('Password updates require admin access. Users can reset their own passwords via email.');
+        toast.info('Password updates require administrator access. Users may reset their own passwords via email.');
       }
 
-      toast.success('User updated successfully');
+      toast.success('User account updated successfully.');
       setShowEditModal(false);
       setEditingUser(null);
       fetchUsers();
     } catch (error) {
       console.error('Error updating user:', error);
-      toast.error(`Failed to update user: ${error.message}`);
+      toast.error(`Failed to update user account: ${error.message}`);
     }
   };
 
@@ -332,7 +286,7 @@ function Users() {
     }
 
     if (userId === currentUser?.id) {
-      toast.error('You cannot delete your own account');
+      toast.error('You cannot delete your own account. Please contact an administrator for assistance.');
       return;
     }
 
@@ -346,11 +300,11 @@ function Users() {
 
       if (error) throw error;
 
-      toast.success('User profile deleted. Note: Auth user deletion requires admin access.');
+      toast.success('User profile deleted successfully. Note: Authentication user deletion requires administrator access.');
       fetchUsers();
     } catch (error) {
       console.error('Error deleting user:', error);
-      toast.error(`Failed to delete user: ${error.message}`);
+      toast.error(`Failed to delete user account: ${error.message}`);
     }
   };
 
@@ -364,11 +318,11 @@ function Users() {
 
       if (error) throw error;
 
-      toast.success('User role updated successfully');
+      toast.success('User role updated successfully.');
       fetchUsers();
     } catch (error) {
       console.error('Error updating role:', error);
-      toast.error(`Failed to update role: ${error.message}`);
+      toast.error(`Failed to update user role: ${error.message}`);
     }
   };
 
@@ -421,11 +375,23 @@ function Users() {
         <div>
           <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Users & Employees</h1>
           <p className="text-gray-600 dark:text-gray-400 mt-1">Manage your team members and their roles</p>
+          {userLimits.max_users > 0 && (
+            <p className="text-sm text-gray-500 dark:text-gray-500 mt-1">
+              {userLimits.current_count} / {userLimits.max_users} users used
+              {userLimits.plan && ` (${userLimits.plan} plan)`}
+            </p>
+          )}
+          {!userLimits.has_subscription && userLimits.max_users === 0 && (
+            <p className="text-sm text-amber-600 dark:text-amber-400 mt-1">
+              A paid subscription is required to add users
+            </p>
+          )}
         </div>
         <Button
           variant="primary"
           onClick={() => setShowAddModal(true)}
           className="mt-4 md:mt-0 flex items-center"
+          disabled={!userLimits.can_add_users}
         >
           <PlusIcon className="h-5 w-5 mr-2" />
           Add Employee
@@ -626,6 +592,21 @@ function Users() {
                   <option value="manager">Manager</option>
                   <option value="admin">Admin</option>
                 </select>
+              </div>
+              
+              {/* Login Instructions */}
+              <div className="mt-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md">
+                <p className="text-sm text-blue-800 dark:text-blue-200 font-medium mb-1">📧 Login Instructions for Employee:</p>
+                <p className="text-xs text-blue-700 dark:text-blue-300">
+                  After creating this employee, they can log in immediately at the <strong>/login</strong> page using:
+                </p>
+                <ul className="text-xs text-blue-700 dark:text-blue-300 mt-1 ml-4 list-disc">
+                  <li>Email: The email address you enter above</li>
+                  <li>Password: The password you set above</li>
+                </ul>
+                <p className="text-xs text-blue-600 dark:text-blue-400 mt-2 italic">
+                  No email confirmation required - they can log in right away!
+                </p>
               </div>
             </div>
             <div className="mt-6 flex justify-end space-x-3">

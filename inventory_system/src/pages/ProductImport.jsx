@@ -2,9 +2,78 @@ import React, { useState, useRef } from 'react';
 import { toast } from 'react-toastify';
 import Button from '../components/ui/Button';
 import Card from '../components/ui/Card';
-import { ArrowUpTrayIcon } from '@heroicons/react/24/outline';
+import { ArrowUpTrayIcon, CheckCircleIcon, XCircleIcon, InformationCircleIcon } from '@heroicons/react/24/outline';
 import { supabase } from '../config/supabaseClient';
 import { getApiEndpoint } from '../utils/apiConfig';
+
+// Comprehensive column mapping - maps common variations to standard field names
+const COLUMN_MAPPINGS = {
+  fnsku: [
+    'fnsku', 'fn sku', 'fn-sku', 'fnsku #', 'fnsku#', 'fnsku number',
+    'sku', 'skus', 'sku #', 'sku#', 'sku number', 'sku id', 'sku id #',
+    'fba sku', 'fba-sku', 'amazon sku', 'amazon-sku',
+    'product sku', 'product-sku', 'item sku', 'item-sku',
+    'merchant sku', 'merchant-sku', 'seller sku', 'seller-sku'
+  ],
+  asin: [
+    'asin', 'asins', 'asin #', 'asin#', 'asin number',
+    'b00 asin', 'b00-asin', 'b00asin',
+    'amazon asin', 'amazon-asin', 'amazon product id',
+    'product asin', 'product-asin'
+  ],
+  lpn: [
+    'lpn', 'lpns', 'lpn #', 'lpn#', 'lpn number',
+    'x-z asin', 'x-z-asin', 'xz asin', 'xz-asin',
+    'license plate', 'license plate number',
+    'tracking number', 'tracking #', 'tracking#',
+    'shipment id', 'shipment-id', 'shipment identifier'
+  ],
+  upc: [
+    'upc', 'upcs', 'upc #', 'upc#', 'upc number', 'upc code',
+    'barcode', 'barcodes', 'barcode #', 'barcode#',
+    'ean', 'eans', 'ean #', 'ean#', 'ean number',
+    'gtin', 'gtins', 'gtin #', 'gtin#',
+    'product code', 'product-code', 'item code', 'item-code'
+  ],
+  name: [
+    'name', 'product name', 'product-name', 'product title', 'product-title',
+    'item name', 'item-name', 'item description', 'item-desc', 'itemdesc',
+    'description', 'descriptions', 'product description', 'product-desc',
+    'title', 'titles', 'product title', 'product-title',
+    'item', 'items', 'item name', 'item-name',
+    'gl desc', 'gl-desc', 'gldesc', 'gl description',
+    'product', 'products', 'product name', 'product-name'
+  ],
+  price: [
+    'price', 'prices', 'unit price', 'unit-price', 'unitprice',
+    'retail', 'retail price', 'retail-price', 'retailprice',
+    'msrp', 'msrp price', 'msrp-price',
+    'cost', 'costs', 'unit cost', 'unit-cost', 'unitcost',
+    'selling price', 'selling-price', 'sellingprice',
+    'list price', 'list-price', 'listprice',
+    'amount', 'amounts', 'value', 'values'
+  ],
+  category: [
+    'category', 'categories', 'product category', 'product-category',
+    'item category', 'item-category', 'itemcategory',
+    'type', 'types', 'product type', 'product-type',
+    'department', 'departments', 'dept', 'depts',
+    'classification', 'classifications', 'class', 'classes'
+  ],
+  quantity: [
+    'quantity', 'quantities', 'qty', 'qtys', 'qty.', 'qty #', 'qty#',
+    'units', 'unit', 'unit count', 'unit-count', 'unitcount',
+    'count', 'counts', 'amount', 'amounts',
+    'stock', 'stocks', 'stock quantity', 'stock-quantity',
+    'inventory', 'inventories', 'inventory quantity', 'inventory-quantity',
+    'available', 'available quantity', 'available-quantity'
+  ],
+  brand: [
+    'brand', 'brands', 'brand name', 'brand-name', 'brandname',
+    'manufacturer', 'manufacturers', 'manufacturer name', 'manufacturer-name',
+    'maker', 'makers', 'vendor', 'vendors', 'supplier', 'suppliers'
+  ]
+};
 
 // Helper function to parse a single CSV line, handling quoted fields
 const parseCSVLine = (line) => {
@@ -31,75 +100,34 @@ const parseCSVLine = (line) => {
   return result;
 };
 
-// Accepted column name variations with priority order (higher priority first)
-const ACCEPTED_FNSKU_COLUMNS = [
-  'fnsku',
-  'sku',
-  'FNSKU',
-  'SKU',
-  'Sku',
-  'FNSKU #',
-  'fn sku',
-  'Fn Sku',
-  'FnSku',
-  'FNSku'
-];
-
-const ACCEPTED_ASIN_COLUMNS = [
-  'asin',
-  'ASIN',
-  'B00 ASIN',
-  'ASIN #',
-  'asin #',
-  'Asin',
-  'B00 Asin'
-];
-
-// Helper to normalize strings for comparison (remove extra spaces, handle special chars)
+// Normalize string for comparison (remove spaces, special chars, case-insensitive)
 const normalizeForComparison = (str) => {
+  if (!str) return '';
   return str.toLowerCase()
     .trim()
     .replace(/\s+/g, ' ')  // Multiple spaces to single space
-    .replace(/[#]/g, '')   // Remove # symbols
-    .replace(/[-_]/g, '')  // Remove dashes and underscores
+    .replace(/[#\-_]/g, '')  // Remove #, -, _
     .trim();
 };
 
-// Helper to find matching column in headers (case-insensitive, with priority)
-const findMatchingColumn = (headers, acceptedColumns) => {
-  // First, try exact matches in priority order
-  for (const acceptedCol of acceptedColumns) {
+// Find matching column in headers
+const findMatchingColumn = (headers, acceptedVariations) => {
+  // First, try exact matches (case-insensitive)
+  for (const acceptedCol of acceptedVariations) {
     for (const header of headers) {
-      if (header === acceptedCol) {
+      if (normalizeForComparison(header) === normalizeForComparison(acceptedCol)) {
         return header;
       }
     }
   }
   
-  // Then try case-insensitive exact matches in priority order
-  for (const acceptedCol of acceptedColumns) {
-    const lowerAccepted = acceptedCol.toLowerCase().trim();
-    for (const header of headers) {
-      const lowerHeader = header.toLowerCase().trim();
-      if (lowerHeader === lowerAccepted) {
-        return header;
-      }
-    }
-  }
-  
-  // Finally, try normalized matches (handles variations with #, spaces, dashes, etc.)
-  for (const acceptedCol of acceptedColumns) {
+  // Then try partial matches (one contains the other)
+  for (const acceptedCol of acceptedVariations) {
     const normalizedAccepted = normalizeForComparison(acceptedCol);
     for (const header of headers) {
       const normalizedHeader = normalizeForComparison(header);
       
-      // Check if normalized strings match or one contains the other
-      if (normalizedHeader === normalizedAccepted) {
-        return header;
-      }
-      
-      // For partial matches, check if one is a substring of the other
-      // (e.g., "B00 ASIN" matches "ASIN")
+      // Check if one contains the other (for variations like "Product Name" vs "Name")
       if (normalizedAccepted.length >= 3 && normalizedHeader.length >= 3) {
         if (normalizedHeader.includes(normalizedAccepted) || 
             normalizedAccepted.includes(normalizedHeader)) {
@@ -112,55 +140,99 @@ const findMatchingColumn = (headers, acceptedColumns) => {
   return null;
 };
 
-// Normalize CSV row into the format used for your inventory import
-// Now uses column mapping from detected headers
-const normalizeItemForSupabase = (csvRowObject, columnMap) => {
-  // Helper to convert empty strings to null
-  const toNullIfEmpty = (value) => {
-    if (value === undefined || value === null || value === '') return null;
-    const str = String(value).trim();
-    return str === '' ? null : str;
-  };
-
-  // Get values using mapped column names
-  const internalFnsku = columnMap.fnskuColumn 
-    ? toNullIfEmpty(csvRowObject[columnMap.fnskuColumn])
-    : null;
+// Auto-detect column mappings from CSV headers
+const detectColumnMappings = (headers) => {
+  const mappings = {};
   
-  const internalAsin = columnMap.asinColumn
-    ? toNullIfEmpty(csvRowObject[columnMap.asinColumn])
-    : null;
-
-  const normalized = {
-    lpn: toNullIfEmpty(csvRowObject['LPN'] || csvRowObject['X-Z ASIN'] || csvRowObject['XZ ASIN'] || csvRowObject['Lpn']),
-    fnsku: internalFnsku,
-    asin: internalAsin,
-    name: csvRowObject['ItemDesc'] || csvRowObject['GLDesc'] || csvRowObject['Description'] || csvRowObject['Name'] || null,
-    description: csvRowObject['ItemDesc'] || csvRowObject['GLDesc'] || csvRowObject['Description'] || null,
-    price: csvRowObject['Retail'] ? parseFloat(String(csvRowObject['Retail']).replace(/[^0-9.-]+/g, "")) : null,
-    category: csvRowObject['Category'] || null,
-    upc: toNullIfEmpty(csvRowObject['UPC'] || csvRowObject['Upc']),
-    quantity: csvRowObject['Units'] ? parseInt(String(csvRowObject['Units']).replace(/[^0-9.-]+/g, ""), 10) : null,
-  };
-
-  // Ensure numeric fields that failed parsing are null
-  if (normalized.price !== null && isNaN(normalized.price)) {
-    console.warn("Price normalization resulted in NaN for item:", csvRowObject, "Original Retail:", csvRowObject['Retail']);
-    normalized.price = null;
-  }
-  if (normalized.quantity !== null && isNaN(normalized.quantity)) {
-    console.warn("Quantity normalization resulted in NaN for item:", csvRowObject, "Original Units:", csvRowObject['Units']);
-    normalized.quantity = null;
-  }
-  
-  // Ensure all keys we care about are at least null if not present in csvRowObject
-  const essentialKeys = ['lpn', 'fnsku', 'asin', 'name', 'description', 'price', 'category', 'upc', 'quantity'];
-  essentialKeys.forEach(key => {
-    if (normalized[key] === undefined) {
-      normalized[key] = null;
+  for (const [fieldName, variations] of Object.entries(COLUMN_MAPPINGS)) {
+    const matchedColumn = findMatchingColumn(headers, variations);
+    if (matchedColumn) {
+      mappings[fieldName] = matchedColumn;
     }
-  });
+  }
+  
+  return mappings;
+};
 
+// Clean and normalize data values
+const cleanValue = (value, fieldType = 'text') => {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+  
+  let cleaned = String(value).trim();
+  
+  if (cleaned === '' || cleaned.toLowerCase() === 'n/a' || cleaned.toLowerCase() === 'na') {
+    return null;
+  }
+  
+  // Remove common prefixes/suffixes
+  cleaned = cleaned.replace(/^["']|["']$/g, ''); // Remove surrounding quotes
+  
+  switch (fieldType) {
+    case 'number':
+    case 'price':
+    case 'quantity':
+      // Remove currency symbols, commas, and other non-numeric chars except decimal point
+      cleaned = cleaned.replace(/[^0-9.-]/g, '');
+      if (cleaned === '' || cleaned === '-') return null;
+      const num = parseFloat(cleaned);
+      return isNaN(num) ? null : num;
+    
+    case 'text':
+    case 'name':
+    case 'description':
+    case 'category':
+    case 'brand':
+      // Clean text: remove extra spaces, normalize
+      cleaned = cleaned.replace(/\s+/g, ' ').trim();
+      return cleaned === '' ? null : cleaned;
+    
+    case 'identifier':
+    case 'fnsku':
+    case 'asin':
+    case 'lpn':
+    case 'upc':
+      // Clean identifiers: uppercase, remove spaces and special chars
+      cleaned = cleaned.toUpperCase().replace(/\s+/g, '').replace(/[^A-Z0-9]/g, '');
+      return cleaned === '' ? null : cleaned;
+    
+    default:
+      return cleaned === '' ? null : cleaned;
+  }
+};
+
+// Map CSV row to normalized format using column mappings
+const mapRowToNormalized = (csvRow, columnMappings) => {
+  const getValue = (fieldName) => {
+    const mappedColumn = columnMappings[fieldName];
+    if (!mappedColumn || !csvRow[mappedColumn]) {
+      return null;
+    }
+    return csvRow[mappedColumn];
+  };
+  
+  // Determine field types for cleaning
+  const fieldTypes = {
+    fnsku: 'identifier',
+    asin: 'identifier',
+    lpn: 'identifier',
+    upc: 'identifier',
+    name: 'text',
+    price: 'price',
+    category: 'text',
+    quantity: 'quantity',
+    brand: 'text'
+  };
+  
+  const normalized = {};
+  
+  for (const fieldName of Object.keys(COLUMN_MAPPINGS)) {
+    const value = getValue(fieldName);
+    const fieldType = fieldTypes[fieldName] || 'text';
+    normalized[fieldName] = cleanValue(value, fieldType);
+  }
+  
   return normalized;
 };
 
@@ -169,16 +241,89 @@ const ProductImport = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [importProgress, setImportProgress] = useState(0);
   const [totalRows, setTotalRows] = useState(0);
+  const [showPreview, setShowPreview] = useState(false);
+  const [csvHeaders, setCsvHeaders] = useState([]);
+  const [csvRows, setCsvRows] = useState([]);
+  const [columnMappings, setColumnMappings] = useState({});
+  const [previewData, setPreviewData] = useState([]);
   const fileInputRef = useRef(null);
 
   const handleFileChange = (event) => {
-    setSelectedFile(event.target.files[0]);
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    setSelectedFile(file);
     setImportProgress(0);
     setTotalRows(0);
+    setShowPreview(false);
+    setCsvHeaders([]);
+    setCsvRows([]);
+    setColumnMappings({});
+    setPreviewData([]);
+    
+    // Auto-parse and show preview
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const csvText = e.target.result;
+        const lines = csvText.split(/\r\n|\n/).filter(line => line.trim() !== '');
+        
+        if (lines.length < 2) {
+          toast.error('The CSV file must contain a header row and at least one data row.');
+          return;
+        }
+        
+        const headerLine = lines[0];
+        const dataLines = lines.slice(1, 11); // Preview first 10 rows
+        
+        const headers = parseCSVLine(headerLine).map(h => h.trim().replace(/^"(.*)"$/, '$1'));
+        const rows = dataLines.map(line => {
+          const values = parseCSVLine(line);
+          const row = {};
+          headers.forEach((header, index) => {
+            row[header] = values[index] || '';
+          });
+          return row;
+        });
+        
+        // Auto-detect column mappings
+        const detectedMappings = detectColumnMappings(headers);
+        
+        setCsvHeaders(headers);
+        setCsvRows(rows);
+        setColumnMappings(detectedMappings);
+        
+        // Generate preview data
+        const preview = rows.map(row => mapRowToNormalized(row, detectedMappings));
+        setPreviewData(preview);
+        setShowPreview(true);
+        
+        toast.success(`File loaded successfully. Detected ${headers.length} columns. Please review the column mapping below.`);
+      } catch (error) {
+        console.error('Error parsing file:', error);
+        toast.error('Failed to parse the CSV file. Please verify the file format and try again.');
+      }
+    };
+    
+    reader.readAsText(file);
+  };
+
+  const handleMappingChange = (fieldName, csvColumn) => {
+    setColumnMappings(prev => ({
+      ...prev,
+      [fieldName]: csvColumn || null
+    }));
+    
+    // Update preview
+    const preview = csvRows.map(row => mapRowToNormalized(row, {
+      ...columnMappings,
+      [fieldName]: csvColumn || null
+    }));
+    setPreviewData(preview);
   };
 
   const handleImport = async () => {
-    if (!selectedFile) {
+      if (!selectedFile) {
       toast.error('Please select a CSV file to import.');
       return;
     }
@@ -186,7 +331,7 @@ const ProductImport = () => {
     setIsLoading(true);
     setImportProgress(0);
     setTotalRows(0);
-    toast.info('Starting product import... This may take a moment.');
+    toast.info('Product import process initiated. This may take a moment.');
 
     const reader = new FileReader();
 
@@ -195,7 +340,7 @@ const ProductImport = () => {
       const lines = csvText.split(/\r\n|\n/).filter(line => line.trim() !== '');
 
       if (lines.length < 2) {
-        toast.error('CSV file must contain a header row and at least one data row.');
+        toast.error('The CSV file must contain a header row and at least one data row.');
         setIsLoading(false);
         return;
       }
@@ -204,50 +349,27 @@ const ProductImport = () => {
       const dataLines = lines.slice(1);
       setTotalRows(dataLines.length);
 
-      // Parse headers using CSV parser to handle quoted fields
-      const headers = parseCSVLine(headerLine).map(header => header.trim().replace(/^"(.*)"$/, '$1'));
-      console.log("Detected CSV Headers:", headers);
-      if(headers.length === 0 || (headers.length === 1 && headers[0] === '')) {
-        toast.error('Could not parse headers from CSV. Please check file format.');
+      const headers = parseCSVLine(headerLine).map(h => h.trim().replace(/^"(.*)"$/, '$1'));
+      
+      // Use detected mappings or fallback to auto-detection
+      const mappings = Object.keys(columnMappings).length > 0 
+        ? columnMappings 
+        : detectColumnMappings(headers);
+
+      // Validate that we have at least one identifier column
+      if (!mappings.fnsku && !mappings.asin && !mappings.lpn) {
+        toast.error('Unable to detect FNSKU, ASIN, or LPN columns. Please map at least one identifier column before proceeding.');
         setIsLoading(false);
         return;
       }
 
-      // STEP 1: Detect and map FNSKU and ASIN columns BEFORE processing rows
-      const fnskuColumn = findMatchingColumn(headers, ACCEPTED_FNSKU_COLUMNS);
-      const asinColumn = findMatchingColumn(headers, ACCEPTED_ASIN_COLUMNS);
-
-      const columnMap = {
-        fnskuColumn: fnskuColumn,
-        asinColumn: asinColumn
-      };
-
-      // Log detected columns for debugging
-      if (fnskuColumn) {
-        console.log(`✅ Detected FNSKU column: "${fnskuColumn}"`);
-      } else {
-        console.warn('⚠️ No FNSKU column detected. Accepted variations:', ACCEPTED_FNSKU_COLUMNS);
-      }
-
-      if (asinColumn) {
-        console.log(`✅ Detected ASIN column: "${asinColumn}"`);
-      } else {
-        console.warn('⚠️ No ASIN column detected. Accepted variations:', ACCEPTED_ASIN_COLUMNS);
-      }
-
-      if (!fnskuColumn && !asinColumn) {
-        toast.error('CSV file must contain at least one FNSKU or ASIN column. Accepted column names: ' + 
-          ACCEPTED_FNSKU_COLUMNS.join(', ') + ' or ' + ACCEPTED_ASIN_COLUMNS.join(', '));
-        setIsLoading(false);
-        return;
-      }
-
-      // STEP 1: Read CSV and split into batches (NO VALIDATION - backend handles it)
       const BATCH_SIZE = 1000;
       const allRows = [];
-      const errorDetails = [];
+      let successCount = 0;
+      let errorCount = 0;
+      let batchNumber = 0;
 
-      // Collect all raw CSV rows (no validation, no normalization)
+      // Process all rows
       for (let i = 0; i < dataLines.length; i++) {
         const line = dataLines[i];
         if (!line.trim()) {
@@ -257,39 +379,47 @@ const ProductImport = () => {
         
         const rowValues = parseCSVLine(line);
         if (rowValues.length !== headers.length) {
-          // Skip malformed rows but don't validate content
           setImportProgress(prev => prev + 1);
           continue;
         }
         
-        // Create raw row object with original CSV headers
-        const csvRowObject = {};
+        const csvRow = {};
         headers.forEach((header, index) => {
-          csvRowObject[header] = rowValues[index];
+          csvRow[header] = rowValues[index] || '';
         });
-
-        // Store row index for error tracking
-        csvRowObject._rowIndex = i + 2;
-        allRows.push(csvRowObject);
+        
+        // Map to normalized format
+        const normalized = mapRowToNormalized(csvRow, mappings);
+        
+        // Validate row has at least one identifier
+        if (!normalized.fnsku && !normalized.asin && !normalized.lpn) {
+          errorCount++;
+          setImportProgress(prev => prev + 1);
+          continue;
+        }
+        
+        allRows.push(normalized);
         setImportProgress(prev => prev + 1);
       }
 
-      // STEP 2: Send raw rows in batches to backend (backend does validation & normalization)
-      let successCount = 0;
-      let errorCount = 0;
-      let batchNumber = 0;
-
+      // Send batches to backend
       const sendBatch = async (batchToSend, batchNum) => {
         try {
-          // Get auth token for API call
           const { data: { session } } = await supabase.auth.getSession();
           const token = session?.access_token;
 
-          // Remove internal tracking field before sending
-          const cleanBatch = batchToSend.map(item => {
-            const { _rowIndex, ...cleanItem } = item;
-            return cleanItem;
-          });
+          // Convert normalized format to backend format
+          const backendItems = batchToSend.map(item => ({
+            fnsku: item.fnsku,
+            asin: item.asin,
+            lpn: item.lpn,
+            upc: item.upc,
+            product_name: item.name,
+            price: item.price,
+            category: item.category,
+            quantity: item.quantity,
+            brand: item.brand
+          }));
 
           const response = await fetch(getApiEndpoint('/import/batch'), {
             method: 'POST',
@@ -298,9 +428,9 @@ const ProductImport = () => {
               'Authorization': token ? `Bearer ${token}` : ''
             },
             body: JSON.stringify({
-              items: cleanBatch,
+              items: backendItems,
               batch: batchNum,
-              headers: headers  // Send headers so backend knows column names
+              headers: Object.values(mappings) // Send mapped headers
             })
           });
 
@@ -310,20 +440,6 @@ const ProductImport = () => {
           }
 
           const result = await response.json();
-          console.log(`✅ Batch ${batchNum} uploaded:`, result);
-
-          // Log error samples if any failures occurred
-          if (result.failed > 0 && result.error_samples && result.error_samples.length > 0) {
-            console.warn(`⚠️ Batch ${batchNum} had ${result.failed} failures. Sample errors:`, result.error_samples);
-            // Store error samples for display
-            result.error_samples.forEach(errMsg => {
-              if (!errorDetails.includes(errMsg)) {
-                errorDetails.push(errMsg);
-              }
-            });
-          }
-
-          // Update counts from batch result
           successCount += result.success || 0;
           errorCount += result.failed || 0;
 
@@ -335,54 +451,39 @@ const ProductImport = () => {
         }
       };
 
-      // Process batches - send raw CSV rows
+      // Process batches
       for (let i = 0; i < allRows.length; i += BATCH_SIZE) {
         batchNumber++;
         const batch = allRows.slice(i, i + BATCH_SIZE);
-        
         await sendBatch(batch, batchNumber);
         
-        // Update progress after each batch
         const processedSoFar = Math.min(i + BATCH_SIZE, allRows.length);
         setImportProgress(processedSoFar);
       }
 
-      // Final progress update
       setImportProgress(dataLines.length);
 
-      let summaryMessage = `Import Complete: ${successCount} saved/updated.`;
-      if (errorCount > 0) summaryMessage += ` ${errorCount} failed.`;
-      
-      // Log import summary
-      if (fnskuColumn || asinColumn) {
-        console.log('📊 Import Summary:', {
-          fnskuColumn: fnskuColumn || 'Not found',
-          asinColumn: asinColumn || 'Not found',
-          totalRows: dataLines.length,
-          batches: batchNumber,
-          processed: successCount,
-          errors: errorCount
-        });
-      }
+      let summaryMessage = `Import completed successfully. ${successCount} items have been imported.`;
+      if (errorCount > 0) summaryMessage += ` ${errorCount} items were skipped due to validation errors.`;
       
       if (errorCount > 0) {
-        toast.error(summaryMessage + (errorDetails.length > 0 ? " Check console for error details." : ""), { autoClose: 10000 });
-        errorDetails.slice(0, 10).forEach(detail => console.warn("Import Error Detail:", detail));
-      } else if (successCount > 0){
+        toast.warning(summaryMessage, { autoClose: 10000 });
+      } else if (successCount > 0) {
         toast.success(summaryMessage);
       } else {
-        toast.warn(summaryMessage || "No data processed.")
+        toast.warn('No data was imported. Please verify your CSV file format and column mappings.');
       }
       
       setIsLoading(false);
       setSelectedFile(null);
+      setShowPreview(false);
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
     };
 
     reader.onerror = () => {
-      toast.error('Failed to read the selected file.');
+      toast.error('Failed to read the selected file. Please ensure the file is not corrupted and try again.');
       setIsLoading(false);
     };
 
@@ -393,11 +494,11 @@ const ProductImport = () => {
     <div className="container mx-auto px-4 py-8">
       <h1 className="text-2xl font-bold mb-6 text-gray-900 dark:text-white">Import Products from CSV</h1>
       
-      <Card className="max-w-xl mx-auto">
+      <Card className="max-w-4xl mx-auto">
         <div className="p-6">
           <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Upload CSV to Inventory</h2>
           
-          <div className="mb-4">
+          <div className="mb-6">
             <label htmlFor="file-upload" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               CSV File
             </label>
@@ -424,6 +525,77 @@ const ProductImport = () => {
             </div>
           </div>
 
+          {/* Column Mapping Preview */}
+          {showPreview && csvHeaders.length > 0 && (
+            <div className="mb-6 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
+              <div className="flex items-start mb-3">
+                <InformationCircleIcon className="h-5 w-5 text-blue-600 dark:text-blue-400 mr-2 mt-0.5" />
+                <div>
+                  <h3 className="text-sm font-medium text-blue-900 dark:text-blue-200">Column Mapping Detected</h3>
+                  <p className="text-xs text-blue-700 dark:text-blue-300 mt-1">
+                    Review and adjust the column mappings below. The system will automatically clean and normalize your data.
+                  </p>
+                </div>
+              </div>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                {Object.keys(COLUMN_MAPPINGS).map(fieldName => (
+                  <div key={fieldName} className="flex items-center">
+                    <label className="text-sm font-medium text-gray-700 dark:text-gray-300 w-24 capitalize">
+                      {fieldName}:
+                    </label>
+                    <select
+                      value={columnMappings[fieldName] || ''}
+                      onChange={(e) => handleMappingChange(fieldName, e.target.value)}
+                      className="flex-1 ml-2 px-3 py-1.5 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-md text-sm focus:ring-indigo-500 focus:border-indigo-500"
+                    >
+                      <option value="">-- Not Mapped --</option>
+                      {csvHeaders.map(header => (
+                        <option key={header} value={header}>{header}</option>
+                      ))}
+                    </select>
+                    {columnMappings[fieldName] && (
+                      <CheckCircleIcon className="h-5 w-5 text-green-500 ml-2" />
+                    )}
+                  </div>
+                ))}
+              </div>
+              
+              {/* Preview Table */}
+              {previewData.length > 0 && (
+                <div className="mt-4">
+                  <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Preview (First {previewData.length} rows):</h4>
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full text-xs border border-gray-300 dark:border-gray-600">
+                      <thead className="bg-gray-100 dark:bg-gray-700">
+                        <tr>
+                          <th className="px-2 py-1 text-left border">FNSKU</th>
+                          <th className="px-2 py-1 text-left border">ASIN</th>
+                          <th className="px-2 py-1 text-left border">LPN</th>
+                          <th className="px-2 py-1 text-left border">Name</th>
+                          <th className="px-2 py-1 text-left border">Price</th>
+                          <th className="px-2 py-1 text-left border">Qty</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {previewData.map((row, idx) => (
+                          <tr key={idx} className="border-t">
+                            <td className="px-2 py-1 border">{row.fnsku || '-'}</td>
+                            <td className="px-2 py-1 border">{row.asin || '-'}</td>
+                            <td className="px-2 py-1 border">{row.lpn || '-'}</td>
+                            <td className="px-2 py-1 border">{row.name || '-'}</td>
+                            <td className="px-2 py-1 border">{row.price || '-'}</td>
+                            <td className="px-2 py-1 border">{row.quantity || '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {isLoading && totalRows > 0 && (
             <div className="mb-4">
               <div className="flex justify-between mb-1">
@@ -434,7 +606,7 @@ const ProductImport = () => {
               </div>
               <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5">
                 <div 
-                  className="bg-blue-600 h-2.5 rounded-full" 
+                  className="bg-blue-600 h-2.5 rounded-full transition-all duration-300" 
                   style={{ width: `${(importProgress / totalRows) * 100}%` }}
                 ></div>
               </div>
@@ -444,7 +616,7 @@ const ProductImport = () => {
           <div className="mt-6">
             <Button
               onClick={handleImport}
-              disabled={isLoading || !selectedFile}
+              disabled={isLoading || !selectedFile || (showPreview && !columnMappings.fnsku && !columnMappings.asin && !columnMappings.lpn)}
               className="w-full flex justify-center items-center"
             >
               {isLoading ? (
@@ -466,4 +638,4 @@ const ProductImport = () => {
   );
 };
 
-export default ProductImport; 
+export default ProductImport;

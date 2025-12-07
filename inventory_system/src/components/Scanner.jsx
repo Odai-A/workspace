@@ -101,9 +101,13 @@ const Scanner = () => {
     };
   }, []);
 
-  // Load scanned codes from localStorage on mount
+  // Load scanned codes from user-specific localStorage on mount
   useEffect(() => {
-    const savedScans = localStorage.getItem('scannedCodes');
+    if (!userId) return;
+    
+    // Use user-specific localStorage key to ensure each user only sees their own scans
+    const userScansKey = `scannedCodes_${userId}`;
+    const savedScans = localStorage.getItem(userScansKey);
     if (savedScans) {
       try {
         const parsed = JSON.parse(savedScans);
@@ -112,7 +116,39 @@ const Scanner = () => {
         console.error('Error loading saved scans:', error);
       }
     }
-  }, []);
+    
+    // Also load recent scans from database (filtered by user_id)
+    const loadRecentScansFromDB = async () => {
+      try {
+        const recentScans = await dbProductLookupService.getRecentScanEvents(20); // Load last 20 scans
+        if (recentScans && recentScans.length > 0) {
+          // Convert database format to scannedCodes format
+          const dbScans = recentScans.map(scan => ({
+            code: scan.scanned_code,
+            timestamp: scan.scanned_at,
+            type: scan.scanned_code?.startsWith('B0') ? 'ASIN' : (scan.scanned_code?.startsWith('X') ? 'FNSKU' : 'UPC'),
+            productInfo: {
+              name: scan.description,
+              asin: scan.asin !== 'N/A' ? scan.asin : null,
+              price: scan.price !== 'N/A' ? parseFloat(scan.price) : null,
+              image_url: scan.image_url || null
+            }
+          }));
+          
+          // Merge with localStorage scans, avoiding duplicates
+          setScannedCodes(prev => {
+            const existingCodes = new Set(prev.map(s => s.code));
+            const newScans = dbScans.filter(s => !existingCodes.has(s.code));
+            return [...newScans, ...prev].slice(0, 50); // Keep max 50 scans
+          });
+        }
+      } catch (error) {
+        console.error('Error loading recent scans from database:', error);
+      }
+    };
+    
+    loadRecentScansFromDB();
+  }, [userId]);
 
   // Fetch scan count on mount and when user changes
   const fetchScanCount = async () => {
@@ -159,14 +195,18 @@ const Scanner = () => {
     }
   }, [userId]);
 
-  // Save scanned codes to localStorage whenever they change
+  // Save scanned codes to user-specific localStorage whenever they change
   useEffect(() => {
+    if (!userId) return;
+    
+    // Use user-specific localStorage key to ensure each user only sees their own scans
+    const userScansKey = `scannedCodes_${userId}`;
     if (scannedCodes.length > 0) {
-      localStorage.setItem('scannedCodes', JSON.stringify(scannedCodes));
+      localStorage.setItem(userScansKey, JSON.stringify(scannedCodes));
     } else {
-      localStorage.removeItem('scannedCodes');
+      localStorage.removeItem(userScansKey);
     }
-  }, [scannedCodes]);
+  }, [scannedCodes, userId]);
 
   // Update scan entry with product info when productInfo is set
   useEffect(() => {
@@ -318,7 +358,7 @@ const Scanner = () => {
       const result = await inventoryService.addOrUpdateInventory(inventoryItem);
       
       if (result) {
-        toast.success(`✅ Auto-added to inventory${existingInventory ? ' (quantity updated)' : ''}`, { autoClose: 2000 });
+        toast.success(`Product automatically added to inventory${existingInventory ? ' (quantity updated)' : ''}.`, { autoClose: 2000 });
         return true;
       } else {
         return false;
@@ -344,11 +384,11 @@ const Scanner = () => {
         // Check if product already exists in queue (by code)
         const exists = prev.some(item => item.code === code);
         if (exists) {
-          toast.info(`Product ${code} already in batch queue`);
+          toast.info(`Product ${code} is already in the batch queue.`);
           return prev;
         }
         const newQueue = [...prev, queueItem];
-        toast.success(`✅ Added to batch queue (${newQueue.length} items)`, { autoClose: 1500 });
+        toast.success(`Product added to batch queue successfully (${newQueue.length} items).`, { autoClose: 1500 });
         return newQueue;
       });
       
@@ -390,7 +430,7 @@ const Scanner = () => {
       // Backend will check cache first and return cached data quickly if available
       // This ensures all scans are properly logged to scan_history for trial tracking
       console.log(`Calling backend /api/scan to log scan and get updated count for code: ${upperCode}`);
-      toast.info("🔍 Scanning product...", {
+      toast.info("Scanning product. Please wait...", {
         autoClose: 2000
       });
       
@@ -416,14 +456,14 @@ const Scanner = () => {
           // Check if we only got one image - if so, fetch all images from Rainforest API
           if (allImages.length === 1 && apiResult.asin && apiResult.source === 'api' && !apiResult.cached) {
             console.log("⚠️ Only one image received, fetching all images from Rainforest API...");
-            toast.info("🔄 Fetching all product images...", { autoClose: 2000 });
+            toast.info("Fetching product images. Please wait...", { autoClose: 2000 });
             
             try {
               const rainforestData = await fetchProductDataFromRainforest(apiResult.asin);
               if (rainforestData && rainforestData.images && rainforestData.images.length > 1) {
                 allImages = rainforestData.images;
                 console.log(`✅ Fetched ${allImages.length} images from Rainforest API`);
-                toast.success(`✅ Found ${allImages.length} product images!`, { autoClose: 3000 });
+                toast.success(`Successfully retrieved ${allImages.length} product images.`, { autoClose: 3000 });
               }
             } catch (error) {
               console.warn("Could not fetch additional images from Rainforest API:", error);
@@ -456,9 +496,9 @@ const Scanner = () => {
           
           // Show appropriate toast based on source
           if (apiResult.cached) {
-            toast.success("✅ Found in cache - No API charge!", { icon: "💚" });
+            toast.success("Product information retrieved from cache. No API charges incurred.", { icon: "💚" });
           } else if (apiResult.source === 'api') {
-            toast.success(`✅ Product scanned successfully! (${allImages.length} images)`, { icon: "💚" });
+            toast.success(`Product scanned successfully. Retrieved ${allImages.length} images.`, { icon: "💚" });
           }
           
           // Set product info - backend already handled everything!
@@ -522,7 +562,7 @@ const Scanner = () => {
                   
                   if (isCEO) {
                     console.error('⚠️ CEO/Admin account received 402 error - backend issue!');
-                    toast.error('⚠️ Backend error: CEO account should have unlimited scanning. Please contact support or try again.', { autoClose: 5000 });
+                    toast.error('Backend error: CEO accounts should have unlimited scanning privileges. Please contact support or try again.', { autoClose: 5000 });
                     return true; // Don't redirect
                   }
                 }
@@ -537,7 +577,7 @@ const Scanner = () => {
                 const used = data.used_scans ?? 'all';
                 const limit = data.limit ?? 50;
                 toast.error(
-                  `🚫 Free trial limit reached: ${used}/${limit} scans used. Redirecting to upgrade...`,
+                  `Free trial limit reached: ${used} of ${limit} scans have been used. Redirecting to upgrade page...`,
                   { autoClose: 3000 }
                 );
                 // Refresh scan count to show updated count
@@ -556,12 +596,12 @@ const Scanner = () => {
             });
           } else {
             const errorMsg = data.message || data.error || "Backend error";
-            toast.error(`❌ ${errorMsg}`, { autoClose: 5000 });
+            toast.error(`${errorMsg}`, { autoClose: 5000 });
           }
         } else if (error.code === 'ECONNABORTED') {
-          toast.error("❌ Request timeout - the scan is taking longer than expected", { autoClose: 5000 });
+          toast.error("Request timeout: The scan operation is taking longer than expected. Please try again.", { autoClose: 5000 });
         } else {
-          toast.error("❌ Failed to connect to backend. Please ensure the backend server is running.", { autoClose: 5000 });
+          toast.error("Failed to connect to the backend server. Please ensure the backend server is running.", { autoClose: 5000 });
         }
       } finally {
         setLoading(false);
@@ -571,19 +611,17 @@ const Scanner = () => {
       
       // Check for specific error types
       if (error.message?.includes('Backend server is not running')) {
-        toast.error("❌ Backend server is not running. Please start the Flask backend server.", {
-          autoClose: 8000,
-          icon: "⚠️"
+        toast.error("Backend server is not running. Please start the Flask backend server to continue.", {
+          autoClose: 8000
         });
       } else if (error.message?.includes('Monthly Limit Reached') || error.message?.includes('limit')) {
-        toast.error("❌ API Monthly Limit Reached. Please upgrade your plan or use the backend server to avoid limits.", {
-          autoClose: 10000,
-          icon: "⚠️"
+        toast.error("API monthly limit has been reached. Please upgrade your plan or use the backend server to avoid limits.", {
+          autoClose: 10000
         });
       } else if (error.message?.includes('External API') || error.message?.includes('Backend API') || error.message?.includes('FNSKU API')) {
-        toast.error(`❌ ${error.message}`, { autoClose: 6000 });
+        toast.error(`${error.message}`, { autoClose: 6000 });
       } else {
-        toast.error("❌ Error looking up product by code: " + (error.message || 'Unknown error'));
+        toast.error("Error occurred while looking up product by code: " + (error.message || 'An unknown error occurred'));
       }
     } finally {
       setLoading(false);
@@ -1904,9 +1942,12 @@ const Scanner = () => {
       const updated = prev.filter((_, i) => i !== index);
       // Update localStorage
       if (updated.length > 0) {
-        localStorage.setItem('scannedCodes', JSON.stringify(updated));
+        // Use user-specific localStorage key
+        const userScansKey = userId ? `scannedCodes_${userId}` : 'scannedCodes';
+        localStorage.setItem(userScansKey, JSON.stringify(updated));
       } else {
-        localStorage.removeItem('scannedCodes');
+        const userScansKey = userId ? `scannedCodes_${userId}` : 'scannedCodes';
+        localStorage.removeItem(userScansKey);
       }
       return updated;
     });
@@ -1917,7 +1958,9 @@ const Scanner = () => {
   const handleClearAllScans = () => {
     if (window.confirm('Are you sure you want to clear all recent scans?')) {
       setScannedCodes([]);
-      localStorage.removeItem('scannedCodes');
+      // Use user-specific localStorage key
+      const userScansKey = userId ? `scannedCodes_${userId}` : 'scannedCodes';
+      localStorage.removeItem(userScansKey);
       toast.success('All scans cleared');
     }
   };

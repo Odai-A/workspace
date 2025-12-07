@@ -25,7 +25,7 @@ function Reports() {
   const [activeTab, setActiveTab] = useState('activity');
   const [dateRange, setDateRange] = useState('7d'); // 7d, 30d, 90d, all
   const [isLoading, setIsLoading] = useState(true);
-  const { user } = useAuth();
+  const { user, tenantId } = useAuth();
 
   // Report data state
   const [scanActivity, setScanActivity] = useState(null);
@@ -115,40 +115,84 @@ function Reports() {
     try {
       const { startDate, endDate } = getDateRange();
       
-      // Get all scan data with details per user
-      const { data: scans, error: scansError } = await supabase
+      // Build query - filter by tenant_id if available (shared business account)
+      // Otherwise fall back to user_id (for backward compatibility)
+      let query = supabase
         .from('scan_history')
-        .select('user_id, scanned_at, scanned_code, product_description')
+        .select('user_id, tenant_id, scanned_at, scanned_code, product_description')
         .gte('scanned_at', startDate.toISOString())
         .lte('scanned_at', endDate.toISOString())
-        .order('scanned_at', { ascending: false });
+        .not('user_id', 'is', null); // Only get scans with valid user_id
+      
+      // If tenant_id exists, filter by tenant (all employees in same business)
+      // Otherwise filter by current user (backward compatibility)
+      if (tenantId) {
+        query = query.eq('tenant_id', tenantId);
+        console.log('📊 Fetching scans for tenant:', tenantId);
+      } else {
+        // Fallback: only show current user's scans if no tenant_id
+        query = query.eq('user_id', user?.id);
+        console.log('📊 Fetching scans for user:', user?.id);
+      }
+      
+      const { data: scans, error: scansError } = await query.order('scanned_at', { ascending: false });
 
       if (scansError) throw scansError;
 
+      // Filter out any remaining scans with null user_id (just in case)
+      const validScans = (scans || []).filter(scan => scan.user_id);
+
       // Group scans by user and calculate statistics
       const userScansMap = {};
-      (scans || []).forEach(scan => {
-        const userId = scan.user_id || 'unknown';
+      validScans.forEach(scan => {
+        const userId = scan.user_id;
         if (!userScansMap[userId]) {
           userScansMap[userId] = [];
         }
         userScansMap[userId].push(scan);
       });
 
-      // Get user details
-      const userIds = Object.keys(userScansMap);
-      const { data: users, error: usersError } = await supabase
-        .from('users')
-        .select('id, email, first_name, last_name')
-        .in('id', userIds);
+      // Get user details from users table
+      const userIds = Object.keys(userScansMap).filter(id => id !== 'unknown');
+      let users = [];
+      
+      if (userIds.length > 0) {
+        const { data: usersData, error: usersError } = await supabase
+          .from('users')
+          .select('id, email, first_name, last_name')
+          .in('id', userIds);
 
-      if (usersError) throw usersError;
+        if (usersError) {
+          console.warn('Error fetching users from users table:', usersError);
+          // Continue without user details - we'll use auth user info as fallback
+        } else {
+          users = usersData || [];
+        }
+      }
 
       // Map user data with detailed statistics
       const userData = userIds.map(userId => {
-        const user = users?.find(u => u.id === userId);
+        const userFromTable = users?.find(u => u.id === userId);
         const userScans = userScansMap[userId] || [];
         const scanCount = userScans.length;
+        
+        // Use current user info if this is the current user and not in users table
+        let displayName = 'Unknown User';
+        let displayEmail = 'N/A';
+        
+        if (userFromTable) {
+          // User found in users table
+          displayName = `${userFromTable.first_name || ''} ${userFromTable.last_name || ''}`.trim() || userFromTable.email || 'Unknown User';
+          displayEmail = userFromTable.email || 'N/A';
+        } else if (user && user.id === userId) {
+          // Current user not in users table, use auth context
+          displayName = user.email || user.user_metadata?.email || 'You';
+          displayEmail = user.email || 'N/A';
+        } else {
+          // User not found - show user ID for debugging
+          displayName = `User ${userId.substring(0, 8)}...`;
+          displayEmail = 'N/A';
+        }
         
         // Calculate statistics
         const scanDates = userScans.map(s => new Date(s.scanned_at)).sort((a, b) => a - b);
@@ -170,8 +214,8 @@ function Reports() {
 
         return {
           id: userId,
-          name: user ? `${user.first_name || ''} ${user.last_name || ''}`.trim() || user.email : 'Unknown User',
-          email: user?.email || 'N/A',
+          name: displayName,
+          email: displayEmail,
           scanCount: scanCount,
           firstScan: firstScan ? firstScan.toLocaleString() : 'N/A',
           lastScan: lastScan ? lastScan.toLocaleString() : 'N/A',
@@ -184,7 +228,7 @@ function Reports() {
 
       setUserPerformance({
         users: userData,
-        totalScans: scans?.length || 0,
+        totalScans: validScans.length, // Only count valid scans
         topPerformer: userData[0] || null,
       });
     } catch (error) {
