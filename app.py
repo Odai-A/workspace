@@ -909,13 +909,13 @@ def create_checkout_session():
 @app.route('/checkout-success/') # Example, not directly used if frontend handles it
 def checkout_success_server_redirect():
     flash('Subscription successful! Your account is being set up.', 'success')
-    frontend_dashboard_url = os.environ.get('FRONTEND_BASE_URL', 'http://localhost:5173') + "/dashboard?payment=success"
+    frontend_dashboard_url = os.environ.get('FRONTEND_BASE_URL', 'http://localhost:5174') + "/dashboard?payment=success"
     return redirect(frontend_dashboard_url)
 
 @app.route('/checkout-cancel/') # Example, not directly used
 def checkout_cancel_server_redirect():
     flash('Subscription process canceled.', 'warning')
-    frontend_pricing_url = os.environ.get('FRONTEND_BASE_URL', 'http://localhost:5173') + "/pricing?payment=cancelled"
+    frontend_pricing_url = os.environ.get('FRONTEND_BASE_URL', 'http://localhost:5174') + "/pricing?payment=cancelled"
     return redirect(frontend_pricing_url)
 
 
