@@ -370,25 +370,219 @@ const Scanner = () => {
     }
   };
 
+  // Helper function to detect if product data is incomplete (still processing)
+  const isProductIncomplete = (product, apiResult) => {
+    // Check if API explicitly says it's processing
+    if (apiResult?.processing === true) {
+      console.log(`⏳ Product ${product.fnsku || 'unknown'} marked as processing by API`);
+      return true;
+    }
+    
+    // Check if we only have FNSKU but no ASIN and no real product name
+    const hasOnlyFnsku = product.fnsku && !product.asin;
+    const hasPlaceholderName = !product.name || 
+                               product.name.startsWith('FNSKU:') || 
+                               product.name.includes('Processing') ||
+                               product.name.length < 5;
+    const hasNoPrice = !product.price || product.price === '' || product.price === '0' || product.price === '0.00';
+    const hasNoImage = !product.image_url || product.image_url === '';
+    
+    // If we have FNSKU but missing critical data (ASIN, real name, price, or image), it's incomplete
+    if (hasOnlyFnsku && (hasPlaceholderName || (hasNoPrice && hasNoImage))) {
+      console.log(`⚠️ Product ${product.fnsku} detected as incomplete:`, {
+        hasOnlyFnsku,
+        hasPlaceholderName,
+        hasNoPrice,
+        hasNoImage,
+        name: product.name,
+        asin: product.asin
+      });
+      return true;
+    }
+    
+    return false;
+  };
+
+  // Helper function to retry scanning a code (used for incomplete scans in batch mode)
+  const retryScanInBatch = async (code, retryCount = 0) => {
+    const maxRetries = 3;
+    // Exponential backoff: 3s, 6s, 9s
+    const retryDelay = 3000 * (retryCount + 1);
+    
+    if (retryCount >= maxRetries) {
+      console.log(`⚠️ Max retries reached for ${code}. Marking as failed.`);
+      // Update queue item to show it failed
+      setBatchQueue(prev => prev.map(item => 
+        item.code === code 
+          ? { ...item, isProcessing: false, hasFailed: true, retryCount: retryCount }
+          : item
+      ));
+      setTimeout(() => {
+        toast.warning(`Could not retrieve complete data for ${code} after ${maxRetries} retries. You can manually retry later.`, { autoClose: 5000 });
+      }, 0);
+      return;
+    }
+    
+    console.log(`🔄 Retrying scan for ${code} (attempt ${retryCount + 1}/${maxRetries})...`);
+    
+    // Wait before retrying (exponential backoff)
+    await new Promise(resolve => setTimeout(resolve, retryDelay));
+    
+    try {
+      const scanUrl = getApiEndpoint('/scan');
+      const response = await axios.post(scanUrl, {
+        code: code.toUpperCase(),
+        user_id: userId
+      }, {
+        timeout: 60000
+      });
+      
+      const apiResult = response.data;
+      
+      if (apiResult && apiResult.success) {
+        // Map backend response to frontend product format
+        let allImages = apiResult.images || (apiResult.image ? [apiResult.image] : []);
+        const allVideos = apiResult.videos || [];
+        const videosCount = apiResult.videos_count || allVideos.length;
+        
+        const displayableProduct = {
+          fnsku: apiResult.fnsku || code,
+          asin: apiResult.asin || '',
+          name: apiResult.title || '',
+          image_url: allImages[0] || '',
+          images: allImages,
+          images_count: allImages.length,
+          videos: allVideos,
+          videos_count: videosCount,
+          price: apiResult.price || '',
+          brand: apiResult.brand || '',
+          category: apiResult.category || '',
+          description: apiResult.description || '',
+          upc: apiResult.upc || '',
+          amazon_url: apiResult.amazon_url || '',
+          source: apiResult.source || 'api',
+          cost_status: apiResult.cost_status || (apiResult.cached ? 'no_charge' : 'charged')
+        };
+        
+        // Check if data is still incomplete
+        if (isProductIncomplete(displayableProduct, apiResult)) {
+          // Still incomplete, retry again
+          console.log(`⏳ Data still incomplete for ${code}, retrying...`);
+          setBatchQueue(prev => prev.map(item => 
+            item.code === code 
+              ? { ...item, isProcessing: true, retryCount: retryCount + 1 }
+              : item
+          ));
+          // Retry again
+          await retryScanInBatch(code, retryCount + 1);
+        } else {
+          // Data is complete! Update the queue item
+          console.log(`✅ Complete data retrieved for ${code} on retry ${retryCount + 1}`);
+          setBatchQueue(prev => prev.map(item => 
+            item.code === code 
+              ? { ...item, product: displayableProduct, isProcessing: false, hasFailed: false, retryCount: retryCount + 1 }
+              : item
+          ));
+          setTimeout(() => {
+            toast.success(`✅ Complete data retrieved for ${code}`, { autoClose: 2000 });
+          }, 0);
+        }
+      } else {
+        // API returned error, retry
+        console.log(`⚠️ API returned error for ${code}, retrying...`);
+        setBatchQueue(prev => prev.map(item => 
+          item.code === code 
+            ? { ...item, isProcessing: true, retryCount: retryCount + 1 }
+            : item
+        ));
+        await retryScanInBatch(code, retryCount + 1);
+      }
+    } catch (error) {
+      // Handle different types of errors
+      const isServerError = error.response?.status >= 500;
+      const isClientError = error.response?.status >= 400 && error.response?.status < 500;
+      const isTimeout = error.code === 'ECONNABORTED';
+      
+      if (isServerError) {
+        console.warn(`⚠️ Server error (${error.response?.status}) for ${code} on retry ${retryCount + 1}. Will retry...`);
+      } else if (isClientError && error.response?.status !== 402) {
+        // Don't retry on 402 (payment required) or other client errors
+        console.error(`❌ Client error (${error.response?.status}) for ${code}. Stopping retries.`);
+        setBatchQueue(prev => prev.map(item => 
+          item.code === code 
+            ? { ...item, isProcessing: false, hasFailed: true, retryCount: retryCount + 1 }
+            : item
+        ));
+        return;
+      } else if (isTimeout) {
+        console.warn(`⏱️ Timeout for ${code} on retry ${retryCount + 1}. Will retry...`);
+      } else {
+        console.error(`Error retrying scan for ${code}:`, error);
+      }
+      
+      // Only retry on server errors, timeouts, or network errors (not client errors)
+      if (isServerError || isTimeout || !error.response) {
+        setBatchQueue(prev => prev.map(item => 
+          item.code === code 
+            ? { ...item, isProcessing: true, retryCount: retryCount + 1 }
+            : item
+        ));
+        await retryScanInBatch(code, retryCount + 1);
+      } else {
+        // Client error - stop retrying
+        setBatchQueue(prev => prev.map(item => 
+          item.code === code 
+            ? { ...item, isProcessing: false, hasFailed: true, retryCount: retryCount + 1 }
+            : item
+        ));
+      }
+    }
+  };
+
   // Helper function to handle product info - adds to batch queue or sets productInfo based on mode
-  const handleProductFound = async (product, code) => {
+  const handleProductFound = async (product, code, apiResult = null) => {
     if (batchMode) {
+      // Check if product data is incomplete
+      const isIncomplete = isProductIncomplete(product, apiResult);
+      
       // Add to batch queue instead of displaying
       const queueItem = {
         id: Date.now() + Math.random(), // Unique ID
         code: code,
         product: product,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        isProcessing: isIncomplete,
+        hasFailed: false,
+        retryCount: 0
       };
+      
       setBatchQueue(prev => {
         // Check if product already exists in queue (by code)
         const exists = prev.some(item => item.code === code);
         if (exists) {
-          toast.info(`Product ${code} is already in the batch queue.`);
+          // Use setTimeout to avoid setState during render warning
+          setTimeout(() => {
+            toast.info(`Product ${code} is already in the batch queue.`);
+          }, 0);
           return prev;
         }
         const newQueue = [...prev, queueItem];
-        toast.success(`Product added to batch queue successfully (${newQueue.length} items).`, { autoClose: 1500 });
+        
+        // Use setTimeout to avoid setState during render warning
+        if (isIncomplete) {
+          console.log(`🔄 Product ${code} is incomplete - starting automatic retry...`);
+          setTimeout(() => {
+            toast.warning(`Product ${code} is still processing. Will retry automatically...`, { autoClose: 3000 });
+            // Start automatic retry in background
+            retryScanInBatch(code, 0);
+          }, 0);
+        } else {
+          console.log(`✅ Product ${code} is complete - added to queue`);
+          setTimeout(() => {
+            toast.success(`Product added to batch queue successfully (${newQueue.length} items).`, { autoClose: 1500 });
+          }, 0);
+        }
+        
         return newQueue;
       });
       
@@ -502,31 +696,34 @@ const Scanner = () => {
           }
           
           // Set product info - backend already handled everything!
-          handleProductFound(displayableProduct, code);
+          // Pass apiResult to detect incomplete data
+          handleProductFound(displayableProduct, code, apiResult);
           
           // Update scan count from response if available, otherwise fetch it
-          // Use setTimeout to avoid setState during render warning
-          setTimeout(() => {
-            console.log("📊 Scan response scan_count:", apiResult.scan_count);
-            if (apiResult.scan_count) {
-                console.log("✅ Updating scan count from response:", apiResult.scan_count);
-                const isCEO = apiResult.scan_count.is_ceo_admin || false;
-                setIsCEOAdmin(isCEO);
-                setScanCount({
-                  used: apiResult.scan_count.used || 0,
-                  limit: apiResult.scan_count.limit || null,
-                  remaining: apiResult.scan_count.remaining !== null && apiResult.scan_count.remaining !== undefined 
-                    ? apiResult.scan_count.remaining 
-                    : (apiResult.scan_count.limit ? Math.max(0, apiResult.scan_count.limit - (apiResult.scan_count.used || 0)) : null),
-                  isPaid: apiResult.scan_count.is_paid || false,
-                  is_ceo_admin: isCEO
-                });
-            } else {
-                console.log("⚠️ No scan_count in response, fetching...");
-                // Fallback: fetch scan count after a small delay to ensure DB has updated
-                fetchScanCount();
-            }
-          }, 0);
+          // Use requestAnimationFrame to avoid setState during render warning
+          requestAnimationFrame(() => {
+            setTimeout(() => {
+              console.log("📊 Scan response scan_count:", apiResult.scan_count);
+              if (apiResult.scan_count) {
+                  console.log("✅ Updating scan count from response:", apiResult.scan_count);
+                  const isCEO = apiResult.scan_count.is_ceo_admin || false;
+                  setIsCEOAdmin(isCEO);
+                  setScanCount({
+                    used: apiResult.scan_count.used || 0,
+                    limit: apiResult.scan_count.limit || null,
+                    remaining: apiResult.scan_count.remaining !== null && apiResult.scan_count.remaining !== undefined 
+                      ? apiResult.scan_count.remaining 
+                      : (apiResult.scan_count.limit ? Math.max(0, apiResult.scan_count.limit - (apiResult.scan_count.used || 0)) : null),
+                    isPaid: apiResult.scan_count.is_paid || false,
+                    is_ceo_admin: isCEO
+                  });
+              } else {
+                  console.log("⚠️ No scan_count in response, fetching...");
+                  // Fallback: fetch scan count after a small delay to ensure DB has updated
+                  fetchScanCount();
+              }
+            }, 0);
+          });
         } else {
           // Handle error response
           const errorMsg = apiResult?.message || apiResult?.error || "Failed to scan product";
@@ -2004,16 +2201,36 @@ const Scanner = () => {
       return;
     }
 
+    // Check for processing or failed items
+    const processingItems = batchQueue.filter(item => item.isProcessing || item.hasFailed);
+    if (processingItems.length > 0) {
+      const processingCount = batchQueue.filter(item => item.isProcessing).length;
+      const failedCount = batchQueue.filter(item => item.hasFailed).length;
+      if (processingCount > 0) {
+        toast.warning(`${processingCount} item(s) are still processing. They will be excluded from printing.`, { autoClose: 4000 });
+      }
+      if (failedCount > 0) {
+        toast.warning(`${failedCount} item(s) have failed. Please retry them before printing.`, { autoClose: 4000 });
+      }
+    }
+
     // Filter out items without any product code (ASIN, UPC, FNSKU, or code)
+    // Also exclude items that are still processing or have failed
     const validItems = batchQueue.filter(item => {
       if (!item.product) return false;
+      // Exclude items that are still processing or have failed
+      if (item.isProcessing || item.hasFailed) return false;
       // Allow items with ASIN, UPC, FNSKU, or code
       return item.product.asin || item.product.upc || item.product.fnsku || item.product.code || item.code;
     });
     
     if (validItems.length === 0) {
-      toast.error("No valid items with product code to print");
+      toast.error("No valid items with product code to print. Some items may still be processing - please wait or retry failed items.");
       return;
+    }
+    
+    if (validItems.length < batchQueue.length) {
+      toast.info(`Printing ${validItems.length} of ${batchQueue.length} items (excluding processing/failed items)`, { autoClose: 3000 });
     }
 
     setIsPrintingBatch(true);
@@ -2054,6 +2271,20 @@ const Scanner = () => {
   const handleRemoveFromBatch = (itemId) => {
     setBatchQueue(prev => prev.filter(item => item.id !== itemId));
     toast.success("Removed from batch queue", { autoClose: 1500 });
+  };
+
+  // Manual retry for a specific item in batch queue
+  const handleManualRetry = async (code) => {
+    console.log(`🔄 Manual retry requested for ${code}`);
+    // Update item to show it's retrying
+    setBatchQueue(prev => prev.map(item => 
+      item.code === code 
+        ? { ...item, isProcessing: true, hasFailed: false }
+        : item
+    ));
+    
+    // Start retry process
+    await retryScanInBatch(code, 0);
   };
 
   // Clear entire batch queue
@@ -2355,29 +2586,67 @@ const Scanner = () => {
           <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-3">Batch Queue ({batchQueue.length} items)</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-64 overflow-y-auto">
             {batchQueue.map((item) => (
-              <div key={item.id} className="border border-gray-200 dark:border-gray-700 rounded-lg p-3 bg-gray-50 dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-600">
+              <div 
+                key={item.id} 
+                className={`border rounded-lg p-3 ${
+                  item.isProcessing 
+                    ? 'border-yellow-300 dark:border-yellow-600 bg-yellow-50 dark:bg-yellow-900/20' 
+                    : item.hasFailed
+                    ? 'border-red-300 dark:border-red-600 bg-red-50 dark:bg-red-900/20'
+                    : 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-700'
+                } hover:bg-opacity-80 transition-colors`}
+              >
                 <div className="flex justify-between items-start mb-2">
                   <div className="flex-1">
-                    <p className="font-mono text-xs text-gray-600 dark:text-gray-400 mb-1">{item.code}</p>
+                    <div className="flex items-center gap-2 mb-1">
+                      <p className="font-mono text-xs text-gray-600 dark:text-gray-400">{item.code}</p>
+                      {item.isProcessing && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400">
+                          <svg className="animate-spin -ml-1 mr-1 h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                          Processing...
+                        </span>
+                      )}
+                      {item.hasFailed && !item.isProcessing && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">
+                          Failed
+                        </span>
+                      )}
+                    </div>
                     <p className="text-sm font-medium text-gray-900 dark:text-white line-clamp-2">
                       {item.product?.name || 'Loading...'}
                     </p>
                     {item.product?.asin && (
                       <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">ASIN: {item.product.asin}</p>
                     )}
-                    {item.product?.price && (
+                    {item.product?.price && item.product.price !== '' && item.product.price !== '0' && item.product.price !== '0.00' && (
                       <p className="text-xs text-green-600 dark:text-green-400 font-semibold mt-1">
                         ${parseFloat(item.product.price).toFixed(2)}
                       </p>
                     )}
                   </div>
-                  <button
-                    onClick={() => handleRemoveFromBatch(item.id)}
-                    className="ml-2 text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20 p-1 rounded flex-shrink-0"
-                    title="Remove from queue"
-                  >
-                    <XMarkIcon className="h-4 w-4" />
-                  </button>
+                  <div className="flex gap-1 ml-2">
+                    {(item.isProcessing || item.hasFailed) && (
+                      <button
+                        onClick={() => handleManualRetry(item.code)}
+                        className="text-blue-600 dark:text-blue-400 hover:text-blue-800 dark:hover:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/20 p-1 rounded flex-shrink-0"
+                        title="Retry scan"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                      </button>
+                    )}
+                    <button
+                      onClick={() => handleRemoveFromBatch(item.id)}
+                      className="text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20 p-1 rounded flex-shrink-0"
+                      title="Remove from queue"
+                    >
+                      <XMarkIcon className="h-4 w-4" />
+                    </button>
+                  </div>
                 </div>
                 {item.product?.image_url && (
                   <img
@@ -2386,6 +2655,14 @@ const Scanner = () => {
                     className="mt-2 h-16 w-16 object-contain border border-gray-200 rounded mx-auto"
                     onError={(e) => { e.target.style.display = 'none'; }}
                   />
+                )}
+                {!item.product?.image_url && item.isProcessing && (
+                  <div className="mt-2 h-16 w-16 border border-gray-200 rounded mx-auto flex items-center justify-center bg-gray-100 dark:bg-gray-600">
+                    <svg className="animate-spin h-6 w-6 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                  </div>
                 )}
               </div>
             ))}
