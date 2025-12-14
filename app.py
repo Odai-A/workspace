@@ -25,6 +25,7 @@ print("Loaded environment variables:")
 print("SUPABASE_URL:", os.environ.get('SUPABASE_URL'))
 print("SUPABASE_KEY:", os.environ.get('SUPABASE_KEY'))
 print("SUPABASE_SERVICE_KEY:", os.environ.get('SUPABASE_SERVICE_KEY'))
+print("FRONTEND_BASE_URL:", os.environ.get('FRONTEND_BASE_URL', 'NOT SET'))
 
 # Load environment variables from .env file
 load_dotenv()
@@ -738,7 +739,9 @@ def signup_tenant():
 
         # 4. Create Stripe Checkout Session
         # Ensure frontend_url is configured or fallback
-        frontend_url = os.environ.get('FRONTEND_BASE_URL', request.host_url.rstrip('/')) 
+        frontend_url = os.environ.get('FRONTEND_BASE_URL', request.host_url.rstrip('/'))
+        logger.info(f"🔗 Signup checkout - Frontend URL: {frontend_url}")
+        logger.info(f"🔗 FRONTEND_BASE_URL env var: {os.environ.get('FRONTEND_BASE_URL', 'NOT SET')}")
         
         checkout_session = stripe.checkout.Session.create(
             customer=stripe_customer.id,
@@ -856,6 +859,8 @@ def create_checkout_session():
     try:
         # Get the frontend URL for success/cancel redirects
         frontend_url = os.environ.get('FRONTEND_BASE_URL', request.host_url.rstrip('/'))
+        logger.info(f"🔗 Creating checkout session - Frontend URL: {frontend_url}")
+        logger.info(f"🔗 FRONTEND_BASE_URL env var: {os.environ.get('FRONTEND_BASE_URL', 'NOT SET')}")
         
         # Determine plan and get usage price ID
         plan_id, plan_config = get_plan_config_by_price_id(price_id)
@@ -898,6 +903,9 @@ def create_checkout_session():
         
         checkout_session = stripe.checkout.Session.create(**checkout_session_params)
         
+        logger.info(f"✅ Created checkout session: {checkout_session.id}")
+        logger.info(f"🔗 Success URL: {checkout_session_params['success_url']}")
+        logger.info(f"🔗 Cancel URL: {checkout_session_params['cancel_url']}")
         print(f"Created checkout session: {checkout_session.id}")
         return jsonify({'checkout_url': checkout_session.url})
     except Exception as e:
@@ -5985,6 +5993,15 @@ def facebook_disconnect():
         logger.error(f"Error disconnecting Facebook: {e}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/debug/config', methods=['GET'])
+def debug_config():
+    """Debug endpoint to check configuration"""
+    return jsonify({
+        'FRONTEND_BASE_URL': os.environ.get('FRONTEND_BASE_URL', 'NOT SET'),
+        'current_directory': os.getcwd(),
+        'env_file_exists': os.path.exists('.env'),
+    }), 200
+
 if __name__ == '__main__':
     # Render uses PORT environment variable, fallback to FLASK_RUN_PORT for local dev
     port = int(os.environ.get("PORT", os.environ.get("FLASK_RUN_PORT", 5000)))
@@ -5999,6 +6016,7 @@ if __name__ == '__main__':
     print(f"Port: {port}")
     print(f"Debug Mode: {debug_mode}")
     print(f"Host: 0.0.0.0 (accessible from all interfaces)")
+    print(f"FRONTEND_BASE_URL: {os.environ.get('FRONTEND_BASE_URL', 'NOT SET')}")
     print("=" * 60)
     logger.info(f"Starting Flask app on port {port} with debug mode: {debug_mode}")
     print(f"\n✅ Backend server is RUNNING - waiting for requests...")
