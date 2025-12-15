@@ -6017,7 +6017,7 @@ def data_deletion_instructions():
                           callback_url=callback_url)
 
 
-@app.route('/api/facebook/data-deletion', methods=['POST', 'GET'])
+@app.route('/api/facebook/data-deletion', methods=['POST', 'GET', 'OPTIONS'])
 def facebook_data_deletion():
     """
     Facebook Data Deletion Callback URL
@@ -6032,6 +6032,10 @@ def facebook_data_deletion():
     3. Delete all user data associated with that Facebook user_id
     4. Return a confirmation URL or status
     """
+    # Handle CORS preflight
+    if request.method == 'OPTIONS':
+        return '', 200
+    
     try:
         # Get Facebook app secret from environment
         facebook_app_secret = os.getenv('FACEBOOK_APP_SECRET')
