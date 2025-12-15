@@ -5993,6 +5993,172 @@ def facebook_disconnect():
         logger.error(f"Error disconnecting Facebook: {e}")
         return jsonify({'error': str(e)}), 500
 
+# ============================================================================
+# FACEBOOK APP REVIEW - PRIVACY POLICY & DATA DELETION
+# ============================================================================
+
+@app.route('/privacy-policy', methods=['GET'])
+@app.route('/api/facebook/privacy-policy', methods=['GET'])
+def privacy_policy():
+    """Privacy Policy page for Facebook app review"""
+    return render_template('privacy_policy.html', 
+                          last_updated=datetime.now(timezone.utc).strftime('%B %d, %Y'))
+
+
+@app.route('/api/facebook/data-deletion-instructions', methods=['GET'])
+def data_deletion_instructions():
+    """Data deletion instructions page for Facebook app review"""
+    # Get the base URL for the callback
+    base_url = request.url_root.rstrip('/')
+    callback_url = f"{base_url}/api/facebook/data-deletion"
+    
+    return render_template('data_deletion_instructions.html',
+                          last_updated=datetime.now(timezone.utc).strftime('%B %d, %Y'),
+                          callback_url=callback_url)
+
+
+@app.route('/api/facebook/data-deletion', methods=['POST', 'GET'])
+def facebook_data_deletion():
+    """
+    Facebook Data Deletion Callback URL
+    This endpoint is called by Facebook when a user requests data deletion.
+    
+    Facebook will send a POST request with:
+    - signed_request: A signed request containing user_id and other data
+    
+    We need to:
+    1. Verify the signed_request
+    2. Extract the user_id
+    3. Delete all user data associated with that Facebook user_id
+    4. Return a confirmation URL or status
+    """
+    try:
+        # Get Facebook app secret from environment
+        facebook_app_secret = os.getenv('FACEBOOK_APP_SECRET')
+        
+        if request.method == 'GET':
+            # Facebook may send a GET request to verify the endpoint exists
+            return jsonify({
+                'status': 'ok',
+                'message': 'Data deletion endpoint is active',
+                'instructions': 'Send POST request with signed_request parameter'
+            }), 200
+        
+        # Handle POST request from Facebook
+        data = request.get_json() if request.is_json else request.form
+        
+        # Facebook sends signed_request in the request
+        signed_request = data.get('signed_request') or request.form.get('signed_request')
+        
+        if not signed_request:
+            logger.warning("Facebook data deletion request received without signed_request")
+            return jsonify({
+                'error': 'signed_request parameter required'
+            }), 400
+        
+        # Parse and verify signed_request
+        # Format: <signature>.<payload> (base64 encoded)
+        try:
+            import hmac
+            import hashlib
+            import base64
+            
+            # Split signed_request
+            parts = signed_request.split('.')
+            if len(parts) != 2:
+                raise ValueError("Invalid signed_request format")
+            
+            signature, payload = parts
+            
+            # Decode payload
+            payload_data = json.loads(base64.urlsafe_b64decode(payload + '==').decode('utf-8'))
+            
+            # Verify signature (Facebook uses HMAC SHA256)
+            if not facebook_app_secret:
+                logger.error("FACEBOOK_APP_SECRET not configured")
+                return jsonify({
+                    'error': 'Facebook app not configured'
+                }), 500
+            
+            expected_sig = hmac.new(
+                facebook_app_secret.encode('utf-8'),
+                payload.encode('utf-8'),
+                hashlib.sha256
+            ).digest()
+            expected_sig_b64 = base64.urlsafe_b64encode(expected_sig).decode('utf-8').rstrip('=')
+            
+            if signature != expected_sig_b64:
+                logger.error("Invalid signature in Facebook data deletion request")
+                return jsonify({
+                    'error': 'Invalid signature'
+                }), 401
+            
+            # Extract user_id from payload
+            user_id = payload_data.get('user_id')
+            
+            if not user_id:
+                logger.warning("No user_id in Facebook data deletion request")
+                return jsonify({
+                    'error': 'user_id not found in signed_request'
+                }), 400
+            
+            logger.info(f"Processing data deletion request for Facebook user_id: {user_id}")
+            
+            # Find and delete all data associated with this Facebook user
+            if not supabase_admin:
+                logger.error("Database not available for data deletion")
+                return jsonify({
+                    'error': 'Database not available'
+                }), 500
+            
+            # Find integration by facebook_user_id
+            integration_result = supabase_admin.table('facebook_integrations').select('*').eq('facebook_user_id', user_id).execute()
+            
+            deleted_count = 0
+            if integration_result.data and len(integration_result.data) > 0:
+                for integration in integration_result.data:
+                    integration_id = integration['id']
+                    app_user_id = integration.get('user_id')
+                    
+                    # Delete Facebook pages associated with this integration
+                    supabase_admin.table('facebook_pages').delete().eq('integration_id', integration_id).execute()
+                    
+                    # Delete the integration itself
+                    supabase_admin.table('facebook_integrations').delete().eq('id', integration_id).execute()
+                    deleted_count += 1
+                    
+                    logger.info(f"Deleted Facebook integration for user_id: {app_user_id}, facebook_user_id: {user_id}")
+            
+            if deleted_count == 0:
+                logger.info(f"No Facebook integration found for facebook_user_id: {user_id}")
+            
+            # Return confirmation URL (Facebook will redirect user here)
+            confirmation_url = f"{request.url_root.rstrip('/')}/api/facebook/data-deletion-instructions?deleted=true"
+            
+            return jsonify({
+                'url': confirmation_url,
+                'confirmation_code': f"DELETED_{user_id}_{int(datetime.now(timezone.utc).timestamp())}"
+            }), 200
+            
+        except Exception as e:
+            logger.error(f"Error processing Facebook data deletion request: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return jsonify({
+                'error': 'Failed to process deletion request',
+                'message': str(e)
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Error in Facebook data deletion endpoint: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'error': 'Internal server error',
+            'message': str(e)
+        }), 500
+
+
 @app.route('/api/debug/config', methods=['GET'])
 def debug_config():
     """Debug endpoint to check configuration"""

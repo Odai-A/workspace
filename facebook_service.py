@@ -48,7 +48,8 @@ def _ensure_env_loaded():
         FACEBOOK_ENCRYPTION_KEY = _get_env_var('FACEBOOK_ENCRYPTION_KEY')
 
 # Facebook Graph API base URL
-GRAPH_API_BASE = 'https://graph.facebook.com/v18.0'
+# Using v19.0 for Meta API v19+ compliance
+GRAPH_API_BASE = 'https://graph.facebook.com/v19.0'
 
 # Required permissions for Facebook Login
 REQUIRED_PERMISSIONS = [
@@ -123,7 +124,8 @@ def get_facebook_oauth_url(state=None):
     if state:
         params['state'] = state
     
-    auth_url = f"https://www.facebook.com/v18.0/dialog/oauth?{urlencode(params)}"
+    # Using v19.0 for Meta API v19+ compliance
+    auth_url = f"https://www.facebook.com/v19.0/dialog/oauth?{urlencode(params)}"
     return auth_url
 
 
@@ -150,7 +152,9 @@ def exchange_code_for_token(code):
         'code': code
     }
     
-    response = requests.get(token_url, params=params)
+    # Use POST instead of GET for Meta v19+ compliance and security
+    # POST prevents secrets from appearing in URL parameters
+    response = requests.post(token_url, data=params)
     response.raise_for_status()
     
     data = response.json()
@@ -206,7 +210,9 @@ def get_page_access_token(page_id, user_access_token):
         'fb_exchange_token': user_access_token
     }
     
-    response = requests.get(exchange_url, params=params)
+    # Use POST instead of GET for Meta v19+ compliance and security
+    # POST prevents secrets from appearing in URL parameters
+    response = requests.post(exchange_url, data=params)
     response.raise_for_status()
     long_lived_token = response.json()['access_token']
     
