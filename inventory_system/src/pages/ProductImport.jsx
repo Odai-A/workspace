@@ -75,11 +75,38 @@ const COLUMN_MAPPINGS = {
   ]
 };
 
-// Helper function to parse a single CSV line, handling quoted fields
-const parseCSVLine = (line) => {
+// Detect CSV delimiter by analyzing the first line
+const detectDelimiter = (firstLine) => {
+  const delimiters = [',', '\t', ';', '|'];
+  let maxCount = 0;
+  let detectedDelimiter = ',';
+  
+  for (const delimiter of delimiters) {
+    let count = 0;
+    let inQuote = false;
+    for (let i = 0; i < firstLine.length; i++) {
+      const char = firstLine[i];
+      if (char === '"' && !(i > 0 && firstLine[i-1] === '\\')) {
+        inQuote = !inQuote;
+      } else if (char === delimiter && !inQuote) {
+        count++;
+      }
+    }
+    if (count > maxCount) {
+      maxCount = count;
+      detectedDelimiter = delimiter;
+    }
+  }
+  
+  return detectedDelimiter;
+};
+
+// Helper function to parse a single CSV line, handling quoted fields and different delimiters
+const parseCSVLine = (line, delimiter = ',') => {
   const result = [];
   let inQuote = false;
   let field = '';
+  
   for (let i = 0; i < line.length; i++) {
     const char = line[i];
     if (char === '\"' && !(i > 0 && line[i-1] === '\\')) {
@@ -89,7 +116,7 @@ const parseCSVLine = (line) => {
       } else {
         inQuote = !inQuote;
       }
-    } else if (char === ',' && !inQuote) {
+    } else if (char === delimiter && !inQuote) {
       result.push(field.trim());
       field = '';
     } else {
@@ -265,7 +292,13 @@ const ProductImport = () => {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const csvText = e.target.result;
+        let csvText = e.target.result;
+        
+        // Remove BOM if present (common in Excel exports)
+        if (csvText.charCodeAt(0) === 0xFEFF) {
+          csvText = csvText.slice(1);
+        }
+        
         const lines = csvText.split(/\r\n|\n/).filter(line => line.trim() !== '');
         
         if (lines.length < 2) {
@@ -274,22 +307,39 @@ const ProductImport = () => {
         }
         
         const headerLine = lines[0];
+        
+        // Detect delimiter from the header line
+        const delimiter = detectDelimiter(headerLine);
+        console.log('Detected CSV delimiter:', delimiter === '\t' ? 'TAB' : delimiter);
+        
+        const headers = parseCSVLine(headerLine, delimiter).map(h => h.trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1'));
+        
+        // Filter out empty headers
+        const validHeaders = headers.filter(h => h && h.trim() !== '');
+        
+        if (validHeaders.length === 0) {
+          toast.error('No valid columns detected in the CSV file. Please check the file format.');
+          return;
+        }
+        
+        console.log('Parsed headers:', validHeaders);
+        console.log('Total columns detected:', validHeaders.length);
+        
         const dataLines = lines.slice(1, 11); // Preview first 10 rows
         
-        const headers = parseCSVLine(headerLine).map(h => h.trim().replace(/^"(.*)"$/, '$1'));
         const rows = dataLines.map(line => {
-          const values = parseCSVLine(line);
+          const values = parseCSVLine(line, delimiter);
           const row = {};
-          headers.forEach((header, index) => {
-            row[header] = values[index] || '';
+          validHeaders.forEach((header, index) => {
+            row[header] = (values[index] || '').trim();
           });
           return row;
         });
         
         // Auto-detect column mappings
-        const detectedMappings = detectColumnMappings(headers);
+        const detectedMappings = detectColumnMappings(validHeaders);
         
-        setCsvHeaders(headers);
+        setCsvHeaders(validHeaders);
         setCsvRows(rows);
         setColumnMappings(detectedMappings);
         
@@ -298,10 +348,10 @@ const ProductImport = () => {
         setPreviewData(preview);
         setShowPreview(true);
         
-        toast.success(`File loaded successfully. Detected ${headers.length} columns. Please review the column mapping below.`);
+        toast.success(`File loaded successfully. Detected ${validHeaders.length} columns. Please review the column mapping below.`);
       } catch (error) {
         console.error('Error parsing file:', error);
-        toast.error('Failed to parse the CSV file. Please verify the file format and try again.');
+        toast.error(`Failed to parse the CSV file: ${error.message || 'Please verify the file format and try again.'}`);
       }
     };
     
@@ -336,7 +386,13 @@ const ProductImport = () => {
     const reader = new FileReader();
 
     reader.onload = async (event) => {
-      const csvText = event.target.result;
+      let csvText = event.target.result;
+      
+      // Remove BOM if present (common in Excel exports)
+      if (csvText.charCodeAt(0) === 0xFEFF) {
+        csvText = csvText.slice(1);
+      }
+      
       const lines = csvText.split(/\r\n|\n/).filter(line => line.trim() !== '');
 
       if (lines.length < 2) {
@@ -349,12 +405,17 @@ const ProductImport = () => {
       const dataLines = lines.slice(1);
       setTotalRows(dataLines.length);
 
-      const headers = parseCSVLine(headerLine).map(h => h.trim().replace(/^"(.*)"$/, '$1'));
+      // Detect delimiter from the header line
+      const delimiter = detectDelimiter(headerLine);
+      const headers = parseCSVLine(headerLine, delimiter).map(h => h.trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1'));
+      
+      // Filter out empty headers
+      const validHeaders = headers.filter(h => h && h.trim() !== '');
       
       // Use detected mappings or fallback to auto-detection
       const mappings = Object.keys(columnMappings).length > 0 
         ? columnMappings 
-        : detectColumnMappings(headers);
+        : detectColumnMappings(validHeaders);
 
       // Validate that we have at least one identifier column
       if (!mappings.fnsku && !mappings.asin && !mappings.lpn) {
@@ -377,15 +438,17 @@ const ProductImport = () => {
           continue;
         }
         
-        const rowValues = parseCSVLine(line);
-        if (rowValues.length !== headers.length) {
-          setImportProgress(prev => prev + 1);
-          continue;
+        const rowValues = parseCSVLine(line, delimiter);
+        if (rowValues.length < validHeaders.length) {
+          // Pad with empty values if row has fewer columns
+          while (rowValues.length < validHeaders.length) {
+            rowValues.push('');
+          }
         }
         
         const csvRow = {};
-        headers.forEach((header, index) => {
-          csvRow[header] = rowValues[index] || '';
+        validHeaders.forEach((header, index) => {
+          csvRow[header] = (rowValues[index] || '').trim();
         });
         
         // Map to normalized format

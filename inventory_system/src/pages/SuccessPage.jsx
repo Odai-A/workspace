@@ -1,18 +1,25 @@
 import React, { useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'react-toastify';
 
 const SuccessPage = () => {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const sessionId = searchParams.get('session_id');
 
   useEffect(() => {
-    toast.success('Subscription successful! Your account is being set up.');
+    if (sessionId) {
+      console.log('Stripe checkout session ID:', sessionId);
+      toast.success('Subscription successful! Your account is being set up.');
+    } else {
+      toast.success('Payment successful!');
+    }
     // Redirect to dashboard after a delay
     const timer = setTimeout(() => {
       navigate('/dashboard');
     }, 5000); // 5 second delay
     return () => clearTimeout(timer);
-  }, [navigate]);
+  }, [navigate, sessionId]);
 
   return (
     <div className="container mx-auto px-4 py-12 text-center">

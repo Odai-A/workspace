@@ -7,6 +7,7 @@ import { getSubscriptionStatus } from '../services/subscriptionService';
 import { supabase } from '../config/supabaseClient';
 import axios from 'axios';
 import { getApiEndpoint } from '../utils/apiConfig';
+import FacebookIntegration from '../components/FacebookIntegration';
 
 // Toggle switch component
 const Toggle = ({ enabled, onChange, label, description }) => {
@@ -580,6 +581,11 @@ const Settings = () => {
               </div>
             </div>
           </div>
+        </div>
+        
+        {/* Facebook Integration */}
+        <div className="mb-6">
+          <FacebookIntegration />
         </div>
       </div>
     </div>

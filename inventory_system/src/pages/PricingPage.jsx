@@ -9,14 +9,35 @@ import { getApiEndpoint } from '../utils/apiConfig';
 // Price IDs from environment variables with validation
 const getValidPriceId = (envVar, fallback = null) => {
   const priceId = import.meta.env[envVar];
+  
+  // Debug logging in development
+  if (import.meta.env.DEV) {
+    console.log(`🔍 Checking ${envVar}:`, {
+      exists: envVar in import.meta.env,
+      value: priceId,
+      type: typeof priceId,
+      isUndefined: priceId === undefined,
+      isString: typeof priceId === 'string',
+      isEmpty: !priceId || priceId === '',
+      hasYourPrefix: priceId?.includes('your_')
+    });
+  }
+  
   // Allow test price IDs (price_50, price_100, price_250) that match our .env values
-  if (!priceId || priceId === 'undefined' || priceId.includes('your_')) {
+  if (!priceId || priceId === 'undefined' || priceId === undefined || priceId.includes('your_')) {
     // Only log warning in development mode to reduce console noise
     if (import.meta.env.DEV) {
-      console.warn(`Invalid Stripe price ID for ${envVar}: "${priceId}"`);
+      console.warn(`❌ Invalid Stripe price ID for ${envVar}: "${priceId}"`);
+      console.warn(`   Make sure you have ${envVar} in inventory_system/.env file`);
+      console.warn(`   And that you've restarted the frontend dev server after adding it`);
     }
     return fallback;
   }
+  
+  if (import.meta.env.DEV) {
+    console.log(`✅ Valid price ID found for ${envVar}: ${priceId.substring(0, 20)}...`);
+  }
+  
   return priceId;
 };
 
@@ -236,6 +257,17 @@ const PricingPage = () => {
     { id: 'pro', name: 'Pro Plan', value: import.meta.env.VITE_STRIPE_PRO_PLAN_PRICE_ID },
     { id: 'entrepreneur', name: 'Entrepreneur Plan', value: import.meta.env.VITE_STRIPE_ENTREPRENEUR_PLAN_PRICE_ID }
   ];
+  
+  // Debug: Log all env vars in development
+  useEffect(() => {
+    if (import.meta.env.DEV && isAdmin) {
+      console.log('🔍 Environment Variables Debug:');
+      console.log('VITE_STRIPE_BASIC_PLAN_PRICE_ID:', import.meta.env.VITE_STRIPE_BASIC_PLAN_PRICE_ID);
+      console.log('VITE_STRIPE_PRO_PLAN_PRICE_ID:', import.meta.env.VITE_STRIPE_PRO_PLAN_PRICE_ID);
+      console.log('VITE_STRIPE_ENTREPRENEUR_PLAN_PRICE_ID:', import.meta.env.VITE_STRIPE_ENTREPRENEUR_PLAN_PRICE_ID);
+      console.log('All VITE_ env vars:', Object.keys(import.meta.env).filter(key => key.startsWith('VITE_STRIPE')));
+    }
+  }, [isAdmin]);
 
   return (
     <div>
