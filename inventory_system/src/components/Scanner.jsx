@@ -10,7 +10,7 @@ import ShopifyListing from './ShopifyListing';
 // All API calls now go through backend /api/scan endpoint
 import { productLookupService as dbProductLookupService, apiCacheService } from '../services/databaseService';
 import { inventoryService, supabase } from '../config/supabaseClient';
-import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, CheckCircleIcon, CurrencyDollarIcon, ArrowTopRightOnSquareIcon, PrinterIcon, QrCodeIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, CheckCircleIcon, ArrowTopRightOnSquareIcon, PrinterIcon, QrCodeIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
 import { mockService } from '../services/mockData';
 import { useAuth } from '../contexts/AuthContext';
 import { getApiUrl, getApiEndpoint } from '../utils/apiConfig';
@@ -75,6 +75,7 @@ const Scanner = () => {
   const [isCheckingDatabase, setIsCheckingDatabase] = useState(false);
   const [lastScannedCode, setLastScannedCode] = useState('');
   const [isApiProcessing, setIsApiProcessing] = useState(false);
+  const [notInDatabaseMessage, setNotInDatabaseMessage] = useState(null);
   const [processingStartTime, setProcessingStartTime] = useState(null);
 
   // State for auto-refresh when API is processing
@@ -83,15 +84,26 @@ const Scanner = () => {
   const [autoRefreshCode, setAutoRefreshCode] = useState(null);
   const autoRefreshIntervalRef = useRef(null);
   const countdownIntervalRef = useRef(null);
+  const processingPollRef = useRef(null);
+  const processingPollTimeoutRef = useRef(null);
+  const productInfoSectionRef = useRef(null);
 
   // State for scan count (free trial tracking)
   const [scanCount, setScanCount] = useState({ used: 0, limit: 50, remaining: 50, isPaid: false, is_ceo_admin: false });
-  const [scanCountLoading, setScanCountLoading] = useState(false);
+  const [scanCountLoading, setScanCountLoading] = useState(true); // true until we know status — avoids showing trial banner to CEO/admin
   const [isCEOAdmin, setIsCEOAdmin] = useState(false);
 
   // Cleanup intervals on unmount
   useEffect(() => {
     return () => {
+      if (processingPollTimeoutRef.current) {
+        clearTimeout(processingPollTimeoutRef.current);
+        processingPollTimeoutRef.current = null;
+      }
+      if (processingPollRef.current) {
+        clearInterval(processingPollRef.current);
+        processingPollRef.current = null;
+      }
       if (autoRefreshIntervalRef.current) {
         clearInterval(autoRefreshIntervalRef.current);
       }
@@ -128,18 +140,23 @@ const Scanner = () => {
             timestamp: scan.scanned_at,
             type: scan.scanned_code?.startsWith('B0') ? 'ASIN' : (scan.scanned_code?.startsWith('X') ? 'FNSKU' : 'UPC'),
             productInfo: {
-              name: scan.description,
+              name: scan.description || scan.scanned_code,
               asin: scan.asin !== 'N/A' ? scan.asin : null,
+              fnsku: scan.fnsku || (scan.scanned_code?.startsWith('X') ? scan.scanned_code : null),
               price: scan.price !== 'N/A' ? parseFloat(scan.price) : null,
-              image_url: scan.image_url || null
+              image_url: scan.image_url || null,
+              category: scan.category || null,
+              description: scan.long_description || scan.description || null,
+              upc: scan.upc || null
             }
           }));
           
-          // Merge with localStorage scans, avoiding duplicates
+          // Prefer DB recent scans (full product details) then add any from localStorage not already in DB
           setScannedCodes(prev => {
-            const existingCodes = new Set(prev.map(s => s.code));
-            const newScans = dbScans.filter(s => !existingCodes.has(s.code));
-            return [...newScans, ...prev].slice(0, 50); // Keep max 50 scans
+            const dbCodes = new Set(dbScans.map(s => s.code));
+            const fromStorage = prev.filter(s => !dbCodes.has(s.code));
+            const merged = [...dbScans, ...fromStorage].slice(0, 50);
+            return merged;
           });
         }
       } catch (error) {
@@ -373,22 +390,23 @@ const Scanner = () => {
   // Helper function to handle product info - adds to batch queue or sets productInfo based on mode
   const handleProductFound = async (product, code) => {
     if (batchMode) {
-      // Add to batch queue instead of displaying
       const queueItem = {
-        id: Date.now() + Math.random(), // Unique ID
+        id: Date.now() + Math.random(),
         code: code,
         product: product,
         timestamp: new Date().toISOString()
       };
       setBatchQueue(prev => {
-        // Check if product already exists in queue (by code)
-        const exists = prev.some(item => item.code === code);
-        if (exists) {
-          toast.info(`Product ${code} is already in the batch queue.`);
-          return prev;
+        const idx = prev.findIndex(item => item.code === code);
+        if (idx >= 0) {
+          // Update existing item (e.g. when processing poll returns full data) so labels get full data
+          const updated = [...prev];
+          updated[idx] = { ...updated[idx], product, timestamp: queueItem.timestamp };
+          toast.success(`Product updated.`, { autoClose: 1000 });
+          return updated;
         }
         const newQueue = [...prev, queueItem];
-        toast.success(`Product added to batch queue successfully (${newQueue.length} items).`, { autoClose: 1500 });
+        toast.success(`Added to batch (${newQueue.length} items).`, { autoClose: 1500 });
         return newQueue;
       });
       
@@ -417,12 +435,21 @@ const Scanner = () => {
       setProductInfo(null); // Clear previous product info only in normal mode
     }
     setIsApiProcessing(false); // Reset processing state
+    setNotInDatabaseMessage(null); // Clear "not in database" message when starting a new lookup
     setLastScannedCode(upperCode); // Track the last scanned code
 
-    // Stop any ongoing auto-refresh when starting a new lookup
+    // Stop any ongoing auto-refresh or processing poll when starting a new lookup
     if (isAutoRefreshing) {
       console.log('⏹️ Stopping auto-refresh due to new manual scan');
       stopAutoRefresh();
+    }
+    if (processingPollTimeoutRef.current) {
+      clearTimeout(processingPollTimeoutRef.current);
+      processingPollTimeoutRef.current = null;
+    }
+    if (processingPollRef.current) {
+      clearInterval(processingPollRef.current);
+      processingPollRef.current = null;
     }
 
     try {
@@ -430,8 +457,8 @@ const Scanner = () => {
       // Backend will check cache first and return cached data quickly if available
       // This ensures all scans are properly logged to scan_history for trial tracking
       console.log(`Calling backend /api/scan to log scan and get updated count for code: ${upperCode}`);
-      toast.info("Scanning product. Please wait...", {
-        autoClose: 2000
+      toast.info(batchMode ? "Scanning..." : "Scanning product. Please wait...", {
+        autoClose: batchMode ? 1000 : 2000
       });
       
       try {
@@ -450,11 +477,61 @@ const Scanner = () => {
         console.log("🚀 Backend scan response:", apiResult);
         
         if (apiResult && apiResult.success) {
-          // Get all images from backend response (array) or fallback to single image
+          if (apiResult.not_in_api_database) {
+            setNotInDatabaseMessage(apiResult.message || "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time.");
+            setLastScannedCode(code);
+            setIsApiProcessing(false);
+            toast.warning(apiResult.message || "This product could not be found in our lookup database.", { autoClose: 8000 });
+            return;
+          }
+          // Backend returned "processing: true" – we're still looking up; show partial data and Check for Updates
+          if (apiResult.processing) {
+            setIsApiProcessing(true);
+            const partialImages = apiResult.images || (apiResult.image ? [apiResult.image] : []);
+            const displayableProduct = {
+              fnsku: apiResult.fnsku || code,
+              asin: apiResult.asin || '',
+              name: apiResult.title || '',
+              image_url: partialImages[0] || '',
+              images: partialImages,
+              images_count: partialImages.length,
+              videos: apiResult.videos || [],
+              videos_count: apiResult.videos_count || 0,
+              price: apiResult.price || '',
+              brand: apiResult.brand || '',
+              category: apiResult.category || '',
+              description: apiResult.description || '',
+              upc: apiResult.upc || '',
+              amazon_url: apiResult.amazon_url || '',
+              source: apiResult.source || 'api',
+              cost_status: apiResult.cost_status || 'charged'
+            };
+            toast.info(batchMode ? "Looking up..." : (apiResult.message || "We're looking up this product. Please try again in a moment or use 'Check for Updates'."), { autoClose: batchMode ? 1500 : 4000 });
+            handleProductFound(displayableProduct, code);
+            if (apiResult.scan_count) {
+              setTimeout(() => {
+                const isCEO = apiResult.scan_count.is_ceo_admin || false;
+                setIsCEOAdmin(isCEO);
+                setScanCount({
+                  used: apiResult.scan_count.used || 0,
+                  limit: apiResult.scan_count.limit || null,
+                  remaining: apiResult.scan_count.remaining !== null && apiResult.scan_count.remaining !== undefined
+                    ? apiResult.scan_count.remaining
+                    : (apiResult.scan_count.limit ? Math.max(0, apiResult.scan_count.limit - (apiResult.scan_count.used || 0)) : null),
+                  isPaid: apiResult.scan_count.is_paid || false,
+                  is_ceo_admin: isCEO
+                });
+              }, 0);
+            }
+            startProcessingPoll(code);
+            return;
+          }
+
+          // Full data – get images and map to display format
           let allImages = apiResult.images || (apiResult.image ? [apiResult.image] : []);
           
-          // Check if we only got one image - if so, fetch all images from Rainforest API
-          if (allImages.length === 1 && apiResult.asin && apiResult.source === 'api' && !apiResult.cached) {
+          // In batch mode skip extra Rainforest image fetch so batch scans stay as fast as single (same one request)
+          if (!batchMode && allImages.length === 1 && apiResult.asin && apiResult.source === 'api' && !apiResult.cached) {
             console.log("⚠️ Only one image received, fetching all images from Rainforest API...");
             toast.info("Fetching product images. Please wait...", { autoClose: 2000 });
             
@@ -470,19 +547,17 @@ const Scanner = () => {
             }
           }
           
-          // Get videos from backend response
           const allVideos = apiResult.videos || [];
           const videosCount = apiResult.videos_count || allVideos.length;
           
-          // Map backend response to frontend product format
           const displayableProduct = {
             fnsku: apiResult.fnsku || code,
             asin: apiResult.asin || '',
             name: apiResult.title || '',
-            image_url: allImages[0] || '',  // Primary image for display
-            images: allImages,  // ALL images array
+            image_url: allImages[0] || '',
+            images: allImages,
             images_count: allImages.length,
-            videos: allVideos,  // ALL videos array
+            videos: allVideos,
             videos_count: videosCount,
             price: apiResult.price || '',
             brand: apiResult.brand || '',
@@ -494,18 +569,15 @@ const Scanner = () => {
             cost_status: apiResult.cost_status || (apiResult.cached ? 'no_charge' : 'charged')
           };
           
-          // Show appropriate toast based on source
-          if (apiResult.cached) {
-            toast.success("Product information retrieved from cache. No API charges incurred.", { icon: "💚" });
-          } else if (apiResult.source === 'api') {
-            toast.success(`Product scanned successfully. Retrieved ${allImages.length} images.`, { icon: "💚" });
+          if (!batchMode) {
+            if (apiResult.cached) {
+              toast.success("Product information retrieved from cache. No API charges incurred.", { icon: "💚" });
+            } else if (apiResult.source === 'api') {
+              toast.success(`Product scanned successfully. Retrieved ${allImages.length} images.`, { icon: "💚" });
+            }
           }
-          
-          // Set product info - backend already handled everything!
           handleProductFound(displayableProduct, code);
           
-          // Update scan count from response if available, otherwise fetch it
-          // Use setTimeout to avoid setState during render warning
           setTimeout(() => {
             console.log("📊 Scan response scan_count:", apiResult.scan_count);
             if (apiResult.scan_count) {
@@ -523,7 +595,6 @@ const Scanner = () => {
                 });
             } else {
                 console.log("⚠️ No scan_count in response, fetching...");
-                // Fallback: fetch scan count after a small delay to ensure DB has updated
                 fetchScanCount();
             }
           }, 0);
@@ -874,14 +945,23 @@ const Scanner = () => {
                 -webkit-print-color-adjust: exact;
                 print-color-adjust: exact;
               }
-              /* Enhanced dithering for thermal printers */
+              /* Ensure product image area always prints with visible outline and contrast */
+              .product-image-section {
+                border: 2px solid #000 !important;
+                background: #e5e5e5 !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+              }
               img.product-image {
                 image-rendering: -webkit-optimize-contrast !important;
                 image-rendering: crisp-edges !important;
                 image-rendering: pixelated !important;
                 -webkit-print-color-adjust: exact !important;
                 print-color-adjust: exact !important;
-                filter: contrast(1.2) brightness(0.9) !important;
+                filter: contrast(1.35) brightness(0.88) !important;
+                border: 2px solid #000 !important;
+                outline: 2px solid #000 !important;
+                background: #e0e0e0 !important;
               }
             }
             * {
@@ -969,6 +1049,10 @@ const Scanner = () => {
               flex-shrink: 1;
               overflow: hidden;
               padding: 0.05in;
+              border: 2px solid #000;
+              background: #e5e5e5;
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
             }
             .product-image {
               max-width: 100%;
@@ -976,23 +1060,23 @@ const Scanner = () => {
               width: auto;
               height: auto;
               object-fit: contain;
-              border: 3px solid #000;
-              background: white;
-              box-shadow: 0 0 0 2px #000;
+              border: 2px solid #000;
+              outline: 2px solid #000;
+              background: #e0e0e0;
+              box-shadow: 0 0 0 1px #000;
               padding: 0.02in;
-              /* Dithering mode for thermal printer clarity */
               image-rendering: -webkit-optimize-contrast;
               image-rendering: crisp-edges;
               image-rendering: pixelated;
-              /* Enhanced contrast and dithering effect for thermal printers */
-              filter: contrast(1.2) brightness(0.9) grayscale(0%);
-              /* Force high-quality rendering */
+              filter: contrast(1.35) brightness(0.88);
               -webkit-print-color-adjust: exact;
               print-color-adjust: exact;
-              /* Dithering effect via CSS */
-              image-rendering: auto;
-              image-rendering: -moz-crisp-edges;
-              image-rendering: crisp-edges;
+            }
+            .no-image-text {
+              font-size: 10pt;
+              color: #333;
+              text-align: center;
+              padding: 0.2in;
             }
             .price-section {
               margin-top: auto;
@@ -1072,13 +1156,16 @@ const Scanner = () => {
             ${productInfo.asin ? `ASIN: ${productInfo.asin}` : (productInfo.upc ? `UPC: ${productInfo.upc}` : (productInfo.fnsku ? `FNSKU: ${productInfo.fnsku}` : 'Product Code'))}
           </div>
 
-          ${productInfo.image_url ? `
-            <div class="product-image-section">
+          <div class="product-image-section">
+            ${productInfo.image_url ? `
               <img src="${productInfo.image_url}" alt="Product Image" class="product-image" 
-                   onerror="this.style.display='none';"
-                   style="image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; image-rendering: pixelated; filter: contrast(1.2) brightness(0.9);" />
-            </div>
-          ` : ''}
+                   onerror="this.style.display='none'; var s=this.nextElementSibling; if(s) s.style.display='block';"
+                   style="image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; border: 2px solid #000; outline: 2px solid #000; background: #e0e0e0; filter: contrast(1.35) brightness(0.88); -webkit-print-color-adjust: exact; print-color-adjust: exact;" />
+              <span class="no-image-text" style="display:none;">Product image</span>
+            ` : `
+              <span class="no-image-text">Product image</span>
+            `}
+          </div>
 
           ${retailPrice > 0 ? `
             <div class="price-section">
@@ -1128,15 +1215,18 @@ const Scanner = () => {
           ${productInfo.asin ? `ASIN: ${productInfo.asin}` : (productInfo.upc ? `UPC: ${productInfo.upc}` : (productInfo.fnsku ? `FNSKU: ${productInfo.fnsku}` : 'Product Code'))}
         </div>
 
-        ${productInfo.image_url ? `
-          <div class="product-image-section">
+        <div class="product-image-section">
+          ${productInfo.image_url ? `
             <img src="${productInfo.image_url}" alt="Product Image" class="product-image" 
-                 onerror="this.style.display='none';"
-                 style="image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; image-rendering: pixelated; filter: contrast(1.2) brightness(0.9);" />
-          </div>
-        ` : ''}
+                 onerror="this.style.display='none'; var s=this.nextElementSibling; if(s) s.style.display='block';"
+                 style="image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; border: 2px solid #000; outline: 2px solid #000; background: #e0e0e0; filter: contrast(1.35) brightness(0.88); -webkit-print-color-adjust: exact; print-color-adjust: exact;" />
+            <span class="no-image-text" style="display:none;">Product image</span>
+          ` : `
+            <span class="no-image-text">Product image</span>
+          `}
+        </div>
 
-        ${retailPrice > 0 ? `
+          ${retailPrice > 0 ? `
           <div class="price-section">
             <div class="retail-price">
               <span class="retail-price-label">RETAIL:</span> $${retailPrice.toFixed(2)}
@@ -1206,13 +1296,22 @@ const Scanner = () => {
                 -webkit-print-color-adjust: exact;
                 print-color-adjust: exact;
               }
+              .product-image-section {
+                border: 2px solid #000 !important;
+                background: #e5e5e5 !important;
+                -webkit-print-color-adjust: exact !important;
+                print-color-adjust: exact !important;
+              }
               img.product-image {
                 image-rendering: -webkit-optimize-contrast !important;
                 image-rendering: crisp-edges !important;
                 image-rendering: pixelated !important;
                 -webkit-print-color-adjust: exact !important;
                 print-color-adjust: exact !important;
-                filter: contrast(1.2) brightness(0.9) !important;
+                filter: contrast(1.35) brightness(0.88) !important;
+                border: 2px solid #000 !important;
+                outline: 2px solid #000 !important;
+                background: #e0e0e0 !important;
               }
             }
             * {
@@ -1306,6 +1405,10 @@ const Scanner = () => {
               flex-shrink: 1;
               overflow: hidden;
               padding: 0.05in;
+              border: 2px solid #000;
+              background: #e5e5e5;
+              -webkit-print-color-adjust: exact;
+              print-color-adjust: exact;
             }
             .product-image {
               max-width: 100%;
@@ -1313,16 +1416,23 @@ const Scanner = () => {
               width: auto;
               height: auto;
               object-fit: contain;
-              border: 3px solid #000;
-              background: white;
-              box-shadow: 0 0 0 2px #000;
+              border: 2px solid #000;
+              outline: 2px solid #000;
+              background: #e0e0e0;
+              box-shadow: 0 0 0 1px #000;
               padding: 0.02in;
               image-rendering: -webkit-optimize-contrast;
               image-rendering: crisp-edges;
               image-rendering: pixelated;
-              filter: contrast(1.2) brightness(0.9) grayscale(0%);
+              filter: contrast(1.35) brightness(0.88);
               -webkit-print-color-adjust: exact;
               print-color-adjust: exact;
+            }
+            .no-image-text {
+              font-size: 10pt;
+              color: #333;
+              text-align: center;
+              padding: 0.2in;
             }
             .price-section {
               margin-top: auto;
@@ -1914,13 +2024,103 @@ const Scanner = () => {
     console.log('⏹️ Auto-refresh stopped.');
   };
 
+  // Auto-poll when backend returned processing: true (lightweight GET /api/scan/status every 4s; pass attempt so backend can return "not in database" after 5+ tries)
+  const startProcessingPoll = (codeToPoll) => {
+    if (processingPollTimeoutRef.current) clearTimeout(processingPollTimeoutRef.current);
+    if (processingPollRef.current) clearInterval(processingPollRef.current);
+    let attempts = 0;
+    const maxAttempts = 15;
+    const poll = async () => {
+      attempts++;
+      if (attempts > maxAttempts) {
+        if (processingPollRef.current) {
+          clearInterval(processingPollRef.current);
+          processingPollRef.current = null;
+        }
+        setIsApiProcessing(false);
+        return;
+      }
+      try {
+        const url = getApiEndpoint('/scan/status') + '?code=' + encodeURIComponent(codeToPoll) + '&attempt=' + attempts;
+        const res = await axios.get(url, { timeout: 15000 });
+        const data = res.data;
+        if (data && data.not_in_api_database) {
+          if (processingPollRef.current) {
+            clearInterval(processingPollRef.current);
+            processingPollRef.current = null;
+          }
+          if (processingPollTimeoutRef.current) {
+            clearTimeout(processingPollTimeoutRef.current);
+            processingPollTimeoutRef.current = null;
+          }
+          setIsApiProcessing(false);
+          setNotInDatabaseMessage(data.message || "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time.");
+          setLastScannedCode(codeToPoll);
+          toast.warning(data.message || "This product could not be found in our lookup database.", { autoClose: 8000 });
+          return;
+        }
+        if (data && data.success && !data.processing && data.asin) {
+          if (processingPollRef.current) {
+            clearInterval(processingPollRef.current);
+            processingPollRef.current = null;
+          }
+          if (processingPollTimeoutRef.current) {
+            clearTimeout(processingPollTimeoutRef.current);
+            processingPollTimeoutRef.current = null;
+          }
+          setIsApiProcessing(false);
+          const allImages = data.images || (data.image ? [data.image] : []);
+          const displayableProduct = {
+            fnsku: data.fnsku || codeToPoll,
+            asin: data.asin || '',
+            name: data.title || '',
+            image_url: allImages[0] || '',
+            images: allImages,
+            images_count: allImages.length,
+            videos: data.videos || [],
+            videos_count: data.videos_count || 0,
+            price: data.price || '',
+            brand: data.brand || '',
+            category: data.category || '',
+            description: data.description || '',
+            upc: data.upc || '',
+            amazon_url: data.amazon_url || '',
+            source: data.source || 'api',
+            cost_status: data.cost_status || (data.cached ? 'no_charge' : 'charged')
+          };
+          handleProductFound(displayableProduct, codeToPoll);
+          if (!batchMode) toast.success('Product details ready.', { icon: '💚' });
+          if (data.scan_count) {
+            const isCEO = data.scan_count.is_ceo_admin || false;
+            setIsCEOAdmin(isCEO);
+            setScanCount({
+              used: data.scan_count.used || 0,
+              limit: data.scan_count.limit || null,
+              remaining: data.scan_count.remaining !== null && data.scan_count.remaining !== undefined
+                ? data.scan_count.remaining
+                : (data.scan_count.limit ? Math.max(0, data.scan_count.limit - (data.scan_count.used || 0)) : null),
+              isPaid: data.scan_count.is_paid || false,
+              is_ceo_admin: isCEO
+            });
+          }
+        }
+      } catch (e) {
+        console.warn('Processing poll error:', e);
+      }
+    };
+    processingPollTimeoutRef.current = setTimeout(() => {
+      poll();
+      processingPollRef.current = setInterval(poll, 4000);
+    }, 3000);
+  };
+
   // Add manual check function
   const handleCheckForUpdates = async () => {
     if (!lastScannedCode) {
       toast.error("No recent scan to check for updates");
       return;
     }
-    
+    setNotInDatabaseMessage(null); // Clear so a retry doesn't keep showing "not in database"
     setIsCheckingDatabase(true);
     toast.info("🔍 Checking for ASIN updates...");
     
@@ -1962,6 +2162,34 @@ const Scanner = () => {
       const userScansKey = userId ? `scannedCodes_${userId}` : 'scannedCodes';
       localStorage.removeItem(userScansKey);
       toast.success('All scans cleared');
+    }
+  };
+
+  // Show customer the item again: fetch full product from database (api_lookup_cache) and display
+  const handleRescanFromScan = async (item) => {
+    if (!item?.code) return;
+    setLastScannedCode(item.code);
+    try {
+      const cachedRow = await apiCacheService.getCachedLookup(item.code);
+      const fullProduct = cachedRow ? apiCacheService.mapCacheRowToProductInfo(cachedRow) : null;
+      if (fullProduct) {
+        setProductInfo(fullProduct);
+        productInfoSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        toast.success('Product loaded from database');
+      } else {
+        if (item.productInfo) {
+          setProductInfo(item.productInfo);
+          toast.info('Product displayed (details not in database)');
+        } else {
+          toast.warning('Product not found in database. Scan again to fetch details.');
+        }
+        productInfoSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    } catch (err) {
+      console.error('Rescan from cache failed:', err);
+      if (item?.productInfo) setProductInfo(item.productInfo);
+      productInfoSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      toast.error('Could not load from database');
     }
   };
 
@@ -2227,8 +2455,8 @@ const Scanner = () => {
   return (
     <div className="p-4 md:p-6 lg:p-8">
 
-      {/* Scan Count Display (Free Trial) - Hidden for CEO/Admin */}
-      {!scanCount.isPaid && !isCEOAdmin && (
+      {/* Scan Count Display (Free Trial) - Hidden for CEO/Admin; only show after we know user status to avoid flash */}
+      {!scanCountLoading && !scanCount.isPaid && !isCEOAdmin && (
         <div className="mb-4 bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 border border-indigo-200 dark:border-indigo-800 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
@@ -2505,7 +2733,7 @@ const Scanner = () => {
         </div>
 
         {/* Right Column: Product Information */}
-        <div className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
+        <div ref={productInfoSectionRef} className="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-xl font-semibold text-gray-800 dark:text-white">Product Information</h2>
             <div>
@@ -2534,7 +2762,22 @@ const Scanner = () => {
             </div>
           )}
 
-          {!loading && !productInfo && (
+          {!loading && notInDatabaseMessage && (
+            <div className="mb-4 p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700 rounded-md">
+              <p className="text-sm font-medium text-amber-800 dark:text-amber-200 mb-1">Product not in lookup database</p>
+              <p className="text-sm text-amber-700 dark:text-amber-300">{notInDatabaseMessage}</p>
+              <p className="text-xs text-amber-600 dark:text-amber-400 mt-2">This is not the same as &quot;still loading&quot;—our system does not have this item in its database. You may try again later or add the product manually.</p>
+              <button
+                type="button"
+                className="mt-3 px-3 py-1.5 text-xs font-medium rounded border border-amber-500 text-amber-700 dark:text-amber-300 bg-white dark:bg-gray-800 hover:bg-amber-50 dark:hover:bg-amber-900/30"
+                onClick={() => { setNotInDatabaseMessage(null); setProductInfo(null); }}
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
+
+          {!loading && !productInfo && !notInDatabaseMessage && (
             <div className="text-center py-10 border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-md">
               <p className="text-gray-500 dark:text-gray-400">Scan a barcode, use manual lookup, or search for a product to view details.</p>
             </div>
@@ -2557,9 +2800,9 @@ const Scanner = () => {
                   </button>
                 </div>
               )}
-              {isApiProcessing && !isAutoRefreshing && (
+              {isApiProcessing && !isAutoRefreshing && !notInDatabaseMessage && (
                 <div className="mb-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-800 rounded-md">
-                    <p className="text-sm text-yellow-700 dark:text-yellow-300">API is processing FNSKU: {lastScannedCode}. Use 'Check for Updates' or wait.</p>
+                    <p className="text-sm text-yellow-700 dark:text-yellow-300">We&apos;re looking up this product (FNSKU: {lastScannedCode}). Please try again in a moment or use &apos;Check for Updates&apos;.</p>
                      <button
                         onClick={handleCheckForUpdates}
                         disabled={isCheckingDatabase}
@@ -2567,12 +2810,6 @@ const Scanner = () => {
                     >
                         {isCheckingDatabase ? 'Checking...' : 'Check for Updates'}
                     </button>
-                </div>
-              )}
-               {(productInfo.source === 'fnskutoasin.com' || productInfo.cost_status === 'charged') && (
-                <div className="mb-3 p-3 bg-yellow-100 dark:bg-yellow-900/20 border border-yellow-400 dark:border-yellow-800 rounded-md text-sm text-yellow-800 dark:text-yellow-300 flex items-center">
-                  <CurrencyDollarIcon className="h-5 w-5 text-yellow-600 dark:text-yellow-400 mr-2" />
-                  Retrieved from fnskutoasin.com API - Charged lookup
                 </div>
               )}
               <div className="mb-2 p-2 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-md">
@@ -2694,8 +2931,13 @@ const Scanner = () => {
               )}
 
               <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-1">{productInfo.name || 'N/A'}</h3>
-              <p className="text-sm text-gray-600 dark:text-gray-400 mb-1">FNSKU: {productInfo.fnsku || 'N/A'} {productInfo.asin_found === false && productInfo.source ==='fnskutoasin.com' ? '(No ASIN found)' : ''}</p>
-              
+              <p className="text-sm text-gray-600 dark:text-gray-400 mb-1">FNSKU: {productInfo.fnsku || 'N/A'} {productInfo.asin_found === false ? '(No ASIN found)' : ''}</p>
+              {productInfo.description && (
+                <div className="text-sm text-gray-700 dark:text-gray-300 mb-3 p-2 bg-gray-50 dark:bg-gray-700/50 rounded border border-gray-200 dark:border-gray-600">
+                  <p className="font-medium text-gray-600 dark:text-gray-400 mb-1">Description</p>
+                  <p className="whitespace-pre-wrap">{productInfo.description}</p>
+                </div>
+              )}
               <div className="text-sm space-y-0.5 text-gray-700 dark:text-gray-300 mb-3">
                 <p>LPN (X-Z ASIN): {productInfo.lpn || 'N/A'}</p>
                 <p>FNSKU: {productInfo.fnsku || 'N/A'}</p> {/* Repeated from above for specific layout, can be removed if redundant */}
@@ -2768,12 +3010,19 @@ const Scanner = () => {
                     </div>
                     {item.productInfo ? (
                       <div className="mt-2 space-y-1">
-                        <p className="text-sm font-medium text-gray-900 dark:text-white">{item.productInfo.name || 'Product Name'}</p>
+                        <p className="text-sm font-medium text-gray-900 dark:text-white">{item.productInfo.name || item.code || 'Product'}</p>
+                        {item.productInfo.price != null && item.productInfo.price !== '' && (
+                          <p className="text-sm font-semibold text-green-600 dark:text-green-400">${parseFloat(item.productInfo.price).toFixed(2)}</p>
+                        )}
+                        {(item.productInfo.description || item.productInfo.name) && (
+                          <p className="text-xs text-gray-600 dark:text-gray-400 line-clamp-2 mt-0.5">
+                            {item.productInfo.description || item.productInfo.name}
+                          </p>
+                        )}
                         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-400">
                           {item.productInfo.asin && <span>ASIN: <span className="font-mono">{item.productInfo.asin}</span></span>}
                           {item.productInfo.fnsku && <span>FNSKU: <span className="font-mono">{item.productInfo.fnsku}</span></span>}
                           {item.productInfo.lpn && <span>LPN: <span className="font-mono">{item.productInfo.lpn}</span></span>}
-                          {item.productInfo.price != null && <span>Price: <span className="font-semibold text-green-600 dark:text-green-400">${parseFloat(item.productInfo.price).toFixed(2)}</span></span>}
                         </div>
                         {item.productInfo.image_url && (
                           <img 
@@ -2798,34 +3047,44 @@ const Scanner = () => {
                 </div>
                 {item.productInfo && (
                   <div className="mt-3 flex flex-col gap-2">
-                    {item.productInfo.asin && (
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => handleViewOnAmazonFromScan(item)}
-                          className="flex-1 inline-flex items-center justify-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
-                        >
-                          <ArrowTopRightOnSquareIcon className="h-3 w-3 mr-1" />
-                          View on Amazon
-                        </button>
-                        <button
-                          onClick={() => handlePrintLabelFromScan(item)}
-                          className="flex-1 inline-flex items-center justify-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-                        >
-                          <PrinterIcon className="h-3 w-3 mr-1" />
-                          Print Label
-                        </button>
-                      </div>
-                    )}
-                    <button
-                      onClick={() => {
-                        setProductInfo(item.productInfo);
-                        handleOpenAddToInventory();
-                      }}
-                      className="w-full inline-flex items-center justify-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
-                    >
-                      <ShoppingBagIcon className="h-3 w-3 mr-1" />
-                      Add to Inventory
-                    </button>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => handleRescanFromScan(item)}
+                        className="inline-flex items-center justify-center px-3 py-1.5 border border-gray-300 dark:border-gray-600 text-xs font-medium rounded-md shadow-sm text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                        title="Show this product in the Product Information panel"
+                      >
+                        <ArrowPathIcon className="h-3 w-3 mr-1" />
+                        Rescan
+                      </button>
+                      {item.productInfo.asin && (
+                        <>
+                          <button
+                            onClick={() => handleViewOnAmazonFromScan(item)}
+                            className="inline-flex items-center justify-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
+                          >
+                            <ArrowTopRightOnSquareIcon className="h-3 w-3 mr-1" />
+                            View on Amazon
+                          </button>
+                          <button
+                            onClick={() => handlePrintLabelFromScan(item)}
+                            className="inline-flex items-center justify-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                          >
+                            <PrinterIcon className="h-3 w-3 mr-1" />
+                            Print Label
+                          </button>
+                        </>
+                      )}
+                      <button
+                        onClick={() => {
+                          setProductInfo(item.productInfo);
+                          handleOpenAddToInventory();
+                        }}
+                        className="inline-flex items-center justify-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+                      >
+                        <ShoppingBagIcon className="h-3 w-3 mr-1" />
+                        Add to Inventory
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { toast } from "react-toastify";
 import { FiUser, FiLock, FiLogIn, FiHelpCircle, FiUserPlus } from "react-icons/fi";
+import { BRAND_NAME } from "../config/brand";
 
 const Login = () => {
   const navigate = useNavigate();
@@ -32,19 +33,22 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-gray-100 dark:bg-gray-900 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
       <div className="sm:mx-auto sm:w-full sm:max-w-md">
-        {/* Logo */}
-        <div className="flex justify-center mb-6">
+        {/* Logo + Brand + heading on a card so text always has contrast */}
+        <div className="flex flex-col items-center mb-6 p-6 rounded-lg bg-white dark:bg-gray-800 shadow-sm">
           <img 
             src="/assets/images/logo.png" 
-            alt="Logo" 
+            alt="" 
             className="h-16 w-16 object-contain"
           />
+          <span className="mt-3 text-xl font-semibold text-gray-900 dark:text-gray-100 tracking-tight">
+            {BRAND_NAME}
+          </span>
+          <h2 className="mt-6 text-center text-2xl font-extrabold text-gray-900 dark:text-gray-100">
+            Sign in to your account
+          </h2>
         </div>
-        <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
-          Sign in to your account
-        </h2>
       </div>
 
       <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">

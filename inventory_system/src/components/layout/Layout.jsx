@@ -15,6 +15,7 @@ import {
   XMarkIcon,
 } from '@heroicons/react/24/outline';
 import { FiUser, FiLogOut } from 'react-icons/fi';
+import { BRAND_NAME } from '../../config/brand';
 
 // Map for icon components
 const iconMap = {
@@ -61,14 +62,19 @@ const Layout = () => {
       {/* Desktop Sidebar */}
       <div className={`bg-white dark:bg-gray-800 hidden md:block shadow-lg transition-all duration-300 fixed left-0 top-0 h-screen z-10 ${sidebarCollapsed ? 'w-20' : 'w-64'}`}>
         <div className="flex flex-col h-full">
-          {/* App name/logo */}
+          {/* Logo + ScanScope */}
           <div className="h-16 flex items-center justify-center border-b border-gray-200 dark:border-gray-700 px-4">
-            <Link to="/dashboard" className={`flex items-center ${sidebarCollapsed ? 'justify-center w-full' : 'space-x-3'}`}>
+            <Link to="/dashboard" className={`flex items-center min-w-0 ${sidebarCollapsed ? 'justify-center w-full' : 'space-x-3'}`}>
               <img 
                 src="/assets/images/logo.png" 
-                alt="Logo" 
-                className={`${sidebarCollapsed ? 'h-8 w-8' : 'h-10 w-10'} object-contain`}
+                alt="" 
+                className={`${sidebarCollapsed ? 'h-8 w-8' : 'h-10 w-10'} flex-shrink-0 object-contain`}
               />
+              {!sidebarCollapsed && (
+                <span className="font-semibold text-gray-800 dark:text-gray-100 truncate text-lg tracking-tight">
+                  {BRAND_NAME}
+                </span>
+              )}
             </Link>
           </div>
 
@@ -134,10 +140,19 @@ const Layout = () => {
         }`}
       >
         <div className="flex flex-col h-full">
-          {/* Header with close button */}
+          {/* Logo + ScanScope and close button */}
           <div className="h-16 flex items-center justify-between border-b border-gray-200 dark:border-gray-700 px-4">
-            <h1 className="text-xl font-bold text-gray-800 dark:text-gray-200">Menu</h1>
-            <button onClick={toggleMobileMenu} className="text-gray-500">
+            <Link to="/dashboard" onClick={toggleMobileMenu} className="flex items-center space-x-3 min-w-0">
+              <img 
+                src="/assets/images/logo.png" 
+                alt="" 
+                className="h-10 w-10 flex-shrink-0 object-contain"
+              />
+              <span className="font-semibold text-gray-800 dark:text-gray-100 text-lg tracking-tight">
+                {BRAND_NAME}
+              </span>
+            </Link>
+            <button onClick={toggleMobileMenu} className="text-gray-500 p-1">
               <XMarkIcon className="h-6 w-6" />
             </button>
           </div>
@@ -187,7 +202,7 @@ const Layout = () => {
       <div className={`flex-1 flex flex-col overflow-hidden transition-all duration-300 ${sidebarCollapsed ? 'md:ml-20' : 'md:ml-64'} ml-0`}>
         {/* Header */}
         <header className="bg-white dark:bg-gray-800 shadow h-16 flex items-center justify-between px-6 flex-shrink-0">
-          <div className="flex items-center">
+          <div className="flex items-center min-w-0">
             <button
               onClick={toggleMobileMenu}
               className="text-gray-500 dark:text-gray-400 focus:outline-none md:hidden mr-4"
@@ -204,7 +219,7 @@ const Layout = () => {
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h16" />
               </svg>
             </button>
-            <h1 className="ml-4 text-lg font-semibold text-gray-800 dark:text-gray-200">
+            <h1 className="ml-4 text-lg font-semibold text-gray-800 dark:text-gray-200 truncate">
               {navigationItems.find(item => location.pathname === item.path)?.name || 'Dashboard'}
             </h1>
           </div>

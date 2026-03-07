@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { toast } from 'react-toastify';
 import { FiUser, FiLock, FiMail, FiUserPlus } from 'react-icons/fi';
+import { BRAND_NAME } from '../config/brand';
 
 const Register = () => {
   const [email, setEmail] = useState('');
@@ -53,13 +54,16 @@ const Register = () => {
     <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-md w-full space-y-8">
         <div>
-          {/* Logo */}
-          <div className="flex justify-center mb-6">
+          {/* Logo + Brand name */}
+          <div className="flex flex-col items-center mb-6">
             <img 
               src="/assets/images/logo.png" 
-              alt="Logo" 
+              alt="" 
               className="h-16 w-16 object-contain"
             />
+            <span className="mt-3 text-xl font-semibold text-gray-800 dark:text-gray-100 tracking-tight">
+              {BRAND_NAME}
+            </span>
           </div>
           <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900 dark:text-white">
             Create your account

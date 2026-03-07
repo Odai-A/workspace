@@ -10,6 +10,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { useAuth } from '../../contexts/AuthContext';
 import { useNavigation } from '../../contexts/NavigationContext';
+import { BRAND_NAME } from '../../config/brand';
 
 const Header = () => {
   const { user: currentUser, signOut: logout } = useAuth();
@@ -47,12 +48,15 @@ const Header = () => {
       } md:left-auto md:w-auto w-full`}
     >
       <div className="flex items-center justify-between h-full px-4">
-        <Link to="/dashboard" className="flex items-center space-x-2">
+        <Link to="/dashboard" className="flex items-center space-x-2 min-w-0">
           <img 
             src="/assets/images/logo.png" 
-            alt="Logo" 
-            className="h-8 w-8 object-contain"
+            alt="" 
+            className="h-8 w-8 flex-shrink-0 object-contain"
           />
+          <span className="font-semibold text-gray-800 dark:text-gray-100 text-base tracking-tight truncate">
+            {BRAND_NAME}
+          </span>
         </Link>
         
         <div className="flex items-center space-x-4">

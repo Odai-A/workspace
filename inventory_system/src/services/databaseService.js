@@ -78,6 +78,39 @@ export const apiCacheService = {
   },
 
   /**
+   * Map an api_lookup_cache row to the productInfo shape used by Scanner (name, description, price, images, etc.)
+   */
+  mapCacheRowToProductInfo(cacheRow) {
+    if (!cacheRow) return null;
+    let imageUrl = cacheRow.image_url;
+    let images = [];
+    if (imageUrl != null && typeof imageUrl === 'string' && imageUrl.trim().startsWith('[')) {
+      try {
+        const arr = JSON.parse(imageUrl);
+        images = Array.isArray(arr) ? arr : [imageUrl];
+        imageUrl = images[0] || '';
+      } catch (_) {
+        images = imageUrl ? [imageUrl] : [];
+      }
+    } else if (imageUrl) {
+      images = [imageUrl];
+    }
+    return {
+      name: cacheRow.product_name || cacheRow.asin || cacheRow.fnsku || 'Product',
+      description: cacheRow.description || cacheRow.product_name || '',
+      asin: cacheRow.asin || null,
+      fnsku: cacheRow.fnsku || null,
+      price: cacheRow.price != null ? parseFloat(cacheRow.price) : null,
+      image_url: imageUrl || null,
+      images: images.length > 0 ? images : null,
+      category: cacheRow.category || null,
+      upc: cacheRow.upc || null,
+      source: 'cache',
+      cached: true
+    };
+  },
+
+  /**
    * Saves an external API result (or direct ASIN lookup) to the api_lookup_cache table.
    * This function now expects apiResult to be the object processed by externalApiService.processApiResponse.
    * @param {Object} apiResult - The processed result from the external API or generated ASIN data.
@@ -854,13 +887,14 @@ export const productLookupService = {
         return [];
       }
       
-      // Try with explicit foreign key syntax first
+      // Try with explicit foreign key syntax first (full cache fields so recent scans show full product details)
+      const cacheSelect = 'product_name, asin, fnsku, price, image_url, api_source, category, description, upc';
       let { data, error } = await supabase
         .from('scan_history') 
         .select(`
           id, scanned_code, scanned_at, product_description, manifest_data_id, api_lookup_cache_id,
           manifest_data!manifest_data_id ( ${columnMap.name}, ${columnMap.lpn}, ${columnMap.asin}, ${columnMap.price} ),
-          api_lookup_cache!api_lookup_cache_id ( product_name, asin, price, image_url, api_source )
+          api_lookup_cache!api_lookup_cache_id ( ${cacheSelect} )
         `)
         .eq('user_id', userId) // Only get current user's scan history
         .order('scanned_at', { ascending: false })
@@ -907,7 +941,7 @@ export const productLookupService = {
         if (cacheIds.length > 0) {
           const { data: cacheData } = await supabase
             .from('api_lookup_cache')
-            .select('id, product_name, asin, price, image_url, api_source')
+            .select('id, product_name, asin, fnsku, price, image_url, api_source, category, description, upc')
             .in('id', cacheIds);
           
           if (cacheData) {
@@ -933,19 +967,38 @@ export const productLookupService = {
       }
       console.log("[DB Service] Raw data from scan_history with joins:", data);
 
-      // Transform data to a more usable format for the UI
+      // Helper: image_url from cache can be a JSON array string or a single URL
+      const parseImageUrl = (val) => {
+        if (val == null || val === '') return '';
+        if (typeof val === 'string' && val.trim().startsWith('[')) {
+          try {
+            const arr = JSON.parse(val);
+            return Array.isArray(arr) && arr.length > 0 ? arr[0] : '';
+          } catch (_) { return val; }
+        }
+        return typeof val === 'string' ? val : '';
+      };
+
+      // Transform data to a more usable format for the UI (full product details for "go back to item")
       const mappedData = (data || []).map(scan => {
-        // The joined data will be under manifest_data and api_lookup_cache keys
         const details = scan.api_lookup_cache || scan.manifest_data;
+        const title = scan.product_description || details?.product_name || details?.[columnMap.name] || scan.scanned_code;
+        const longDescription = details?.description || '';
+        const imageUrl = details?.image_url != null ? parseImageUrl(details.image_url) : '';
+        const priceVal = details?.price != null ? parseFloat(details.price).toFixed(2) : (details?.[columnMap.price] != null ? parseFloat(details[columnMap.price]).toFixed(2) : 'N/A');
         return {
             id: scan.id,
             scanned_code: scan.scanned_code,
             scanned_at: scan.scanned_at,
-            description: scan.product_description || details?.product_name || details?.[columnMap.name] || scan.scanned_code,
+            description: title,
+            long_description: longDescription,
             lpn: details?.[columnMap.lpn] || 'N/A',
             asin: details?.asin || details?.[columnMap.asin] || 'N/A',
-            price: details?.price != null ? parseFloat(details.price).toFixed(2) : (details?.[columnMap.price] != null ? parseFloat(details[columnMap.price]).toFixed(2) : 'N/A'),
-            image_url: details?.image_url || '',
+            price: priceVal,
+            image_url: imageUrl,
+            category: details?.category || '',
+            upc: details?.upc || '',
+            fnsku: details?.fnsku || (scan.scanned_code?.startsWith('X') ? scan.scanned_code : null),
             source: scan.api_lookup_cache ? `Cache (${scan.api_lookup_cache.api_source || 'fnskutoasin.com'})` : (scan.manifest_data ? 'Local DB' : 'Scan Event')
         };
       });

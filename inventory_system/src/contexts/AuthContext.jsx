@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { supabase } from '../config/supabaseClient'; // Import your Supabase client
 import { toast } from 'react-toastify'; // Using react-toastify for consistency
+import { getApiEndpoint } from '../utils/apiConfig';
 
 // Create the context
 const AuthContext = createContext(null);
@@ -118,6 +119,29 @@ export const AuthProvider = ({ children }) => {
       }
     };
   }, []);
+
+  // When the creator logs in, ensure they have CEO role (so free trial never shows for them)
+  useEffect(() => {
+    if (!user || !session?.access_token) return;
+    const ensureCreatorIsCEO = async () => {
+      try {
+        const res = await fetch(getApiEndpoint('/creator/ensure-ceo'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${session.access_token}`,
+          },
+        });
+        const data = await res.json().catch(() => ({}));
+        if (data.updated) {
+          console.log('Creator ensured CEO role.');
+        }
+      } catch (e) {
+        // Non-fatal: creator can still use app; they may need to upgrade via settings
+      }
+    };
+    ensureCreatorIsCEO();
+  }, [user?.id, session?.access_token]);
 
   // Sign in with email and password
   const signIn = async (email, password) => {

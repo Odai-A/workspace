@@ -18,6 +18,7 @@ import {
 import { useNavigation } from '../../contexts/NavigationContext';
 import { useAuth } from '../../contexts/AuthContext';
 import ThemeToggle from './ThemeToggle';
+import { BRAND_NAME } from '../../config/brand';
 
 // Map for icon components
 const iconMap = {
@@ -104,13 +105,17 @@ const Sidebar = () => {
         } fixed top-0 left-0 z-10`}
       >
         <div className="flex items-center justify-between h-16 px-4 border-b border-gray-200 dark:border-gray-700">
-          <Link to="/dashboard" className={`flex items-center ${sidebarCollapsed ? 'justify-center w-full' : 'space-x-3'}`}>
-            {/* Logo Image - will show text fallback if image not found */}
+          <Link to="/dashboard" className={`flex items-center min-w-0 ${sidebarCollapsed ? 'justify-center w-full' : 'space-x-3'}`}>
             <img 
               src="/assets/images/logo.png" 
-              alt="Logo" 
-              className={`${sidebarCollapsed ? 'h-8 w-8' : 'h-10 w-10'} object-contain`}
+              alt="" 
+              className={`${sidebarCollapsed ? 'h-8 w-8' : 'h-10 w-10'} flex-shrink-0 object-contain`}
             />
+            {!sidebarCollapsed && (
+              <span className="font-semibold text-gray-800 dark:text-gray-100 truncate text-lg tracking-tight">
+                {BRAND_NAME}
+              </span>
+            )}
           </Link>
           <button
             onClick={toggleSidebar}
@@ -160,14 +165,16 @@ const Sidebar = () => {
             mobileNavOpen ? 'translate-x-0' : '-translate-x-full'
           } transition-transform duration-300 ease-in-out`}
         >
-          <div className="flex items-center justify-between h-16 px-4 border-b border-gray-200">
-            <Link to="/dashboard" className="flex items-center space-x-3">
+          <div className="flex items-center justify-between h-16 px-4 border-b border-gray-200 dark:border-gray-700">
+            <Link to="/dashboard" className="flex items-center space-x-3 min-w-0">
               <img 
                 src="/assets/images/logo.png" 
-                alt="Logo" 
-                className="h-10 w-10 object-contain"
+                alt="" 
+                className="h-10 w-10 flex-shrink-0 object-contain"
               />
-              <h1 className="text-lg font-bold text-blue-600 dark:text-blue-400">Inventory MS</h1>
+              <span className="font-semibold text-gray-800 dark:text-gray-100 text-lg tracking-tight truncate">
+                {BRAND_NAME}
+              </span>
             </Link>
             <button
               onClick={toggleMobileNav}
