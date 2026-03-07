@@ -4,6 +4,7 @@ import { toast } from 'react-toastify';
 import 'react-toastify/dist/ReactToastify.css';
 import axios from 'axios';
 import BarcodeReader from './BarcodeReader';
+import BarcodeScanner from './scanner/BarcodeScanner';
 import MarketplaceListing from './MarketplaceListing';
 import ShopifyListing from './ShopifyListing';
 // Removed: import { getProductLookup, externalApiService } from '../services/api';
@@ -68,8 +69,9 @@ const Scanner = () => {
   const [inventoryLocation, setInventoryLocation] = useState('');
   const [isAddingToInventory, setIsAddingToInventory] = useState(false);
   
-  // State for BarcodeReader component
+  // State for scanner: live camera (BarcodeScanner) primary, photo (BarcodeReader) fallback
   const [isCameraActive, setIsCameraActive] = useState(false);
+  const [usePhotoFallback, setUsePhotoFallback] = useState(false);
   
   // Add states for manual database check and processing status
   const [isCheckingDatabase, setIsCheckingDatabase] = useState(false);
@@ -286,7 +288,7 @@ const Scanner = () => {
       console.warn("handleCodeDetected called with no code:", detectedData);
       return;
     }
-    
+    if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(100);
     // Clean the code by removing whitespace and tab characters, then convert to uppercase
     const cleanedCode = code.trim().replace(/\s+/g, '').toUpperCase();
     console.log("Detected code via Camera:", cleanedCode);
@@ -2980,22 +2982,45 @@ const Scanner = () => {
                     <QrCodeIcon className="h-6 w-6 text-green-400" />
                     Barcode Scanner
                   </h3>
-                  <button
-                    onClick={() => setIsCameraActive(false)}
-                    className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
-                    title="Close Scanner"
-                  >
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {!usePhotoFallback && (
+                      <button
+                        type="button"
+                        onClick={() => setUsePhotoFallback(true)}
+                        className="text-xs text-gray-300 hover:text-white border border-gray-500 hover:border-gray-400 px-2 py-1 rounded"
+                      >
+                        Take photo instead
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => { setIsCameraActive(false); setUsePhotoFallback(false); }}
+                      className="p-2 text-gray-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+                      title="Close Scanner"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
-                <BarcodeReader 
-                  onCodeDetected={handleCodeDetected}
-                  active={isCameraActive}
-                  showViewFinder={true}
-                  className="w-full"
-                />
+                {usePhotoFallback ? (
+                  <BarcodeReader
+                    onCodeDetected={handleCodeDetected}
+                    active={isCameraActive}
+                    showViewFinder={true}
+                    className="w-full"
+                  />
+                ) : (
+                  <BarcodeScanner
+                    scannerRunning={isCameraActive}
+                    onDetected={handleCodeDetected}
+                    onError={() => {}}
+                    onFallbackToPhoto={() => setUsePhotoFallback(true)}
+                    enableOcrFallback={true}
+                    className="w-full"
+                  />
+                )}
               </div>
             </div>
           )}

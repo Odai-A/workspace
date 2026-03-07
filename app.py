@@ -578,9 +578,15 @@ def is_ceo_or_admin(user_id):
     """
     Check if the user has CEO or admin role.
     CEO and admin accounts have unlimited scanning without pricing restrictions.
+    Creator (CREATOR_EMAIL/CREATOR_USER_ID) is always treated as CEO so the free trial never applies to them.
     """
     if not user_id:
         return False
+    
+    # Creator is always CEO (so free trial never shows for them, even before role is synced)
+    if is_creator(user_id):
+        logger.info(f"✅ Creator detected as CEO: user_id={user_id}")
+        return True
     
     role = get_user_role(user_id)
     is_ceo_admin = role in ['ceo', 'admin']

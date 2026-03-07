@@ -14,8 +14,6 @@
   "dependencies": {
     "@emotion/react": "^11.13.3",
     "@emotion/styled": "^11.13.0",
-    "@zxing/browser": "^0.1.0",
-    "@zxing/library": "^0.21.0",
     "@headlessui/react": "^2.2.2",
     "@heroicons/react": "^2.2.0",
     "@hookform/resolvers": "^5.0.1",
@@ -23,6 +21,8 @@
     "@supabase/supabase-js": "^2.49.4",
     "@tanstack/react-table": "^8.21.3",
     "@types/prop-types": "^15.7.14",
+    "@zxing/browser": "^0.1.0",
+    "@zxing/library": "^0.21.0",
     "axios": "^1.8.4",
     "chart.js": "^4.4.9",
     "jsbarcode": "^3.11.6",
@@ -36,6 +36,7 @@
     "react-icons": "^5.5.0",
     "react-router-dom": "^7.5.1",
     "react-toastify": "^11.0.5",
+    "tesseract.js": "^5.1.1",
     "xlsx": "^0.18.5",
     "yup": "^1.6.1"
   },

@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { BrowserMultiFormatReader } from '@zxing/library';
 import { NotFoundException } from '@zxing/library';
 import PropTypes from 'prop-types';
+import { ocrFromImageUrl } from '../utils/ocrBarcodeFallback';
 
 const BarcodeReader = ({ 
   onDetected, 
@@ -21,6 +22,8 @@ const BarcodeReader = ({
   const [previewImage, setPreviewImage] = useState(null);
   const [processedPreview, setProcessedPreview] = useState(null);
   const [result, setResult] = useState(null);
+  const [isOcrRunning, setIsOcrRunning] = useState(false);
+  const [suggestedOcrCode, setSuggestedOcrCode] = useState(null);
 
   // Image preprocessing functions
   const preprocessImage = (canvas, ctx, width, height) => {
@@ -412,6 +415,36 @@ const BarcodeReader = ({
     }
   };
 
+  // Run OCR on current preview image (center ROI ~60%)
+  const handleReadTextInstead = async () => {
+    if (!previewImage) return;
+    setIsOcrRunning(true);
+    setError(null);
+    try {
+      const w = 0.6;
+      const h = 0.6;
+      const roi = { x: (1 - w) / 2, y: (1 - h) / 2, width: w, height: h };
+      const candidate = await ocrFromImageUrl(previewImage, roi);
+      if (candidate) setSuggestedOcrCode(candidate);
+      else setError("Couldn't read text from image. Try better light or a clearer photo.");
+    } catch (e) {
+      setError(e?.message || "OCR failed. Please try again.");
+    } finally {
+      setIsOcrRunning(false);
+    }
+  };
+
+  const handleUseSuggestedCode = () => {
+    if (suggestedOcrCode && handleDetectedCallback) {
+      handleDetectedCallback({ code: suggestedOcrCode, format: 'ocr', confidence: 100 });
+    }
+    setSuggestedOcrCode(null);
+    setError(null);
+    setPreviewImage(null);
+    setProcessedPreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
   // Reset when active changes
   useEffect(() => {
     if (!active) {
@@ -419,8 +452,10 @@ const BarcodeReader = ({
       setProcessedPreview(null);
       setResult(null);
       setError(null);
+      setSuggestedOcrCode(null);
       setIsDecoding(false);
       setIsProcessing(false);
+      setIsOcrRunning(false);
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
       }
@@ -605,8 +640,42 @@ const BarcodeReader = ({
           </div>
         )}
 
+        {/* OCR suggested code confirmation */}
+        {suggestedOcrCode && !result && !isDecoding && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm z-30 p-4">
+            <div className="bg-white dark:bg-gray-800 rounded-lg p-6 max-w-sm w-full text-center shadow-2xl">
+              <p className="text-sm text-gray-600 dark:text-gray-300 mb-1">Did you mean?</p>
+              <p className="text-lg font-mono font-bold text-gray-900 dark:text-white break-all mb-4">{suggestedOcrCode}</p>
+              <div className="flex gap-2 justify-center flex-wrap">
+                <button
+                  type="button"
+                  onClick={handleUseSuggestedCode}
+                  className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded font-medium"
+                >
+                  Use this
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setSuggestedOcrCode(null); setError('No barcode detected. Please try a closer, clearer photo.'); }}
+                  className="px-4 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded font-medium"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* OCR in progress */}
+        {isOcrRunning && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm z-30">
+            <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-amber-400 mb-3" />
+            <p className="text-white font-medium">Reading text...</p>
+          </div>
+        )}
+
         {/* Error message */}
-        {error && !isDecoding && (
+        {error && !isDecoding && !result && !suggestedOcrCode && !isOcrRunning && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-red-500/90 backdrop-blur-sm z-30">
             <div className="bg-white rounded-lg p-6 max-w-sm mx-4 text-center shadow-2xl">
               <div className="mb-4">
@@ -616,12 +685,24 @@ const BarcodeReader = ({
               </div>
               <h3 className="text-xl font-bold text-gray-900 mb-2">Scan Failed</h3>
               <p className="text-gray-700 mb-4">{error}</p>
-              <label
-                htmlFor="barcode-file-input"
-                className="inline-flex items-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600 text-white font-medium rounded-lg transition-colors cursor-pointer"
-              >
-                Try Again
-              </label>
+              <div className="flex flex-col gap-2">
+                {previewImage && (
+                  <button
+                    type="button"
+                    onClick={handleReadTextInstead}
+                    disabled={isOcrRunning}
+                    className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-600 disabled:opacity-50 text-white font-medium rounded-lg transition-colors"
+                  >
+                    Read text instead
+                  </button>
+                )}
+                <label
+                  htmlFor="barcode-file-input"
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-red-500 hover:bg-red-600 text-white font-medium rounded-lg transition-colors cursor-pointer"
+                >
+                  Try Again
+                </label>
+              </div>
             </div>
           </div>
         )}
@@ -639,6 +720,7 @@ const BarcodeReader = ({
               <li>Automatic image enhancement for better detection</li>
               <li>Multi-pass decoding (original, enhanced, rotated, zoomed)</li>
               <li>Works with small or slightly blurry barcodes</li>
+              <li>If barcode is unreadable, use &quot;Read text instead&quot; to scan letters and numbers</li>
               <li>Tap "Take Photo" to open your camera</li>
               <li>Works perfectly on iPhone Safari and all devices</li>
             </ul>
