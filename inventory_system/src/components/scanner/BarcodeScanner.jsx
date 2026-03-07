@@ -186,7 +186,7 @@ const BarcodeScanner = ({
 
       if (!canvasRef.current) canvasRef.current = document.createElement('canvas');
 
-      const scanInterval = 80;
+      const scanInterval = 50;
       scanIntervalRef.current = setInterval(async () => {
         if (!videoRef.current || !canvasRef.current || hasScanned) return;
         if (decodeInFlightRef.current) return;
@@ -305,9 +305,7 @@ const BarcodeScanner = ({
         autoPlay
         muted
         style={{
-          transform: 'scaleX(-1)',
           imageRendering: 'crisp-edges',
-          WebkitTransform: 'scaleX(-1)',
         }}
       />
 
@@ -382,8 +380,6 @@ const BarcodeScanner = ({
           object-fit: cover !important;
           image-rendering: -webkit-optimize-contrast;
           image-rendering: crisp-edges;
-          -webkit-transform: scaleX(-1);
-          transform: scaleX(-1);
           filter: contrast(1.1) brightness(1.05) saturate(1.1);
         }
       `}</style>
