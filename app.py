@@ -350,6 +350,36 @@ def get_trial_start_date(tenant_id, user_id):
         # Default: only count scans from last 30 days
         return default_date
 
+
+def get_used_scan_count(user_id, tenant_id, trial_start_date=None):
+    """
+    Count scans for trial limit: (user_id = X) and (tenant_id = Y or tenant_id is null).
+    When tenant_id is set, includes legacy rows with tenant_id null so count is correct after refresh.
+    Returns 0 if supabase_admin is not available.
+    """
+    if not supabase_admin or not user_id:
+        return 0
+    try:
+        if tenant_id:
+            tid = str(tenant_id)
+            query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                .eq('user_id', user_id) \
+                .or_(f'tenant_id.eq.{tid},tenant_id.is.null')
+        else:
+            query = supabase_admin.from_('scan_history').select('*', count='exact') \
+                .eq('user_id', user_id)
+        if trial_start_date:
+            query = query.gte('scanned_at', trial_start_date.isoformat())
+        scan_res = query.execute()
+        used = getattr(scan_res, 'count', None)
+        if used is None:
+            used = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
+        return used
+    except Exception as e:
+        logger.warning(f"get_used_scan_count error: {e}")
+        return 0
+
+
 def log_scan_to_history(user_id, tenant_id, code, asin, supabase_client, api_lookup_cache_id=None, product_description=None):
     """
     Log a scan to scan_history, but only if this user hasn't already scanned this exact code.
@@ -2318,27 +2348,11 @@ def get_scan_count():
         
         # Get trial start date to exclude old test scans (only for non-CEO/admin, non-paid users)
         trial_start_date = get_trial_start_date(tenant_id, user_id) if not has_unlimited else None
-        
-        # Count scans (only after trial start date for free trial users)
-        if tenant_id:
-            query = supabase_admin.from_('scan_history').select('*', count='exact') \
-                .eq('tenant_id', tenant_id)
-            # Only count scans after trial start date (excludes old test scans)
-            if trial_start_date:
-                query = query.gte('scanned_at', trial_start_date.isoformat())
-            scan_res = query.execute()
-        else:
-            query = supabase_admin.from_('scan_history').select('*', count='exact') \
-                .eq('user_id', user_id)
-            # Only count scans after trial start date (excludes old test scans)
-            if trial_start_date:
-                query = query.gte('scanned_at', trial_start_date.isoformat())
-            scan_res = query.execute()
-        
-        used_scans = getattr(scan_res, 'count', None)
-        if used_scans is None:
-            used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
-        
+
+        used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
+        if used_scans == 0 and not has_unlimited:
+            logger.info(f"Scan-count returned 0 for user_id={user_id}, tenant_id={tenant_id}")
+
         return jsonify({
             "success": True,
             "used_scans": used_scans,
@@ -2705,31 +2719,12 @@ def scan_product():
 
                 # Only check trial limits for non-CEO, non-paid accounts
                 if not is_paid:
-                    # Get trial start date to exclude old test scans
                     trial_start_date = get_trial_start_date(tenant_id, user_id)
-                    
-                    # If we have a tenant, count by tenant; otherwise, fall back to user-based counting
                     if tenant_id:
                         logger.info(f"Checking free trial usage for tenant {tenant_id} (trial started: {trial_start_date})")
-                        query = supabase_admin.from_('scan_history').select('*', count='exact') \
-                            .eq('tenant_id', tenant_id)
-                        # Only count scans after trial start date (excludes old test scans)
-                        if trial_start_date:
-                            query = query.gte('scanned_at', trial_start_date.isoformat())
-                        scan_res = query.execute()
                     else:
                         logger.info(f"Checking free trial usage for user {user_id} (no tenant_id, trial started: {trial_start_date})")
-                        query = supabase_admin.from_('scan_history').select('*', count='exact') \
-                            .eq('user_id', user_id)
-                        # Only count scans after trial start date (excludes old test scans)
-                        if trial_start_date:
-                            query = query.gte('scanned_at', trial_start_date.isoformat())
-                        scan_res = query.execute()
-
-                    used_scans = getattr(scan_res, 'count', None)
-                    if used_scans is None:
-                        used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
-
+                    used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
                     logger.info(f"Free trial usage: used_scans={used_scans}, limit={FREE_TRIAL_SCAN_LIMIT}, "
                                 f"tenant_id={tenant_id}, user_id={user_id}")
 
@@ -2883,18 +2878,7 @@ def scan_product():
                                     is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
                                     if not is_paid and not is_ceo_admin:
                                         trial_start_date = get_trial_start_date(tenant_id, user_id)
-                                        if tenant_id:
-                                            query = supabase_admin.from_('scan_history').select('*', count='exact').eq('tenant_id', tenant_id)
-                                            if trial_start_date:
-                                                query = query.gte('scanned_at', trial_start_date.isoformat())
-                                            scan_res = query.execute()
-                                        else:
-                                            query = supabase_admin.from_('scan_history').select('*', count='exact').eq('user_id', user_id)
-                                            if trial_start_date:
-                                                query = query.gte('scanned_at', trial_start_date.isoformat())
-                                            scan_res = query.execute()
-                                        
-                                        used_scans = getattr(scan_res, 'count', None) or len(scan_res.data) if getattr(scan_res, 'data', None) else 0
+                                        used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
                                         scan_count_data = {
                                             'used': used_scans,
                                             'limit': None if is_ceo_admin or is_paid else FREE_TRIAL_SCAN_LIMIT,
@@ -3011,18 +2995,7 @@ def scan_product():
                                 is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
                                 if not is_paid and not is_ceo_admin:
                                     trial_start_date = get_trial_start_date(tenant_id, user_id)
-                                    if tenant_id:
-                                        query = supabase_admin.from_('scan_history').select('*', count='exact').eq('tenant_id', tenant_id)
-                                        if trial_start_date:
-                                            query = query.gte('scanned_at', trial_start_date.isoformat())
-                                        scan_res = query.execute()
-                                    else:
-                                        query = supabase_admin.from_('scan_history').select('*', count='exact').eq('user_id', user_id)
-                                        if trial_start_date:
-                                            query = query.gte('scanned_at', trial_start_date.isoformat())
-                                        scan_res = query.execute()
-                                    
-                                    used_scans = getattr(scan_res, 'count', None) or len(scan_res.data) if getattr(scan_res, 'data', None) else 0
+                                    used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
                                     scan_count_data = {
                                         'used': used_scans,
                                         'limit': None if is_ceo_admin or is_paid else FREE_TRIAL_SCAN_LIMIT,
@@ -3251,33 +3224,8 @@ def scan_product():
                                         for attempt in range(max_retries):
                                             print(f"   Attempt {attempt + 1}/{max_retries}...")
                                             try:
-                                                if tenant_id:
-                                                    print(f"   Query: tenant_id={tenant_id}, trial_start={trial_start_date}")
-                                                    query = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                                        .eq('tenant_id', tenant_id)
-                                                    # Only count scans after trial start date (excludes old test scans)
-                                                    if trial_start_date:
-                                                        query = query.gte('scanned_at', trial_start_date.isoformat())
-                                                    scan_res = query.execute()
-                                                else:
-                                                    # Match the insert logic: if no tenant_id, count by user_id only
-                                                    print(f"   Query: user_id={user_id} (no tenant_id), trial_start={trial_start_date}")
-                                                    query = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                                        .eq('user_id', user_id)
-                                                    # Only count scans after trial start date (excludes old test scans)
-                                                    if trial_start_date:
-                                                        query = query.gte('scanned_at', trial_start_date.isoformat())
-                                                    scan_res = query.execute()
-                                                
-                                                used_scans = getattr(scan_res, 'count', None)
-                                                if used_scans is None:
-                                                    used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
-                                                
+                                                used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
                                                 print(f"   Count result: {used_scans} scans found")
-                                                if hasattr(scan_res, 'data') and scan_res.data:
-                                                    print(f"   Sample records: {scan_res.data[:3]}")
-                                                
-                                                # If scan was logged and count is still 0, wait a bit and retry
                                                 if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
                                                     import time
                                                     wait_time = 0.3 * (attempt + 1)  # Increasing wait time
@@ -3483,23 +3431,7 @@ def scan_product():
                             used_scans = 0
                             for attempt in range(max_retries):
                                 try:
-                                    if tenant_id:
-                                        query = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                            .eq('tenant_id', tenant_id)
-                                        if trial_start_date:
-                                            query = query.gte('scanned_at', trial_start_date.isoformat())
-                                        scan_res = query.execute()
-                                    else:
-                                        query = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                            .eq('user_id', user_id)
-                                        if trial_start_date:
-                                            query = query.gte('scanned_at', trial_start_date.isoformat())
-                                        scan_res = query.execute()
-                                    
-                                    used_scans = getattr(scan_res, 'count', None)
-                                    if used_scans is None:
-                                        used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
-                                    
+                                    used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
                                     if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
                                         import time
                                         time.sleep(0.3 * (attempt + 1))
@@ -3653,42 +3585,16 @@ def scan_product():
                                     
                                     for attempt in range(max_retries):
                                         print(f"   Attempt {attempt + 1}/{max_retries}...")
-                                        if tenant_id:
-                                            print(f"   Query: tenant_id={tenant_id}, trial_start={trial_start_date}")
-                                            query = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                                .eq('tenant_id', tenant_id)
-                                            # Only count scans after trial start date (excludes old test scans)
-                                            if trial_start_date:
-                                                query = query.gte('scanned_at', trial_start_date.isoformat())
-                                            scan_res = query.execute()
-                                        else:
-                                            # Match the insert logic: if no tenant_id, count by user_id only
-                                            print(f"   Query: user_id={user_id} (no tenant_id), trial_start={trial_start_date}")
-                                            query = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                                .eq('user_id', user_id)
-                                            # Only count scans after trial start date (excludes old test scans)
-                                            if trial_start_date:
-                                                query = query.gte('scanned_at', trial_start_date.isoformat())
-                                            scan_res = query.execute()
-                                        
-                                        used_scans = getattr(scan_res, 'count', None)
-                                        if used_scans is None:
-                                            used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
-                                        
+                                        used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
                                         print(f"   Count result: {used_scans} scans found")
-                                        if hasattr(scan_res, 'data') and scan_res.data:
-                                            print(f"   Sample records: {scan_res.data[:3]}")
-                                        
-                                        # If scan was logged and count is still 0, wait a bit and retry
                                         if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
                                             import time
-                                            wait_time = 0.3 * (attempt + 1)  # Increasing wait time
+                                            wait_time = 0.3 * (attempt + 1)
                                             print(f"   ⏳ Waiting {wait_time}s before retry...")
                                             time.sleep(wait_time)
                                             logger.info(f"   Retry {attempt + 1}/{max_retries}: count was 0, retrying...")
                                         else:
                                             break
-                                    
                                     logger.info(f"📊 FNSKU cached scan count: used={used_scans}, was_logged={scan_was_logged}, limit={FREE_TRIAL_SCAN_LIMIT}")
                                     print(f"📊📊📊 FINAL SCAN COUNT: {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
                                     scan_count_data = {
@@ -4053,8 +3959,9 @@ def scan_product():
                 logger.info(f"⏳ Short poll done, ASIN not yet available. Returning processing - user can Check for Updates or scan again.")
         
         # Final ASIN validation - return processing response so frontend can show partial + Check for Updates
+        # Log this scan here so it counts toward the free trial; GET /api/scan/status does not log (no user context).
         if not asin or not isinstance(asin, str) or len(asin.strip()) < 10:
-            return jsonify({
+            processing_response = {
                 "success": True,
                 "fnsku": code,
                 "asin": "",
@@ -4068,7 +3975,46 @@ def scan_product():
                 "processing": True,
                 "scan_task_id": str(task_id) if task_id else None,
                 "bar_code": code
-            }), 200
+            }
+            scan_count_data = None
+            if supabase_admin and user_id:
+                scan_was_logged = log_scan_to_history(
+                    user_id, tenant_id, code, code or '', supabase_admin,
+                    api_lookup_cache_id=None,
+                    product_description=(scan_data.get('productName') or scan_data.get('name') or '') if scan_data else ''
+                )
+                try:
+                    is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
+                    if not is_paid and not is_ceo_admin:
+                        trial_start_date = get_trial_start_date(tenant_id, user_id)
+                        used_scans = 0
+                        max_retries = 3 if scan_was_logged else 1
+                        for _attempt in range(max_retries):
+                            used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
+                            if not scan_was_logged or used_scans > 0 or _attempt == max_retries - 1:
+                                break
+                            import time
+                            time.sleep(0.2 * (_attempt + 1))
+                        scan_count_data = {
+                            'used': used_scans,
+                            'limit': FREE_TRIAL_SCAN_LIMIT,
+                            'remaining': max(0, FREE_TRIAL_SCAN_LIMIT - used_scans),
+                            'is_paid': False,
+                            'is_ceo_admin': is_ceo_admin
+                        }
+                    else:
+                        scan_count_data = {
+                            'used': 0,
+                            'limit': None,
+                            'remaining': None,
+                            'is_paid': is_paid,
+                            'is_ceo_admin': is_ceo_admin
+                        }
+                except Exception as count_error:
+                    logger.error(f"Error getting scan count for processing response: {count_error}")
+                if scan_count_data:
+                    processing_response['scan_count'] = scan_count_data
+            return jsonify(processing_response), 200
         
         # STEP 4: If we have ASIN, fetch from Rainforest API
         rainforest_data = None
@@ -4259,42 +4205,16 @@ def scan_product():
                     
                     for attempt in range(max_retries):
                         print(f"   Attempt {attempt + 1}/{max_retries}...")
-                        if tenant_id:
-                            print(f"   Query: tenant_id={tenant_id}, trial_start={trial_start_date}")
-                            query = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                .eq('tenant_id', tenant_id)
-                            # Only count scans after trial start date (excludes old test scans)
-                            if trial_start_date:
-                                query = query.gte('scanned_at', trial_start_date.isoformat())
-                            scan_res = query.execute()
-                        else:
-                            # Match the insert logic: if no tenant_id, count by user_id only
-                            print(f"   Query: user_id={user_id} (no tenant_id), trial_start={trial_start_date}")
-                            query = supabase_admin.from_('scan_history').select('*', count='exact') \
-                                .eq('user_id', user_id)
-                            # Only count scans after trial start date (excludes old test scans)
-                            if trial_start_date:
-                                query = query.gte('scanned_at', trial_start_date.isoformat())
-                            scan_res = query.execute()
-                        
-                        used_scans = getattr(scan_res, 'count', None)
-                        if used_scans is None:
-                            used_scans = len(scan_res.data) if getattr(scan_res, 'data', None) else 0
-                        
+                        used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
                         print(f"   Count result: {used_scans} scans found")
-                        if hasattr(scan_res, 'data') and scan_res.data:
-                            print(f"   Sample records: {scan_res.data[:3]}")
-                        
-                        # If scan was logged and count is still 0, wait a bit and retry
                         if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
                             import time
-                            wait_time = 0.3 * (attempt + 1)  # Increasing wait time
+                            wait_time = 0.3 * (attempt + 1)
                             print(f"   ⏳ Waiting {wait_time}s before retry...")
                             time.sleep(wait_time)
                             logger.info(f"   Retry {attempt + 1}/{max_retries}: count was 0, retrying...")
                         else:
                             break
-                    
                     logger.info(f"📊 Scan count calculated: used={used_scans}, limit={FREE_TRIAL_SCAN_LIMIT}, "
                                f"was_logged={scan_was_logged}, user_id={user_id}, tenant_id={tenant_id}")
                     print(f"📊📊📊 FINAL SCAN COUNT (non-cached): {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
@@ -4415,6 +4335,29 @@ def scan_product():
         }), 500
 
 
+def _scan_count_for_response(user_id, tenant_id):
+    """Build scan_count dict for inclusion in API responses; returns None if not applicable."""
+    if not user_id or not supabase_admin:
+        return None
+    try:
+        is_ceo_admin = is_ceo_or_admin(user_id)
+        is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
+        if is_ceo_admin or is_paid:
+            return {'used': 0, 'limit': None, 'remaining': None, 'is_paid': is_paid, 'is_ceo_admin': is_ceo_admin}
+        trial_start_date = get_trial_start_date(tenant_id, user_id)
+        used = get_used_scan_count(user_id, tenant_id, trial_start_date)
+        return {
+            'used': used,
+            'limit': FREE_TRIAL_SCAN_LIMIT,
+            'remaining': max(0, FREE_TRIAL_SCAN_LIMIT - used),
+            'is_paid': False,
+            'is_ceo_admin': is_ceo_admin
+        }
+    except Exception as e:
+        logger.warning(f"scan_count for status response: {e}")
+        return None
+
+
 @app.route('/api/scan/status', methods=['GET'])
 def scan_status():
     """
@@ -4424,6 +4367,7 @@ def scan_status():
     """
     code = (request.args.get('code') or '').strip().upper()
     attempt = request.args.get('attempt', type=int) or 0
+    user_id, tenant_id = get_ids_from_request()
     if not code:
         return jsonify({"success": False, "error": "Invalid code", "message": "Query param 'code' is required"}), 400
     if not supabase_admin:
@@ -4465,7 +4409,7 @@ def scan_status():
                     cat = cached.get('category', '')
                 if not desc:
                     desc = cached.get('description', '')
-                return jsonify({
+                full_response = {
                     "success": True, "fnsku": cached.get('fnsku', code), "asin": cached_asin,
                     "title": cached.get('product_name', ''), "price": str(cached.get('price', 0)) if cached.get('price') else '',
                     "image": all_images[0] if all_images else (cached.get('image_url') or ''),
@@ -4473,7 +4417,11 @@ def scan_status():
                     "brand": brand, "category": cat, "description": desc, "upc": cached.get('upc', ''),
                     "amazon_url": f"https://www.amazon.com/dp/{cached_asin}" if cached_asin else '',
                     "source": "cache", "cost_status": "no_charge", "cached": True
-                })
+                }
+                scan_count_data = _scan_count_for_response(user_id, tenant_id)
+                if scan_count_data:
+                    full_response['scan_count'] = scan_count_data
+                return jsonify(full_response)
         FNSKU_API_KEY = os.environ.get('FNSKU_API_KEY')
         RAINFOREST_API_KEY = os.environ.get('RAINFOREST_API_KEY')
         if not FNSKU_API_KEY:
@@ -4546,6 +4494,9 @@ def scan_status():
             except Exception as rf_err:
                 logger.warning(f"Rainforest error in scan_status: {rf_err}")
         response_data, _ = _build_fnsku_scan_response_and_save(code, asin, scan_data, rainforest_data, supabase_admin)
+        scan_count_data = _scan_count_for_response(user_id, tenant_id)
+        if scan_count_data:
+            response_data['scan_count'] = scan_count_data
         return jsonify(response_data)
     except Exception as e:
         logger.error(f"Error in scan_status: {str(e)}")

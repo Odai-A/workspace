@@ -878,6 +878,44 @@ export const productLookupService = {
     }
   },
 
+  /**
+   * Lightweight recent scans: scan_history only, no joins. Use for fast initial load; full details via getRecentScanEvents.
+   */
+  async getRecentScanEventsLight(limit = 10) {
+    try {
+      const userId = await getCurrentUserId();
+      if (!userId) return [];
+      const { data, error } = await supabase
+        .from('scan_history')
+        .select('id, scanned_code, scanned_at, product_description')
+        .eq('user_id', userId)
+        .order('scanned_at', { ascending: false })
+        .limit(limit);
+      if (error) {
+        console.warn('[DB Service] getRecentScanEventsLight error:', error);
+        return [];
+      }
+      return (data || []).map(scan => ({
+        id: scan.id,
+        scanned_code: scan.scanned_code,
+        scanned_at: scan.scanned_at,
+        description: scan.product_description || scan.scanned_code,
+        long_description: '',
+        lpn: 'N/A',
+        asin: 'N/A',
+        price: null,
+        image_url: '',
+        category: '',
+        upc: '',
+        fnsku: scan.scanned_code?.startsWith('X') ? scan.scanned_code : null,
+        source: 'Scan Event'
+      }));
+    } catch (err) {
+      console.warn('[DB Service] getRecentScanEventsLight exception:', err);
+      return [];
+    }
+  },
+
   async getRecentScanEvents(limit = 5) {
     try {
       // Get current user ID

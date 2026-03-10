@@ -20,7 +20,7 @@ import { getApiUrl, getApiEndpoint } from '../utils/apiConfig';
  * Scanner component for barcode scanning and product lookup
  */
 const Scanner = () => {
-  const { user } = useAuth();
+  const { user, session, loading: authLoading } = useAuth();
   const userId = user?.id;
   const navigate = useNavigate();
   const [scannedCodes, setScannedCodes] = useState([]);
@@ -97,6 +97,33 @@ const Scanner = () => {
   const [scanCountLoading, setScanCountLoading] = useState(true); // true until we know status — avoids showing trial banner to CEO/admin
   const [isCEOAdmin, setIsCEOAdmin] = useState(false);
 
+  const persistScanCount = (used, limit, remaining) => {
+    if (!userId) return;
+    try {
+      sessionStorage.setItem(`scanCount_${userId}`, JSON.stringify({ used, limit, remaining }));
+    } catch (_) { /* ignore */ }
+  };
+
+  // Restore last known scan count from sessionStorage so we don't show 0 on refresh before API returns
+  useEffect(() => {
+    if (!userId) return;
+    try {
+      const key = `scanCount_${userId}`;
+      const raw = sessionStorage.getItem(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed.used === 'number') {
+          setScanCount(prev => ({
+            ...prev,
+            used: parsed.used,
+            limit: parsed.limit != null ? parsed.limit : prev.limit,
+            remaining: parsed.remaining != null ? parsed.remaining : prev.remaining
+          }));
+        }
+      }
+    } catch (_) { /* ignore */ }
+  }, [userId]);
+
   // Cleanup intervals on unmount
   useEffect(() => {
     return () => {
@@ -133,94 +160,106 @@ const Scanner = () => {
       }
     }
     
-    // Also load recent scans from database (filtered by user_id)
+    // Load recent scans: light query first (fast list), then full data in background so images and details appear
     const loadRecentScansFromDB = async () => {
+      const toScannedCodesFormat = (scan) => {
+        const numPrice = scan.price != null && scan.price !== '' && scan.price !== 'N/A' ? parseFloat(scan.price) : null;
+        const price = numPrice != null && !Number.isNaN(numPrice) ? numPrice : null;
+        const imgUrl = scan.image_url && String(scan.image_url).trim() ? scan.image_url : null;
+        return {
+          code: scan.scanned_code,
+          timestamp: scan.scanned_at,
+          type: scan.scanned_code?.startsWith('B0') ? 'ASIN' : (scan.scanned_code?.startsWith('X') ? 'FNSKU' : 'UPC'),
+          productInfo: {
+            name: scan.description || scan.scanned_code,
+            asin: scan.asin && scan.asin !== 'N/A' ? scan.asin : null,
+            fnsku: scan.fnsku || (scan.scanned_code?.startsWith('X') ? scan.scanned_code : null),
+            price,
+            image_url: imgUrl,
+            images: imgUrl ? [imgUrl] : [],
+            category: scan.category || null,
+            description: scan.long_description || scan.description || null,
+            upc: scan.upc || null
+          }
+        };
+      };
+
       try {
-        const recentScans = await dbProductLookupService.getRecentScanEvents(20); // Load last 20 scans
-        if (recentScans && recentScans.length > 0) {
-          // Convert database format to scannedCodes format
-          const dbScans = recentScans.map(scan => {
-            const numPrice = scan.price != null && scan.price !== '' && scan.price !== 'N/A' ? parseFloat(scan.price) : null;
-            const price = numPrice != null && !Number.isNaN(numPrice) ? numPrice : null;
-            const imgUrl = scan.image_url && String(scan.image_url).trim() ? scan.image_url : null;
-            return {
-              code: scan.scanned_code,
-              timestamp: scan.scanned_at,
-              type: scan.scanned_code?.startsWith('B0') ? 'ASIN' : (scan.scanned_code?.startsWith('X') ? 'FNSKU' : 'UPC'),
-              productInfo: {
-                name: scan.description || scan.scanned_code,
-                asin: scan.asin && scan.asin !== 'N/A' ? scan.asin : null,
-                fnsku: scan.fnsku || (scan.scanned_code?.startsWith('X') ? scan.scanned_code : null),
-                price,
-                image_url: imgUrl,
-                images: imgUrl ? [imgUrl] : [],
-                category: scan.category || null,
-                description: scan.long_description || scan.description || null,
-                upc: scan.upc || null
-              }
-            };
-          });
-          
-          // Prefer DB recent scans (full product details) then add any from localStorage not already in DB
+        const recentScansLight = await dbProductLookupService.getRecentScanEventsLight(10);
+        if (recentScansLight && recentScansLight.length > 0) {
+          const dbScansLight = recentScansLight.map(toScannedCodesFormat);
           setScannedCodes(prev => {
-            const dbCodes = new Set(dbScans.map(s => s.code));
+            const dbCodes = new Set(dbScansLight.map(s => s.code));
             const fromStorage = prev.filter(s => !dbCodes.has(s.code));
-            const merged = [...dbScans, ...fromStorage].slice(0, 50);
-            return merged;
+            return [...dbScansLight, ...fromStorage].slice(0, 50);
+          });
+        }
+
+        // Load full data (with joins for images, price, etc.) and merge into list so product images appear
+        const recentScansFull = await dbProductLookupService.getRecentScanEvents(10);
+        if (recentScansFull && recentScansFull.length > 0) {
+          const dbScansFull = recentScansFull.map(toScannedCodesFormat);
+          setScannedCodes(prev => {
+            const fullByCode = new Map(dbScansFull.map(s => [s.code, s]));
+            if (prev.length === 0) return dbScansFull.slice(0, 50);
+            return prev.map(item => fullByCode.get(item.code) || item);
           });
         }
       } catch (error) {
         console.error('Error loading recent scans from database:', error);
       }
     };
-    
+
     loadRecentScansFromDB();
   }, [userId]);
 
-  // Fetch scan count on mount and when user changes
-  const fetchScanCount = async () => {
+  // Fetch scan count only when auth is ready and we have a session token. Retry once on 401; never set used to 0 on failure.
+  const fetchScanCount = async (isRetry = false) => {
     if (!userId) return;
-    
+    const token = session?.access_token;
+    if (!token) return;
+
     setScanCountLoading(true);
     try {
-      // Get Supabase session token for auth
-      const { supabase } = await import('../config/supabaseClient');
-      const { data: { session } } = await supabase.auth.getSession();
-      const token = session?.access_token || '';
-      
       const response = await axios.get(getApiEndpoint('/scan-count'), {
-        headers: token ? {
-          'Authorization': `Bearer ${token}`
-        } : {}
+        headers: { 'Authorization': `Bearer ${token}` }
       });
-      
+
       if (response.data?.success) {
         const isCEO = response.data.is_ceo_admin || false;
+        const used = response.data.used_scans ?? 0;
+        const limit = response.data.limit ?? null;
+        const remaining = response.data.remaining !== null && response.data.remaining !== undefined
+          ? response.data.remaining
+          : (response.data.limit != null ? Math.max(0, response.data.limit - (response.data.used_scans ?? 0)) : null);
         setIsCEOAdmin(isCEO);
         setScanCount({
-          used: response.data.used_scans || 0,
-          limit: response.data.limit || null,
-          remaining: response.data.remaining !== null && response.data.remaining !== undefined 
-            ? response.data.remaining 
-            : (response.data.limit ? Math.max(0, response.data.limit - (response.data.used_scans || 0)) : null),
-          isPaid: response.data.is_paid || false,
+          used,
+          limit,
+          remaining,
+          isPaid: response.data.is_paid ?? false,
           is_ceo_admin: isCEO
         });
+        persistScanCount(used, limit, remaining);
       }
     } catch (error) {
+      const status = error.response?.status;
+      if (status === 401 && !isRetry) {
+        await new Promise(r => setTimeout(r, 900));
+        return fetchScanCount(true);
+      }
       console.error('Error fetching scan count:', error);
-      // Don't show error toast - just log it
+      setScanCount(prev => ({ ...prev, limit: prev.limit ?? 50 }));
     } finally {
       setScanCountLoading(false);
     }
   };
 
-  // Fetch scan count on mount and when userId changes
   useEffect(() => {
-    if (userId) {
+    if (!authLoading && userId && session?.access_token) {
       fetchScanCount();
     }
-  }, [userId]);
+  }, [authLoading, userId, session?.access_token]);
 
   // Save scanned codes to user-specific localStorage whenever they change
   useEffect(() => {
@@ -705,15 +744,19 @@ const Scanner = () => {
             toast.info(batchMode ? "Looking up..." : (apiResult.message || "Looking up this product. It will update automatically when ready."), { autoClose: batchMode ? 1500 : 4000 });
             handleProductFound(displayableProduct, code, apiResult);
             if (apiResult.scan_count) {
+              const used = apiResult.scan_count.used || 0;
+              const limit = apiResult.scan_count.limit || null;
+              const remaining = apiResult.scan_count.remaining !== null && apiResult.scan_count.remaining !== undefined
+                ? apiResult.scan_count.remaining
+                : (apiResult.scan_count.limit ? Math.max(0, apiResult.scan_count.limit - (apiResult.scan_count.used || 0)) : null);
+              persistScanCount(used, limit, remaining);
               setTimeout(() => {
                 const isCEO = apiResult.scan_count.is_ceo_admin || false;
                 setIsCEOAdmin(isCEO);
                 setScanCount({
-                  used: apiResult.scan_count.used || 0,
-                  limit: apiResult.scan_count.limit || null,
-                  remaining: apiResult.scan_count.remaining !== null && apiResult.scan_count.remaining !== undefined
-                    ? apiResult.scan_count.remaining
-                    : (apiResult.scan_count.limit ? Math.max(0, apiResult.scan_count.limit - (apiResult.scan_count.used || 0)) : null),
+                  used,
+                  limit,
+                  remaining,
                   isPaid: apiResult.scan_count.is_paid || false,
                   is_ceo_admin: isCEO
                 });
@@ -758,26 +801,30 @@ const Scanner = () => {
           // Set product info - pass apiResult to detect incomplete data
           handleProductFound(displayableProduct, code, apiResult);
           
-          // Update scan count from response if available; use requestAnimationFrame to avoid setState during render
+          // Prefer scan_count from response to avoid extra /api/scan-count refetch; backend includes it in all scan responses
           requestAnimationFrame(() => {
             setTimeout(() => {
               console.log("📊 Scan response scan_count:", apiResult.scan_count);
               if (apiResult.scan_count) {
                 console.log("✅ Updating scan count from response:", apiResult.scan_count);
+                const used = apiResult.scan_count.used || 0;
+                const limit = apiResult.scan_count.limit || null;
+                const remaining = apiResult.scan_count.remaining !== null && apiResult.scan_count.remaining !== undefined
+                  ? apiResult.scan_count.remaining
+                  : (apiResult.scan_count.limit ? Math.max(0, apiResult.scan_count.limit - (apiResult.scan_count.used || 0)) : null);
+                persistScanCount(used, limit, remaining);
                 const isCEO = apiResult.scan_count.is_ceo_admin || false;
                 setIsCEOAdmin(isCEO);
                 setScanCount({
-                  used: apiResult.scan_count.used || 0,
-                  limit: apiResult.scan_count.limit || null,
-                  remaining: apiResult.scan_count.remaining !== null && apiResult.scan_count.remaining !== undefined 
-                    ? apiResult.scan_count.remaining 
-                    : (apiResult.scan_count.limit ? Math.max(0, apiResult.scan_count.limit - (apiResult.scan_count.used || 0)) : null),
+                  used,
+                  limit,
+                  remaining,
                   isPaid: apiResult.scan_count.is_paid || false,
                   is_ceo_admin: isCEO
                 });
               } else {
                 console.log("⚠️ No scan_count in response, fetching...");
-                fetchScanCount();
+                fetchScanCount(); // Fallback when backend omits scan_count
               }
             }, 0);
           });
@@ -2229,7 +2276,12 @@ const Scanner = () => {
       }
       try {
         const url = getApiEndpoint('/scan/status') + '?code=' + encodeURIComponent(codeToPoll) + '&attempt=' + attempts;
-        const res = await axios.get(url, { timeout: 15000 });
+        const { data: { session } } = await supabase.auth.getSession();
+        const token = session?.access_token || '';
+        const res = await axios.get(url, {
+          timeout: 15000,
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
         const data = res.data;
         if (data && data.not_in_api_database) {
           if (processingPollRef.current) {
@@ -2281,14 +2333,18 @@ const Scanner = () => {
           handleProductFound(displayableProduct, codeToPoll);
           if (!batchMode) toast.success('Product details ready.', { icon: '💚' });
           if (data.scan_count) {
+            const used = data.scan_count.used || 0;
+            const limit = data.scan_count.limit || null;
+            const remaining = data.scan_count.remaining !== null && data.scan_count.remaining !== undefined
+              ? data.scan_count.remaining
+              : (data.scan_count.limit ? Math.max(0, data.scan_count.limit - (data.scan_count.used || 0)) : null);
+            persistScanCount(used, limit, remaining);
             const isCEO = data.scan_count.is_ceo_admin || false;
             setIsCEOAdmin(isCEO);
             setScanCount({
-              used: data.scan_count.used || 0,
-              limit: data.scan_count.limit || null,
-              remaining: data.scan_count.remaining !== null && data.scan_count.remaining !== undefined
-                ? data.scan_count.remaining
-                : (data.scan_count.limit ? Math.max(0, data.scan_count.limit - (data.scan_count.used || 0)) : null),
+              used,
+              limit,
+              remaining,
               isPaid: data.scan_count.is_paid || false,
               is_ceo_admin: isCEO
             });
@@ -2678,8 +2734,8 @@ const Scanner = () => {
   return (
     <div className="p-4 md:p-6 lg:p-8">
 
-      {/* Scan Count Display (Free Trial) - Hidden for CEO/Admin; only show after we know user status to avoid flash */}
-      {!scanCountLoading && !scanCount.isPaid && !isCEOAdmin && (
+      {/* Scan Count Display (Free Trial) - Show banner with minimal loading state so layout stays stable; hide once we know user is CEO/paid */}
+      {(scanCountLoading || (!scanCount.isPaid && !isCEOAdmin)) && (
         <div className="mb-4 bg-gradient-to-r from-indigo-50 to-purple-50 dark:from-indigo-900/20 dark:to-purple-900/20 border border-indigo-200 dark:border-indigo-800 rounded-lg p-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
@@ -2691,7 +2747,9 @@ const Scanner = () => {
               <div>
                 <h3 className="text-sm font-medium text-gray-700 dark:text-gray-300">Free Trial Scans</h3>
                 {scanCountLoading ? (
-                  <p className="text-xs text-gray-500 dark:text-gray-400">Loading...</p>
+                  <p className="text-lg font-bold text-indigo-600 dark:text-indigo-400 animate-pulse">
+                    … / 50 scans used
+                  </p>
                 ) : (
                   <p className="text-lg font-bold text-indigo-600 dark:text-indigo-400">
                     {scanCount.used} / {scanCount.limit || 50} scans used
@@ -2704,14 +2762,14 @@ const Scanner = () => {
                 )}
               </div>
             </div>
-            {scanCount.remaining !== null && scanCount.remaining <= 10 && scanCount.remaining > 0 && (
+            {!scanCountLoading && scanCount.remaining !== null && scanCount.remaining <= 10 && scanCount.remaining > 0 && (
               <div className="flex-shrink-0">
                 <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400">
                   ⚠️ {scanCount.remaining} scans left
                 </span>
               </div>
             )}
-            {scanCount.remaining === 0 && (
+            {!scanCountLoading && scanCount.remaining === 0 && (
               <div className="flex-shrink-0">
                 <button
                   onClick={() => {
@@ -2730,7 +2788,7 @@ const Scanner = () => {
               </div>
             )}
           </div>
-          {scanCount.remaining !== null && scanCount.remaining > 0 && (
+          {!scanCountLoading && scanCount.remaining !== null && scanCount.remaining > 0 && scanCount.limit > 0 && (
             <div className="mt-3">
               <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
                 <div
