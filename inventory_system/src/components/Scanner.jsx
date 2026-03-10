@@ -89,6 +89,8 @@ const Scanner = () => {
   const processingPollRef = useRef(null);
   const processingPollTimeoutRef = useRef(null);
   const productInfoSectionRef = useRef(null);
+  const batchModeRef = useRef(batchMode);
+  batchModeRef.current = batchMode;
 
   // State for scan count (free trial tracking)
   const [scanCount, setScanCount] = useState({ used: 0, limit: 50, remaining: 50, isPaid: false, is_ceo_admin: false });
@@ -137,21 +139,27 @@ const Scanner = () => {
         const recentScans = await dbProductLookupService.getRecentScanEvents(20); // Load last 20 scans
         if (recentScans && recentScans.length > 0) {
           // Convert database format to scannedCodes format
-          const dbScans = recentScans.map(scan => ({
-            code: scan.scanned_code,
-            timestamp: scan.scanned_at,
-            type: scan.scanned_code?.startsWith('B0') ? 'ASIN' : (scan.scanned_code?.startsWith('X') ? 'FNSKU' : 'UPC'),
-            productInfo: {
-              name: scan.description || scan.scanned_code,
-              asin: scan.asin !== 'N/A' ? scan.asin : null,
-              fnsku: scan.fnsku || (scan.scanned_code?.startsWith('X') ? scan.scanned_code : null),
-              price: scan.price !== 'N/A' ? parseFloat(scan.price) : null,
-              image_url: scan.image_url || null,
-              category: scan.category || null,
-              description: scan.long_description || scan.description || null,
-              upc: scan.upc || null
-            }
-          }));
+          const dbScans = recentScans.map(scan => {
+            const numPrice = scan.price != null && scan.price !== '' && scan.price !== 'N/A' ? parseFloat(scan.price) : null;
+            const price = numPrice != null && !Number.isNaN(numPrice) ? numPrice : null;
+            const imgUrl = scan.image_url && String(scan.image_url).trim() ? scan.image_url : null;
+            return {
+              code: scan.scanned_code,
+              timestamp: scan.scanned_at,
+              type: scan.scanned_code?.startsWith('B0') ? 'ASIN' : (scan.scanned_code?.startsWith('X') ? 'FNSKU' : 'UPC'),
+              productInfo: {
+                name: scan.description || scan.scanned_code,
+                asin: scan.asin && scan.asin !== 'N/A' ? scan.asin : null,
+                fnsku: scan.fnsku || (scan.scanned_code?.startsWith('X') ? scan.scanned_code : null),
+                price,
+                image_url: imgUrl,
+                images: imgUrl ? [imgUrl] : [],
+                category: scan.category || null,
+                description: scan.long_description || scan.description || null,
+                upc: scan.upc || null
+              }
+            };
+          });
           
           // Prefer DB recent scans (full product details) then add any from localStorage not already in DB
           setScannedCodes(prev => {
@@ -578,20 +586,17 @@ const Scanner = () => {
       setBatchQueue(prev => {
         const idx = prev.findIndex(item => item.code === code);
         if (idx >= 0) {
-          // Update existing item (e.g. when processing poll returns full data) so labels get full data
+          // Update existing item (e.g. when processing poll returns full data) – same fast path as single scan
           const updated = [...prev];
-          updated[idx] = { ...updated[idx], product, timestamp: queueItem.timestamp };
+          updated[idx] = { ...updated[idx], product, timestamp: queueItem.timestamp, isProcessing: false, hasFailed: false };
           toast.success(`Product updated.`, { autoClose: 1000 });
           return updated;
         }
         const newQueue = [...prev, queueItem];
-        // Use setTimeout to avoid setState during render warning
         if (isIncomplete) {
-          console.log(`🔄 Product ${code} is incomplete - starting automatic retry...`);
-          setTimeout(() => {
-            toast.warning(`Product ${code} is still processing. Will retry automatically...`, { autoClose: 3000 });
-            retryScanInBatch(code, 0);
-          }, 0);
+          // Rely on the same processing poll as single scan (startProcessingPoll) – no separate retry delay
+          console.log(`🔄 Product ${code} is processing – updating automatically when ready (same as single scan).`);
+          setTimeout(() => toast.info(`Looking up ${code}… updating automatically when ready.`, { autoClose: 2000 }), 0);
         } else {
           console.log(`✅ Product ${code} is complete - added to queue`);
           setTimeout(() => {
@@ -697,7 +702,7 @@ const Scanner = () => {
               source: apiResult.source || 'api',
               cost_status: apiResult.cost_status || 'charged'
             };
-            toast.info(batchMode ? "Looking up..." : (apiResult.message || "We're looking up this product. Please try again in a moment or use 'Check for Updates'."), { autoClose: batchMode ? 1500 : 4000 });
+            toast.info(batchMode ? "Looking up..." : (apiResult.message || "Looking up this product. It will update automatically when ready."), { autoClose: batchMode ? 1500 : 4000 });
             handleProductFound(displayableProduct, code, apiResult);
             if (apiResult.scan_count) {
               setTimeout(() => {
@@ -2202,12 +2207,12 @@ const Scanner = () => {
     console.log('⏹️ Auto-refresh stopped.');
   };
 
-  // Auto-poll when backend returned processing: true (lightweight GET /api/scan/status every 4s; pass attempt so backend can return "not in database" after 5+ tries)
+  // Auto-poll when backend returned processing: true (first poll immediately, then every 2s; no manual "Check for Updates" needed)
   const startProcessingPoll = (codeToPoll) => {
     if (processingPollTimeoutRef.current) clearTimeout(processingPollTimeoutRef.current);
     if (processingPollRef.current) clearInterval(processingPollRef.current);
     let attempts = 0;
-    const maxAttempts = 15;
+    const maxAttempts = 30; // 30 * 2s ≈ 60s total; full data appears automatically when ready
     const poll = async () => {
       attempts++;
       if (attempts > maxAttempts) {
@@ -2216,6 +2221,10 @@ const Scanner = () => {
           processingPollRef.current = null;
         }
         setIsApiProcessing(false);
+        if (batchModeRef.current) {
+          setBatchQueue(prev => prev.map(item => item.code === codeToPoll ? { ...item, isProcessing: false, hasFailed: true } : item));
+          toast.warning(`Could not retrieve data for ${codeToPoll} in time. You can retry from the queue.`, { autoClose: 4000 });
+        }
         return;
       }
       try {
@@ -2234,6 +2243,9 @@ const Scanner = () => {
           setIsApiProcessing(false);
           setNotInDatabaseMessage(data.message || "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time.");
           setLastScannedCode(codeToPoll);
+          if (batchModeRef.current) {
+            setBatchQueue(prev => prev.map(item => item.code === codeToPoll ? { ...item, isProcessing: false, hasFailed: true } : item));
+          }
           toast.warning(data.message || "This product could not be found in our lookup database.", { autoClose: 8000 });
           return;
         }
@@ -2286,10 +2298,9 @@ const Scanner = () => {
         console.warn('Processing poll error:', e);
       }
     };
-    processingPollTimeoutRef.current = setTimeout(() => {
-      poll();
-      processingPollRef.current = setInterval(poll, 4000);
-    }, 3000);
+    // First poll immediately, then every 2s so full data appears as soon as it's ready (no manual "Check for Updates")
+    poll();
+    processingPollRef.current = setInterval(poll, 2000);
   };
 
   // Add manual check function
@@ -3082,15 +3093,9 @@ const Scanner = () => {
                 </div>
               )}
               {isApiProcessing && !isAutoRefreshing && !notInDatabaseMessage && (
-                <div className="mb-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-800 rounded-md">
-                    <p className="text-sm text-yellow-700 dark:text-yellow-300">We&apos;re looking up this product (FNSKU: {lastScannedCode}). Please try again in a moment or use &apos;Check for Updates&apos;.</p>
-                     <button
-                        onClick={handleCheckForUpdates}
-                        disabled={isCheckingDatabase}
-                        className="mt-1 inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded shadow-sm text-white bg-yellow-500 hover:bg-yellow-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-400"
-                    >
-                        {isCheckingDatabase ? 'Checking...' : 'Check for Updates'}
-                    </button>
+                <div className="mb-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-800 rounded-md flex items-center gap-2">
+                    <span className="inline-block h-4 w-4 border-2 border-yellow-500 border-t-transparent rounded-full animate-spin" aria-hidden="true" />
+                    <p className="text-sm text-yellow-700 dark:text-yellow-300">Looking up this product (FNSKU: {lastScannedCode}). Updating automatically—no need to do anything.</p>
                 </div>
               )}
               <div className="mb-2 p-2 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-md">
@@ -3280,43 +3285,53 @@ const Scanner = () => {
         </div>
         {scannedCodes.length > 0 ? (
           <div className="space-y-4 max-h-96 overflow-y-auto">
-            {scannedCodes.map((item, index) => (
+            {scannedCodes.map((item, index) => {
+              const imgUrl = item.productInfo?.image_url || (item.productInfo?.images && item.productInfo.images[0]);
+              const priceVal = item.productInfo?.price;
+              const numPrice = priceVal != null && priceVal !== '' ? parseFloat(priceVal) : null;
+              const hasRealPrice = numPrice != null && !Number.isNaN(numPrice) && numPrice > 0;
+              const priceDisplay = hasRealPrice ? `$${numPrice.toFixed(2)}` : null;
+              return (
               <div key={`${item.code}-${item.timestamp}-${index}`} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:bg-gray-50 dark:hover:bg-gray-700">
-                <div className="flex justify-between items-start mb-2">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="font-mono text-sm font-semibold text-gray-800 dark:text-gray-200">{item.code}</span>
-                      <span className="capitalize text-xs text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded">({item.type})</span>
-                      <span className="text-xs text-gray-400 dark:text-gray-500">{new Date(item.timestamp).toLocaleString()}</span>
+                <div className="flex justify-between items-start gap-3">
+                  <div className="flex flex-1 min-w-0 gap-3">
+                    <div className="shrink-0 w-16 h-16 rounded-lg border border-gray-200 dark:border-gray-600 overflow-hidden bg-white dark:bg-gray-600 flex items-center justify-center">
+                      {imgUrl ? (
+                        <img
+                          src={imgUrl}
+                          alt={item.productInfo?.name || item.code || 'Product'}
+                          className="w-full h-full object-contain"
+                          onError={(e) => { e.target.style.display = 'none'; e.target.nextElementSibling?.classList.remove('hidden'); }}
+                        />
+                      ) : null}
+                      <div className={`w-full h-full flex items-center justify-center text-gray-400 ${imgUrl ? 'hidden' : ''}`}>
+                        <QrCodeIcon className="h-8 w-8" />
+                      </div>
                     </div>
-                    {item.productInfo ? (
-                      <div className="mt-2 space-y-1">
-                        <p className="text-sm font-medium text-gray-900 dark:text-white">{item.productInfo.name || item.code || 'Product'}</p>
-                        {item.productInfo.price != null && item.productInfo.price !== '' && (
-                          <p className="text-sm font-semibold text-green-600 dark:text-green-400">${parseFloat(item.productInfo.price).toFixed(2)}</p>
-                        )}
-                        {(item.productInfo.description || item.productInfo.name) && (
-                          <p className="text-xs text-gray-600 dark:text-gray-400 line-clamp-2 mt-0.5">
-                            {item.productInfo.description || item.productInfo.name}
-                          </p>
-                        )}
-                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-400">
-                          {item.productInfo.asin && <span>ASIN: <span className="font-mono">{item.productInfo.asin}</span></span>}
-                          {item.productInfo.fnsku && <span>FNSKU: <span className="font-mono">{item.productInfo.fnsku}</span></span>}
-                          {item.productInfo.lpn && <span>LPN: <span className="font-mono">{item.productInfo.lpn}</span></span>}
-                        </div>
-                        {item.productInfo.image_url && (
-                          <img 
-                            src={item.productInfo.image_url} 
-                            alt={item.productInfo.name || 'Product'} 
-                            className="mt-2 h-16 w-16 object-contain border border-gray-200 dark:border-gray-600 rounded"
-                            onError={(e) => { e.target.style.display = 'none'; }}
-                          />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 mb-0.5 flex-wrap">
+                        <span className="font-mono text-sm font-semibold text-gray-800 dark:text-gray-200">{item.code}</span>
+                        <span className="capitalize text-xs text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded">({item.type})</span>
+                        {priceDisplay ? (
+                          <span className="text-sm font-semibold text-green-600 dark:text-green-400">{priceDisplay}</span>
+                        ) : (
+                          <span className="text-xs italic text-amber-600 dark:text-amber-400">No price</span>
                         )}
                       </div>
-                    ) : (
-                      <p className="text-xs text-gray-500 dark:text-gray-400 italic mt-1">Loading product details...</p>
-                    )}
+                      <span className="text-xs text-gray-400 dark:text-gray-500">{new Date(item.timestamp).toLocaleString()}</span>
+                      {item.productInfo ? (
+                        <div className="mt-2 space-y-1">
+                          <p className="text-sm font-medium text-gray-900 dark:text-white line-clamp-2">{item.productInfo.name || item.code || 'Product'}</p>
+                          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-400">
+                            {item.productInfo.asin && <span>ASIN: <span className="font-mono">{item.productInfo.asin}</span></span>}
+                            {item.productInfo.fnsku && <span>FNSKU: <span className="font-mono">{item.productInfo.fnsku}</span></span>}
+                            {item.productInfo.lpn && <span>LPN: <span className="font-mono">{item.productInfo.lpn}</span></span>}
+                          </div>
+                        </div>
+                      ) : (
+                        <p className="text-xs text-gray-500 dark:text-gray-400 italic mt-1">Loading product details...</p>
+                      )}
+                    </div>
                   </div>
                   <button
                     onClick={() => handleDeleteScan(index)}
@@ -3369,7 +3384,8 @@ const Scanner = () => {
                   </div>
                 )}
               </div>
-            ))}
+            );
+            })}
           </div>
         ) : (
           <p className="text-center text-gray-500 py-4">No recent scans.</p>

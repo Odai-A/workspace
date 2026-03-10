@@ -889,11 +889,12 @@ export const productLookupService = {
       
       // Try with explicit foreign key syntax first (full cache fields so recent scans show full product details)
       const cacheSelect = 'product_name, asin, fnsku, price, image_url, api_source, category, description, upc';
+      const manifestSelect = `${columnMap.name}, ${columnMap.lpn}, ${columnMap.asin}, ${columnMap.price}, ${columnMap.image_url}`;
       let { data, error } = await supabase
         .from('scan_history') 
         .select(`
           id, scanned_code, scanned_at, product_description, manifest_data_id, api_lookup_cache_id,
-          manifest_data!manifest_data_id ( ${columnMap.name}, ${columnMap.lpn}, ${columnMap.asin}, ${columnMap.price} ),
+          manifest_data!manifest_data_id ( ${manifestSelect} ),
           api_lookup_cache!api_lookup_cache_id ( ${cacheSelect} )
         `)
         .eq('user_id', userId) // Only get current user's scan history
@@ -927,7 +928,7 @@ export const productLookupService = {
         if (manifestIds.length > 0) {
           const { data: manifestData } = await supabase
             .from('manifest_data')
-            .select(`id, ${columnMap.name}, ${columnMap.lpn}, ${columnMap.asin}, ${columnMap.price}`)
+            .select(`id, ${columnMap.name}, ${columnMap.lpn}, ${columnMap.asin}, ${columnMap.price}, ${columnMap.image_url}`)
             .in('id', manifestIds);
           
           if (manifestData) {
@@ -979,13 +980,22 @@ export const productLookupService = {
         return typeof val === 'string' ? val : '';
       };
 
+      // Helper: only treat as real price if API/cache returned a valid number > 0 (don't show $0 or N/A when we have no price)
+      const toRealPrice = (val) => {
+        if (val == null || val === '') return null;
+        const n = typeof val === 'number' ? val : parseFloat(val);
+        if (Number.isNaN(n) || n <= 0) return null;
+        return n.toFixed(2);
+      };
+
       // Transform data to a more usable format for the UI (full product details for "go back to item")
-      const mappedData = (data || []).map(scan => {
+      let mappedData = (data || []).map(scan => {
         const details = scan.api_lookup_cache || scan.manifest_data;
         const title = scan.product_description || details?.product_name || details?.[columnMap.name] || scan.scanned_code;
         const longDescription = details?.description || '';
         const imageUrl = details?.image_url != null ? parseImageUrl(details.image_url) : '';
-        const priceVal = details?.price != null ? parseFloat(details.price).toFixed(2) : (details?.[columnMap.price] != null ? parseFloat(details[columnMap.price]).toFixed(2) : 'N/A');
+        const rawPrice = details?.price != null ? details.price : details?.[columnMap.price];
+        const priceVal = toRealPrice(rawPrice);
         return {
             id: scan.id,
             scanned_code: scan.scanned_code,
@@ -1002,6 +1012,40 @@ export const productLookupService = {
             source: scan.api_lookup_cache ? `Cache (${scan.api_lookup_cache.api_source || 'fnskutoasin.com'})` : (scan.manifest_data ? 'Local DB' : 'Scan Event')
         };
       });
+
+      // Fallback: for scans with no image/price (e.g. api_lookup_cache_id was null), look up by scanned_code in api_lookup_cache
+      const needsEnrichment = mappedData.filter(m => (!m.image_url || m.image_url === '') || m.price == null);
+      if (needsEnrichment.length > 0) {
+        const codes = [...new Set(needsEnrichment.map(m => m.scanned_code).filter(Boolean))];
+        const codeToCache = {};
+        try {
+          const { data: byFnsku } = await supabase.from('api_lookup_cache').select('id, product_name, asin, fnsku, price, image_url, category, description, upc').in('fnsku', codes);
+          const { data: byAsin } = await supabase.from('api_lookup_cache').select('id, product_name, asin, fnsku, price, image_url, category, description, upc').in('asin', codes);
+          [].concat(byFnsku || [], byAsin || []).forEach(row => {
+            if (row.fnsku) codeToCache[row.fnsku] = row;
+            if (row.asin) codeToCache[row.asin] = row;
+          });
+          mappedData = mappedData.map(m => {
+            const fallback = codeToCache[m.scanned_code];
+            if (!fallback) return m;
+            const imageUrl = m.image_url || (fallback?.image_url != null ? parseImageUrl(fallback.image_url) : '');
+            const priceVal = m.price != null ? m.price : toRealPrice(fallback?.price);
+            return {
+              ...m,
+              description: m.description || fallback?.product_name || m.scanned_code,
+              image_url: imageUrl,
+              price: priceVal,
+              asin: m.asin !== 'N/A' ? m.asin : (fallback?.asin || 'N/A'),
+              fnsku: m.fnsku || fallback?.fnsku || null,
+              category: m.category || fallback?.category || '',
+              upc: m.upc || fallback?.upc || ''
+            };
+          });
+        } catch (enrichErr) {
+          console.warn('[DB Service] Fallback cache enrichment failed:', enrichErr);
+        }
+      }
+
       console.log("[DB Service] Mapped scan_history data:", mappedData);
       return mappedData;
 

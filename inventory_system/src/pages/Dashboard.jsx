@@ -385,29 +385,45 @@ const Dashboard = () => {
           </div>
           {recentScans.length > 0 ? (
             <div className="space-y-3">
-              {recentScans.map((scan) => (
-                <div key={scan.id} className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600">
-                  <div className="flex items-center min-w-0 flex-1">
-                    <div className="p-2 bg-purple-100 dark:bg-purple-500/20 rounded-full mr-3 shrink-0">
-                      <QrCodeIcon className="h-5 w-5 text-purple-600 dark:text-purple-400" />
+              {recentScans.map((scan) => {
+                const numPrice = typeof scan.price === 'number' ? scan.price : parseFloat(scan.price);
+                const hasRealPrice = scan.price != null && scan.price !== '' && !Number.isNaN(numPrice) && numPrice > 0;
+                const priceDisplay = hasRealPrice ? `$${numPrice.toFixed(2)}` : null;
+                const hasImage = scan.image_url && String(scan.image_url).trim();
+                return (
+                  <div key={scan.id} className="flex items-center gap-3 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600">
+                    <div className="shrink-0 w-12 h-12 rounded-lg border border-gray-200 dark:border-gray-600 overflow-hidden bg-white dark:bg-gray-600 flex items-center justify-center">
+                      {hasImage ? (
+                        <img
+                          src={scan.image_url}
+                          alt={scan.description || scan.scanned_code}
+                          className="w-full h-full object-contain"
+                          onError={(e) => { e.target.style.display = 'none'; e.target.nextElementSibling?.classList.remove('hidden'); }}
+                        />
+                      ) : null}
+                      <QrCodeIcon className={`h-6 w-6 text-purple-500 dark:text-purple-400 ${hasImage ? 'hidden' : ''}`} />
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-medium text-gray-900 dark:text-white truncate" title={scan.description || scan.scanned_code}>
                         {scan.description || scan.scanned_code}
                       </p>
                       <p className="text-xs text-gray-500 dark:text-gray-400 truncate">
-                        {scan.lpn && `LPN: ${scan.lpn} • `}
-                        {scan.asin && `ASIN: ${scan.asin} • `}
-                        {typeof scan.price === 'number' && `Price: $${scan.price.toFixed(2)}`}
+                        {scan.lpn && scan.lpn !== 'N/A' && `LPN: ${scan.lpn} • `}
+                        {scan.asin && scan.asin !== 'N/A' && `ASIN: ${scan.asin} • `}
+                        {priceDisplay ? (
+                          <span className="font-semibold text-green-600 dark:text-green-400">{priceDisplay}</span>
+                        ) : (
+                          <span className="italic text-amber-600 dark:text-amber-400">No price</span>
+                        )}
                       </p>
                     </div>
+                    <div className="flex items-center text-xs text-gray-400 dark:text-gray-500 whitespace-nowrap shrink-0">
+                      <ClockIcon className="h-4 w-4 mr-1" />
+                      {formatDate(scan.scanned_at)}
+                    </div>
                   </div>
-                  <div className="flex items-center text-xs text-gray-400 dark:text-gray-500 whitespace-nowrap ml-2">
-                    <ClockIcon className="h-4 w-4 mr-1 shrink-0" />
-                    {formatDate(scan.scanned_at)}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <p className="text-sm text-gray-500 dark:text-gray-400 text-center py-4">

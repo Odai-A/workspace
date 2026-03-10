@@ -3966,8 +3966,8 @@ def scan_product():
                 asin = str(potential_asin).strip()
         
         task_id = scan_data.get('id') if scan_data else None
-        max_polls = 3  # Short poll: 2-3 attempts (~4-6s max) then return processing so first response is fast
-        poll_interval = 2000  # 2 seconds
+        max_polls = 4  # Short poll: up to 4 attempts then return processing; frontend auto-polls until ready
+        poll_interval = 1500  # 1.5 seconds between polls
         retry_add_or_get_after = 2
         
         # If ASIN not available, poll for it
@@ -4002,11 +4002,11 @@ def scan_product():
                 # Poll for ASIN - check immediately on first attempt, then wait between polls
                 # Only wait if this isn't the first attempt and we haven't just done a retry
                 if attempt > 1 and attempt != retry_add_or_get_after + 1:
-                    # Wait before polling (except first attempt and right after retry)
+                    # Shorter waits so we get ASIN sooner; frontend auto-polls for full data
                     if attempt == 2:
-                        time.sleep(1)  # Short initial wait
+                        time.sleep(0.5)
                     else:
-                        time.sleep(poll_interval / 1000)  # 2 seconds between polls
+                        time.sleep(poll_interval / 1000)  # 1.5 seconds between polls
                 
                 try:
                     poll_response = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=5)  # Reduced timeout
