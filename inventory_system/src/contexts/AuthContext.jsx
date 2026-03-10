@@ -167,7 +167,6 @@ export const AuthProvider = ({ children }) => {
     }
     
     console.log('✅ Supabase configured, attempting sign in...');
-    setLoading(true);
     try {
       const { data, error } = await supabase.auth.signInWithPassword({
         email,
@@ -175,29 +174,47 @@ export const AuthProvider = ({ children }) => {
       });
       
       if (error) {
-        console.error('❌ Supabase sign in error:', error);
         throw error;
       }
       
       console.log('✅ Sign in successful!', { userId: data.user?.id, email: data.user?.email });
-      // setUser and setSession will be handled by onAuthStateChange
-      toast.success('Authentication successful. You have been signed in.');
+      // Update state immediately so navigate("/dashboard") in Login sees isAuthenticated true
+      // (onAuthStateChange may fire later; without this we'd redirect back to /login)
+      setSession(data.session);
+      setUser(data.user ?? null);
+      const appMeta = data.user?.app_metadata || data.user?.raw_app_meta_data || {};
+      const hasTenant = !!appMeta.tenant_id;
+      if (!hasTenant) {
+        toast.info('Your account is not fully set up yet. Go to Pricing to choose a plan and complete your business setup.', { autoClose: 8000 });
+      } else {
+        toast.success('You have been signed in.');
+      }
       return { success: true, user: data.user, session: data.session };
     } catch (error) {
-      console.error('❌ Error signing in:', error);
-      const errorMessage = error.message || 'Authentication failed. Please verify your credentials and try again.';
-      toast.error(errorMessage);
+      const msg = (error && error.message) ? String(error.message).toLowerCase() : '';
+      const code = error?.code || error?.status;
+      let userMessage;
+      if (code === 'email_not_confirmed' || msg.includes('email not confirmed') || msg.includes('email_not_confirmed')) {
+        userMessage = 'Please verify your email address. Check your inbox for the confirmation link, then try signing in again.';
+      } else if (code === 'invalid_login_credentials' || msg.includes('invalid login credentials') || msg.includes('invalid_login_credentials')) {
+        userMessage = 'Invalid email or password. Please check your credentials and try again.';
+      } else if (msg.includes('user not found') || msg.includes('invalid credentials')) {
+        userMessage = 'Invalid email or password. Please check your credentials and try again.';
+      } else {
+        userMessage = error?.message || 'Sign-in failed. Please check your email and password and try again.';
+        console.error('Sign-in error:', error);
+      }
+      if (import.meta.env.DEV) {
+        console.warn('Sign-in error (shown to user):', userMessage);
+      }
       logAuthState('signin-exception', { error });
-      return { success: false, error: errorMessage };
-    } finally {
-      setLoading(false);
+      return { success: false, error: userMessage };
     }
   };
 
   // Sign up with email and password
   const signUp = async (email, password, additionalData = {}) => {
     console.log('SignUp attempt with email:', email);
-    setLoading(true);
     try {
       const { data, error } = await supabase.auth.signUp({
         email,
@@ -218,11 +235,22 @@ export const AuthProvider = ({ children }) => {
       return { success: true, user: data.user, session: data.session };
     } catch (error) {
       console.error('Error signing up:', error.message);
-      toast.error(error.message || 'Registration failed. Please verify your information and try again.');
+      const msg = (error && error.message) ? String(error.message).toLowerCase() : '';
+      let userMessage;
+      if (msg.includes('user already registered') || msg.includes('already been registered') || msg.includes('already exists')) {
+        userMessage = 'An account with this email already exists. Sign in instead, or use "Forgot password" if you don\'t remember it.';
+      } else if (msg.includes('email not confirmed') || msg.includes('confirm your email')) {
+        userMessage = 'Please confirm your email using the link we sent you, then try signing in.';
+      } else if (msg.includes('password') && (msg.includes('least') || msg.includes('6 character'))) {
+        userMessage = 'Password must be at least 6 characters. Please choose a longer password.';
+      } else if (msg.includes('invalid email') || msg.includes('valid email')) {
+        userMessage = 'Please enter a valid email address.';
+      } else {
+        userMessage = error?.message || 'Registration failed. Please check your information and try again.';
+      }
+      toast.error(userMessage);
       logAuthState('signup-exception', { error });
-      return { success: false, error: error.message };
-    } finally {
-      setLoading(false);
+      return { success: false, error: userMessage };
     }
   };
 

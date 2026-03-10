@@ -534,7 +534,7 @@ def get_ids_from_request():
                 if app_meta and 'tenant_id' in app_meta:
                     tenant_id = app_meta['tenant_id']
                 else:
-                    logger.warning(f"tenant_id not found in app_metadata for user {user_id}")
+                    logger.debug(f"tenant_id not found in app_metadata for user {user_id}")
             else:
                 logger.warning(f"No user object in Supabase get_user response. Token: {token[:10]}...")
 
@@ -1076,7 +1076,7 @@ def get_subscription_status():
         
         tenant_res = supabase_admin.table('tenants').select(
             'subscription_status, stripe_subscription_id, stripe_customer_id'
-        ).eq('id', tenant_id).single().execute()
+        ).eq('id', tenant_id).limit(1).execute()
         
         if hasattr(tenant_res, 'error') and tenant_res.error:
             logger.error(f"Error fetching tenant {tenant_id} status: {tenant_res.error.message}")
@@ -1085,14 +1085,15 @@ def get_subscription_status():
                 'has_active_subscription': False
             }), 200
         
-        subscription_status = tenant_res.data.get('subscription_status', 'incomplete') if tenant_res.data else 'incomplete'
+        tenant_row = tenant_res.data[0] if tenant_res.data and len(tenant_res.data) > 0 else None
+        subscription_status = tenant_row.get('subscription_status', 'incomplete') if tenant_row else 'incomplete'
         has_active_subscription = subscription_status in ['active', 'trialing']
         
         return jsonify({
             'subscription_status': subscription_status,
             'has_active_subscription': has_active_subscription,
-            'stripe_subscription_id': tenant_res.data.get('stripe_subscription_id') if tenant_res.data else None,
-            'stripe_customer_id': tenant_res.data.get('stripe_customer_id') if tenant_res.data else None
+            'stripe_subscription_id': tenant_row.get('stripe_subscription_id') if tenant_row else None,
+            'stripe_customer_id': tenant_row.get('stripe_customer_id') if tenant_row else None
         }), 200
         
     except Exception as e:
@@ -5299,11 +5300,12 @@ def check_creator_status():
 @app.route('/api/creator/ensure-ceo', methods=['POST'])
 def ensure_creator_is_ceo():
     """
-    If the current user is the creator (CREATOR_EMAIL/CREATOR_USER_ID), ensure they have CEO role.
+    If the current user is the creator (CREATOR_EMAIL/CREATOR_USER_ID), ensure they have CEO role
+    and a tenant (so /api/users/limits and /api/subscription-status don't log missing tenant_id).
     Idempotent: safe to call on every load; no-op if not creator or already CEO.
     """
     try:
-        user_id, _ = get_ids_from_request()
+        user_id, tenant_id = get_ids_from_request()
         if not user_id:
             return jsonify({'updated': False, 'reason': 'unauthorized'}), 401
         if not supabase_admin:
@@ -5311,20 +5313,52 @@ def ensure_creator_is_ceo():
 
         if not is_creator(user_id):
             return jsonify({'updated': False, 'reason': 'not_creator'}), 200
-        if is_ceo_or_admin(user_id):
-            return jsonify({'updated': False, 'reason': 'already_ceo_admin'}), 200
 
-        # Creator but not CEO yet: upgrade
-        supabase_admin.auth.admin.update_user_by_id(
-            user_id,
-            {'app_metadata': {'role': 'ceo'}, 'user_metadata': {'role': 'ceo'}}
-        )
-        try:
-            supabase_admin.from_('users').update({'role': 'ceo'}).eq('id', user_id).execute()
-        except Exception as e:
-            logger.warning(f"Users table update for CEO: {e}")
-        logger.info(f"Creator {user_id} ensured CEO role via ensure-ceo")
-        return jsonify({'updated': True, 'role': 'ceo'}), 200
+        updated = False
+
+        # If creator has no tenant, create one so limits/subscription-status work and we don't spam logs
+        if not tenant_id:
+            try:
+                creator_res = supabase_admin.auth.admin.get_user_by_id(user_id)
+                creator_email = getattr(creator_res.user, 'email', None) if getattr(creator_res, 'user', None) else None
+                tenant_name = f"{creator_email}'s Organization" if creator_email else f"Creator {str(user_id)[:8]}"
+                tenant_res = supabase_admin.table('tenants').insert({"name": tenant_name}).execute()
+                if tenant_res.data and tenant_res.data[0]:
+                    new_tenant_id = tenant_res.data[0]['id']
+                    app_meta = getattr(creator_res.user, 'app_metadata', getattr(creator_res.user, 'raw_app_meta_data', {})) or {}
+                    if not isinstance(app_meta, dict):
+                        app_meta = {}
+                    app_meta['tenant_id'] = new_tenant_id
+                    app_meta['role'] = 'ceo'
+                    supabase_admin.auth.admin.update_user_by_id(user_id, {'app_metadata': app_meta})
+                    logger.info(f"Created tenant {new_tenant_id} for creator {user_id}")
+                    updated = True
+            except Exception as tenant_err:
+                logger.warning(f"Could not create tenant for creator: {tenant_err}")
+
+        if not is_ceo_or_admin(user_id):
+            # Creator but not CEO yet: upgrade (preserve existing app_metadata e.g. tenant_id)
+            try:
+                creator_res = supabase_admin.auth.admin.get_user_by_id(user_id)
+                app_meta = getattr(creator_res.user, 'app_metadata', getattr(creator_res.user, 'raw_app_meta_data', {})) or {}
+                if not isinstance(app_meta, dict):
+                    app_meta = {}
+                app_meta['role'] = 'ceo'
+                if tenant_id:
+                    app_meta['tenant_id'] = tenant_id
+                supabase_admin.auth.admin.update_user_by_id(user_id, {'app_metadata': app_meta, 'user_metadata': {'role': 'ceo'}})
+                try:
+                    supabase_admin.from_('users').update({'role': 'ceo'}).eq('id', user_id).execute()
+                except Exception as e:
+                    logger.warning(f"Users table update for CEO: {e}")
+                logger.info(f"Creator {user_id} ensured CEO role via ensure-ceo")
+                updated = True
+            except Exception as e:
+                logger.error(f"Error setting CEO role for creator: {e}")
+
+        if updated:
+            return jsonify({'updated': True, 'role': 'ceo'}), 200
+        return jsonify({'updated': False, 'reason': 'already_ceo_admin'}), 200
     except Exception as e:
         logger.error(f"Error in ensure_creator_is_ceo: {e}")
         return jsonify({'error': str(e), 'updated': False}), 500
@@ -5364,12 +5398,13 @@ def get_tenant_subscription_info(tenant_id):
     try:
         tenant_res = supabase_admin.table('tenants').select(
             'stripe_subscription_id, stripe_customer_id, subscription_status'
-        ).eq('id', tenant_id).single().execute()
+        ).eq('id', tenant_id).limit(1).execute()
         
-        if not tenant_res.data:
+        if not tenant_res.data or len(tenant_res.data) == 0:
             return None
         
-        subscription_id = tenant_res.data.get('stripe_subscription_id')
+        tenant_row = tenant_res.data[0]
+        subscription_id = tenant_row.get('stripe_subscription_id')
         if not subscription_id:
             return None
         
@@ -5377,8 +5412,8 @@ def get_tenant_subscription_info(tenant_id):
         subscription = stripe.Subscription.retrieve(subscription_id)
         return {
             'subscription_id': subscription_id,
-            'customer_id': tenant_res.data.get('stripe_customer_id'),
-            'status': tenant_res.data.get('subscription_status'),
+            'customer_id': tenant_row.get('stripe_customer_id'),
+            'status': tenant_row.get('subscription_status'),
             'subscription': subscription
         }
     except Exception as e:

@@ -7,14 +7,18 @@ import {
   ArrowRightOnRectangleIcon,
   UserIcon,
   Cog6ToothIcon,
+  SunIcon,
+  MoonIcon,
 } from '@heroicons/react/24/outline';
 import { useAuth } from '../../contexts/AuthContext';
+import { useTheme } from '../../contexts/ThemeContext';
 import { useNavigation } from '../../contexts/NavigationContext';
 import { BRAND_NAME } from '../../config/brand';
 
 const Header = () => {
   const { user: currentUser, signOut: logout } = useAuth();
   const { sidebarCollapsed } = useNavigation();
+  const { isDark, toggleTheme } = useTheme();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   
@@ -60,6 +64,15 @@ const Header = () => {
         </Link>
         
         <div className="flex items-center space-x-4">
+          {/* Theme toggle */}
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className="p-2 rounded-full text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+          >
+            {isDark ? <SunIcon className="h-5 w-5" /> : <MoonIcon className="h-5 w-5" />}
+          </button>
           {/* Notifications */}
           <div className="relative">
             <button 

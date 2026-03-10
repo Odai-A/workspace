@@ -1,39 +1,55 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
-import { toast } from "react-toastify";
-import { FiUser, FiLock, FiLogIn, FiHelpCircle, FiUserPlus } from "react-icons/fi";
+import { FiUser, FiLock, FiLogIn, FiHelpCircle, FiUserPlus, FiEye, FiEyeOff, FiSun, FiMoon } from "react-icons/fi";
+import { useTheme } from "../contexts/ThemeContext";
 import { BRAND_NAME } from "../config/brand";
 
 const Login = () => {
   const navigate = useNavigate();
   const { signIn } = useAuth();
+  const { isDark, toggleTheme } = useTheme();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
 
     try {
-      const { success, error } = await signIn(email, password);
-      
+      const result = await signIn(email, password);
+      const success = result && result.success;
+      const error = result && result.error;
+
       if (success) {
-        // Toast message is already shown in AuthContext.signIn
+        setErrorMessage("");
         navigate("/dashboard");
+      } else {
+        const message = typeof error === "string" ? error : (error?.message || "Invalid email or password. Please check your credentials and try again.");
+        setErrorMessage(message);
       }
-      // Error toast is already shown in AuthContext.signIn, no need to show again
-    } catch (error) {
-      console.error("Login error:", error);
-      toast.error("An unexpected error occurred during authentication. Please try again.");
+    } catch (err) {
+      const message = err?.message || "An unexpected error occurred during authentication. Please try again.";
+      setErrorMessage(message);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 dark:bg-gray-900 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-gray-100 dark:bg-gray-900 flex flex-col justify-center py-12 sm:px-6 lg:px-8 relative">
+      <button
+        type="button"
+        onClick={toggleTheme}
+        className="absolute top-4 right-4 p-2 rounded-lg bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
+      >
+        {isDark ? <FiSun className="h-5 w-5" /> : <FiMoon className="h-5 w-5" />}
+      </button>
+
       <div className="sm:mx-auto sm:w-full sm:max-w-md">
         {/* Logo + Brand + heading on a card so text always has contrast */}
         <div className="flex flex-col items-center mb-6 p-6 rounded-lg bg-white dark:bg-gray-800 shadow-sm">
@@ -54,6 +70,15 @@ const Login = () => {
       <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
         <div className="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10">
           <form className="space-y-6" onSubmit={handleSubmit}>
+            {errorMessage && (
+              <div
+                className="rounded-lg px-4 py-3 border-2 border-red-500 bg-red-50 dark:bg-red-900/40 shadow-lg"
+                role="alert"
+                aria-live="polite"
+              >
+                <p className="text-sm font-semibold text-red-800 dark:text-red-200">{errorMessage}</p>
+              </div>
+            )}
             <div>
               <label htmlFor="email" className="block text-sm font-medium text-gray-700">
                 Email address
@@ -69,7 +94,7 @@ const Login = () => {
                   autoComplete="email"
                   required
                   value={email}
-                  onChange={(e) => setEmail(e.target.value)}
+                  onChange={(e) => { setEmail(e.target.value); setErrorMessage(""); }}
                   className="focus:ring-blue-500 focus:border-blue-500 block w-full pl-10 sm:text-sm border-gray-300 rounded-md"
                   placeholder="Enter your email"
                 />
@@ -87,14 +112,22 @@ const Login = () => {
                 <input
                   id="password"
                   name="password"
-                  type="password"
+                  type={showPassword ? "text" : "password"}
                   autoComplete="current-password"
                   required
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="focus:ring-blue-500 focus:border-blue-500 block w-full pl-10 sm:text-sm border-gray-300 rounded-md"
+                  onChange={(e) => { setPassword(e.target.value); setErrorMessage(""); }}
+                  className="focus:ring-blue-500 focus:border-blue-500 block w-full pl-10 pr-10 sm:text-sm border-gray-300 rounded-md"
                   placeholder="Enter your password"
                 />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((p) => !p)}
+                  className="absolute inset-y-0 right-0 pr-3 flex items-center text-gray-400 hover:text-gray-600 focus:outline-none"
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                >
+                  {showPassword ? <FiEyeOff className="h-5 w-5" /> : <FiEye className="h-5 w-5" />}
+                </button>
               </div>
             </div>
 
