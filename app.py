@@ -1318,14 +1318,15 @@ def find_product_in_all_tables(fnsku=None, asin=None, supabase_client=None):
     except Exception as e:
         logger.warning(f"Error checking products table: {str(e)}")
     
-    # Step 2: Check api_lookup_cache table (limit(1) avoids PostgREST 406 on empty)
+    # Step 2: Check api_lookup_cache table in one query (fnsku OR asin)
     try:
+        cache_conditions = []
         if fnsku:
-            result = supabase_client.table('api_lookup_cache').select('*').eq('fnsku', fnsku).limit(1).execute()
-            if result and getattr(result, 'data', None) and len(result.data) > 0:
-                return result.data[0], 'api_lookup_cache'
+            cache_conditions.append(f"fnsku.eq.{fnsku}")
         if asin:
-            result = supabase_client.table('api_lookup_cache').select('*').eq('asin', asin).limit(1).execute()
+            cache_conditions.append(f"asin.eq.{asin}")
+        if cache_conditions:
+            result = supabase_client.table('api_lookup_cache').select('*').or_(','.join(cache_conditions)).limit(1).execute()
             if result and getattr(result, 'data', None) and len(result.data) > 0:
                 return result.data[0], 'api_lookup_cache'
     except Exception as e:
@@ -1927,7 +1928,7 @@ def external_lookup():
                                     'amazon_domain': 'amazon.com',
                                     'asin': cached_asin
                                 },
-                                timeout=15
+                                timeout=10
                             )
                             
                             if rainforest_response.status_code == 200:
@@ -2358,9 +2359,10 @@ def get_scan_count():
 def lookup_product_for_scan(code, code_type, supabase_client=None):
     """
     Lookup product using the 3-layer architecture:
-    1. manifest_data (by LPN in "X-Z ASIN" column)
-    2. products (by FNSKU/ASIN)
-    3. api_lookup_cache (by FNSKU/ASIN)
+    1. api_lookup_cache (fast path: one query by fnsku OR asin)
+    2. manifest_data (by LPN in "X-Z ASIN" column)
+    3. products (by FNSKU/ASIN)
+    4. api_lookup_cache again via find_product_in_all_tables if not in fast path
     
     Returns (product_data, manifest_item_data, source) where source is:
     - 'manifest_data' - Found in manifest_data
@@ -2373,6 +2375,16 @@ def lookup_product_for_scan(code, code_type, supabase_client=None):
     
     # Normalize code based on type
     code_upper = str(code).strip().upper() if code else None
+    
+    # Fast path: for ASIN/FNSKU/SKU, check api_lookup_cache first in one query (cache hits = 1 round-trip)
+    if code_upper and code_type in ['ASIN', 'FNSKU', 'SKU']:
+        try:
+            cache_conditions = [f"fnsku.eq.{code_upper}", f"asin.eq.{code_upper}"]
+            cache_result = supabase_client.table('api_lookup_cache').select('*').or_(','.join(cache_conditions)).limit(1).execute()
+            if cache_result and getattr(cache_result, 'data', None) and len(cache_result.data) > 0:
+                return cache_result.data[0], None, 'api_lookup_cache'
+        except Exception as e:
+            logger.warning(f"Fast path api_lookup_cache check failed: {e}")
     
     # Step 1: Check manifest_data by LPN (if code_type is LPN or unknown)
     if code_type == 'LPN' or (code_type not in ['ASIN', 'FNSKU', 'SKU', 'UPC']):
@@ -2950,7 +2962,7 @@ def scan_product():
                         'amazon_domain': 'amazon.com',
                         'asin': asin
                     },
-                    timeout=15
+                    timeout=10
                 )
                 
                 if rainforest_response.status_code == 200:
@@ -3761,7 +3773,7 @@ def scan_product():
                                         'amazon_domain': 'amazon.com',
                                         'asin': cached_asin
                                     },
-                                    timeout=15
+                                    timeout=10
                                 )
                                 
                                 if rainforest_response.status_code == 200:
@@ -4078,7 +4090,7 @@ def scan_product():
                             'amazon_domain': 'amazon.com',
                             'asin': asin
                         },
-                        timeout=15
+                        timeout=10
                     )
                     
                     logger.info(f"📡 Rainforest API response status: {rainforest_response.status_code}")
@@ -4507,7 +4519,7 @@ def scan_status():
             try:
                 rf_resp = requests.get('https://api.rainforestapi.com/request', params={
                     'api_key': RAINFOREST_API_KEY, 'type': 'product', 'amazon_domain': 'amazon.com', 'asin': asin
-                }, timeout=15)
+                }, timeout=10)
                 if rf_resp.status_code == 200:
                     response_json = rf_resp.json()
                     rainforest_full_response = response_json

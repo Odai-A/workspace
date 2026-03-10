@@ -718,25 +718,8 @@ const Scanner = () => {
             return;
           }
 
-          // Full data – get images and map to display format
-          let allImages = apiResult.images || (apiResult.image ? [apiResult.image] : []);
-          
-          // In batch mode skip extra Rainforest image fetch so batch scans stay as fast as single (same one request)
-          if (!batchMode && allImages.length === 1 && apiResult.asin && apiResult.source === 'api' && !apiResult.cached) {
-            console.log("⚠️ Only one image received, fetching all images from Rainforest API...");
-            toast.info("Fetching product images. Please wait...", { autoClose: 2000 });
-            
-            try {
-              const rainforestData = await fetchProductDataFromRainforest(apiResult.asin);
-              if (rainforestData && rainforestData.images && rainforestData.images.length > 1) {
-                allImages = rainforestData.images;
-                console.log(`✅ Fetched ${allImages.length} images from Rainforest API`);
-                toast.success(`Successfully retrieved ${allImages.length} product images.`, { autoClose: 3000 });
-              }
-            } catch (error) {
-              console.warn("Could not fetch additional images from Rainforest API:", error);
-            }
-          }
+          // Full data – use images from backend only (no duplicate Rainforest call; use Check for Updates or re-scan for more images)
+          const allImages = apiResult.images || (apiResult.image ? [apiResult.image] : []);
           
           const allVideos = apiResult.videos || [];
           const videosCount = apiResult.videos_count || allVideos.length;

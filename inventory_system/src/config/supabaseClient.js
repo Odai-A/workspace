@@ -305,7 +305,8 @@ export const inventoryService = {
 
   /**
    * Delete an inventory item by ID
-   * Only deletes items belonging to the current user
+   * When user has a tenant: deletes if item belongs to that tenant (any employee can delete).
+   * When user has no tenant: deletes only if item belongs to current user (legacy).
    */
   async deleteInventoryItem(id) {
     if (!supabaseUrl || !supabaseAnonKey) {
@@ -313,20 +314,22 @@ export const inventoryService = {
       return null;
     }
     
-    // Get current user ID
     const userId = await getCurrentUserId();
     if (!userId) {
       console.error('deleteInventoryItem: User must be logged in');
       return { success: false, error: 'User must be logged in' };
     }
     
+    const tenantId = await getCurrentTenantId();
+    
     try {
-      // Only delete if the item belongs to the current user
-      const { error } = await supabase
-        .from('inventory')
-        .delete()
-        .eq('id', id)
-        .eq('user_id', userId); // Ensure we only delete current user's items
+      let query = supabase.from('inventory').delete().eq('id', id);
+      if (tenantId) {
+        query = query.eq('tenant_id', tenantId);
+      } else {
+        query = query.eq('user_id', userId);
+      }
+      const { error } = await query;
       
       if (error) {
         console.error('Error deleting inventory item:', error);
@@ -342,7 +345,8 @@ export const inventoryService = {
 
   /**
    * Delete multiple inventory items by IDs
-   * Only deletes items belonging to the current user
+   * When user has a tenant: deletes if items belong to that tenant (any employee can delete).
+   * When user has no tenant: deletes only items belonging to current user (legacy).
    */
   async deleteInventoryItems(ids) {
     if (!supabaseUrl || !supabaseAnonKey) {
@@ -354,20 +358,22 @@ export const inventoryService = {
       return { success: false, error: "No IDs provided" };
     }
     
-    // Get current user ID
     const userId = await getCurrentUserId();
     if (!userId) {
       console.error('deleteInventoryItems: User must be logged in');
       return { success: false, error: 'User must be logged in' };
     }
     
+    const tenantId = await getCurrentTenantId();
+    
     try {
-      // Only delete items that belong to the current user
-      const { error } = await supabase
-        .from('inventory')
-        .delete()
-        .in('id', ids)
-        .eq('user_id', userId); // Ensure we only delete current user's items
+      let query = supabase.from('inventory').delete().in('id', ids);
+      if (tenantId) {
+        query = query.eq('tenant_id', tenantId);
+      } else {
+        query = query.eq('user_id', userId);
+      }
+      const { error } = await query;
       
       if (error) {
         console.error('Error deleting inventory items:', error);
