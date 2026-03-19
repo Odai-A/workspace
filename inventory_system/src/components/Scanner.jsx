@@ -67,6 +67,7 @@ const Scanner = () => {
   const [showAddToInventoryModal, setShowAddToInventoryModal] = useState(false);
   const [inventoryQuantity, setInventoryQuantity] = useState(1);
   const [inventoryLocation, setInventoryLocation] = useState('');
+  const [inventoryCondition, setInventoryCondition] = useState('New');
   const [isAddingToInventory, setIsAddingToInventory] = useState(false);
   
   // State for scanner: live camera (BarcodeScanner) primary, photo (BarcodeReader) fallback
@@ -374,10 +375,11 @@ const Scanner = () => {
       } else {
         // Try to create a new product lookup entry (optional - may fail due to RLS)
         try {
-          // Collect all images - handle both array and single image
           const allImages = product.images || (product.image_url ? [product.image_url] : []);
-          const imageUrlToSave = allImages.length > 0 ? JSON.stringify(allImages) : null;
-          
+          const allVideos = product.videos || [];
+          const mediaPayload = (allImages.length > 0 || allVideos.length > 0)
+            ? JSON.stringify({ images: allImages, videos: allVideos })
+            : (allImages.length > 0 ? JSON.stringify(allImages) : null);
           const productData = {
             name: product.name || 'Unknown Product',
             sku: product.fnsku || product.sku || product.asin,
@@ -388,7 +390,7 @@ const Scanner = () => {
             price: product.price,
             category: product.category || 'Uncategorized',
             description: product.description || product.name,
-            image_url: imageUrlToSave,  // JSON array of all images
+            image_url: mediaPayload,
             condition: 'New',
             source: 'Scanner (Auto)',
             created_at: new Date().toISOString()
@@ -402,18 +404,21 @@ const Scanner = () => {
         }
       }
 
-      // Check if inventory item already exists
       const existingInventory = await inventoryService.getInventoryBySku(product.fnsku || product.sku || product.asin);
-      
-      // Prepare inventory item with default values
+      const allImages = product.images || (product.image_url ? [product.image_url] : []);
+      const allVideos = product.videos || [];
+      const imageUrlForInventory = (allImages.length > 0 || allVideos.length > 0)
+        ? JSON.stringify({ images: allImages, videos: allVideos })
+        : (product.image_url || '');
       const inventoryItem = {
         sku: product.fnsku || product.sku || product.asin,
         name: product.name || 'Unknown Product',
-        quantity: 1, // Default quantity for auto-process
-        location: 'Default', // Default location
+        quantity: 1,
+        location: 'Default',
         condition: 'New',
-        price: product.price || 0,
-        cost: product.price ? (product.price / 2) : 0 // Our price (50% of retail)
+        price: product.price != null ? Number(product.price) : 0,
+        cost: product.price != null ? (Number(product.price) / 2) : 0,
+        image_url: imageUrlForInventory
       };
       
       // Only add product_id if it exists
@@ -700,9 +705,6 @@ const Scanner = () => {
         // Use centralized API config
         const scanUrl = getApiEndpoint('/scan');
         
-        // #region agent log
-        fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '54c5a5' }, body: JSON.stringify({ sessionId: '54c5a5', location: 'Scanner.jsx:scan_request', message: 'POST /scan sent', data: { code: upperCode }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => {});
-        // #endregion
         console.log("🚀 Calling unified scan endpoint:", scanUrl);
         const response = await axios.post(scanUrl, {
           code: upperCode,
@@ -712,9 +714,6 @@ const Scanner = () => {
         });
         
         const apiResult = response.data;
-        // #region agent log
-        fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '54c5a5' }, body: JSON.stringify({ sessionId: '54c5a5', location: 'Scanner.jsx:scan_response', message: 'POST /scan response', data: { success: !!apiResult?.success, processing: !!apiResult?.processing, not_in_api_database: !!apiResult?.not_in_api_database, has_asin: !!(apiResult?.asin && apiResult.asin.length >= 10) }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => {});
-        // #endregion
         console.log("🚀 Backend scan response:", apiResult);
         
         if (apiResult && apiResult.success) {
@@ -768,9 +767,6 @@ const Scanner = () => {
                 });
               }, 0);
             }
-            // #region agent log
-            fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '54c5a5' }, body: JSON.stringify({ sessionId: '54c5a5', location: 'Scanner.jsx:start_poll', message: 'Start processing poll', data: { code }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => {});
-            // #endregion
             startProcessingPoll(code);
             return;
           }
@@ -2293,9 +2289,6 @@ const Scanner = () => {
         });
         const data = res.data;
         if (data && data.not_in_api_database) {
-          // #region agent log
-          fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '54c5a5' }, body: JSON.stringify({ sessionId: '54c5a5', location: 'Scanner.jsx:status_not_in_db', message: 'Status poll returned not_in_api_database', data: { code: codeToPoll, attempt: attempts }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => {});
-          // #endregion
           if (processingPollRef.current) {
             clearInterval(processingPollRef.current);
             processingPollRef.current = null;
@@ -2314,9 +2307,6 @@ const Scanner = () => {
           return;
         }
         if (data && data.success && !data.processing && data.asin) {
-          // #region agent log
-          fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '54c5a5' }, body: JSON.stringify({ sessionId: '54c5a5', location: 'Scanner.jsx:status_success', message: 'Status poll returned full success', data: { code: codeToPoll, attempt: attempts }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => {});
-          // #endregion
           if (processingPollRef.current) {
             clearInterval(processingPollRef.current);
             processingPollRef.current = null;
@@ -2369,9 +2359,10 @@ const Scanner = () => {
         console.warn('Processing poll error:', e);
       }
     };
-    // First poll immediately, then every 2s so full data appears as soon as it's ready (no manual "Check for Updates")
+    // First poll immediately; in batch mode poll every 1s so products pop up faster, else every 2s
+    const pollIntervalMs = batchModeRef.current ? 1000 : 2000;
     poll();
-    processingPollRef.current = setInterval(poll, 2000);
+    processingPollRef.current = setInterval(poll, pollIntervalMs);
   };
 
   // Add manual check function
@@ -2651,6 +2642,7 @@ const Scanner = () => {
     }
     setInventoryQuantity(1);
     setInventoryLocation('');
+    setInventoryCondition('New');
     setShowAddToInventoryModal(true);
   };
 
@@ -2678,9 +2670,12 @@ const Scanner = () => {
         // Try to create a new product lookup entry (optional - may fail due to RLS)
         // If it fails, we'll still add to inventory without product_id
         try {
-          // Collect all images - handle both array and single image
+          // Collect all images and videos for manifest
           const allImages = productInfo.images || (productInfo.image_url ? [productInfo.image_url] : []);
-          const imageUrlToSave = allImages.length > 0 ? JSON.stringify(allImages) : null;
+          const allVideos = productInfo.videos || [];
+          const mediaPayload = (allImages.length > 0 || allVideos.length > 0)
+            ? JSON.stringify({ images: allImages, videos: allVideos })
+            : (allImages.length > 0 ? JSON.stringify(allImages) : null);
           
           const productData = {
             name: productInfo.name || 'Unknown Product',
@@ -2692,8 +2687,8 @@ const Scanner = () => {
             price: productInfo.price,
             category: productInfo.category || 'Uncategorized',
             description: productInfo.description || productInfo.name,
-            image_url: imageUrlToSave,  // JSON array of all images
-            condition: 'New',
+            image_url: mediaPayload,
+            condition: inventoryCondition,
             source: 'Scanner',
             created_at: new Date().toISOString()
           };
@@ -2710,17 +2705,23 @@ const Scanner = () => {
       // Check if inventory item already exists
       const existingInventory = await inventoryService.getInventoryBySku(productInfo.fnsku || productInfo.sku || productInfo.asin);
       
+      // Build image_url: store all images and videos as JSON for exports/display
+      const allImages = productInfo.images || (productInfo.image_url ? [productInfo.image_url] : []);
+      const allVideos = productInfo.videos || [];
+      const imageUrlForInventory = (allImages.length > 0 || allVideos.length > 0)
+        ? JSON.stringify({ images: allImages, videos: allVideos })
+        : (productInfo.image_url || '');
+
       // Only include fields that exist in the inventory table
       const inventoryItem = {
         sku: productInfo.fnsku || productInfo.sku || productInfo.asin,
         name: productInfo.name || 'Unknown Product',
-        quantity: parseInt(inventoryQuantity, 10), // The addOrUpdateInventory function will handle adding to existing quantity
+        quantity: parseInt(inventoryQuantity, 10),
         location: inventoryLocation || 'Default',
-        condition: 'New',
-        price: productInfo.price || 0,
-        cost: productInfo.price ? (productInfo.price * ((100 - (parseFloat(localStorage.getItem('labelDiscountPercent')) || 50)) / 100)) : 0, // Our price based on discount setting
-        // Persist product image into inventory so Inventory page can show it
-        image_url: productInfo.image_url || ''
+        condition: inventoryCondition,
+        price: productInfo.price != null ? Number(productInfo.price) : 0,
+        cost: productInfo.price != null ? (Number(productInfo.price) * ((100 - (parseFloat(localStorage.getItem('labelDiscountPercent')) || 50)) / 100)) : 0,
+        image_url: imageUrlForInventory
       };
       
       // Only add product_id if it exists (may be null if manifest_data save failed)
@@ -2735,8 +2736,10 @@ const Scanner = () => {
         setShowAddToInventoryModal(false);
         setInventoryQuantity(1);
         setInventoryLocation('');
+        setInventoryCondition('New');
       } else {
-        toast.error("Failed to add to inventory. Please try again.");
+        const errMsg = inventoryService.lastInventoryError || 'Please try again.';
+        toast.error(`Failed to add to inventory. ${errMsg}`);
       }
     } catch (error) {
       console.error("Error adding to inventory:", error);
@@ -3536,6 +3539,24 @@ const Scanner = () => {
               />
             </div>
 
+            <div className="mb-4">
+              <label htmlFor="inventoryCondition" className="block text-sm font-medium text-gray-700 mb-1">
+                Condition
+              </label>
+              <select
+                id="inventoryCondition"
+                name="inventoryCondition"
+                value={inventoryCondition}
+                onChange={(e) => setInventoryCondition(e.target.value)}
+                className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
+                disabled={isAddingToInventory}
+              >
+                <option value="New">New</option>
+                <option value="Refurbished">Refurbished</option>
+                <option value="Used">Used</option>
+              </select>
+            </div>
+
             <div className="mb-4 p-3 bg-blue-50 rounded-md">
               <p className="text-xs text-gray-600">
                 <strong>Note:</strong> If this product already exists in inventory, the quantity will be added to the existing stock.
@@ -3550,6 +3571,7 @@ const Scanner = () => {
                   setShowAddToInventoryModal(false);
                   setInventoryQuantity(1);
                   setInventoryLocation('');
+                  setInventoryCondition('New');
                 }}
                 disabled={isAddingToInventory}
               >

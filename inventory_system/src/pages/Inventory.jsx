@@ -17,13 +17,141 @@ import Table from '../components/ui/Table';
 import Pagination from '../components/ui/Pagination';
 import InventoryLevelBadge from '../components/inventory/InventoryLevelBadge';
 import AddStockModal from '../components/inventory/AddStockModal';
+import Modal from '../components/ui/Modal';
 import { useAuth } from '../contexts/AuthContext';
 import { toast } from 'react-toastify';
 import { productLookupService, apiCacheService } from '../services/databaseService';
 import { inventoryService, supabase } from '../config/supabaseClient';
+import { exportMarketplace } from '../utils/marketplaceExport';
 import axios from 'axios';
 
 const ITEMS_PER_PAGE = 15;
+const EXPORT_ALL_LIMIT = 10000;
+
+/**
+ * Combine inventory and manifest results into a single list (used by fetchInventory and export-all).
+ */
+async function combineInventoryAndManifest(inventoryResult, manifestResult, searchTerm) {
+  const isAsin = (str) => str && typeof str === 'string' && str.length === 10 && str.startsWith('B0');
+  const isFnsku = (str) => str && typeof str === 'string' && (str.startsWith('X') || str.length > 10);
+
+  const inventoryItems = await Promise.all((inventoryResult.data || []).map(async (item) => {
+    let asin = item.asin || '';
+    let fnsku = '';
+    let lpn = '';
+    let image_url = '';
+    const skuValue = item.sku || '';
+    if (isAsin(skuValue)) {
+      asin = skuValue;
+      fnsku = '';
+    } else if (isFnsku(skuValue)) {
+      fnsku = skuValue;
+    } else {
+      fnsku = skuValue;
+    }
+    if (item.product_id) {
+      try {
+        const { data: manifestData, error } = await supabase
+          .from('manifest_data')
+          .select('*')
+          .eq('id', item.product_id)
+          .maybeSingle();
+        if (manifestData && !error) {
+          if (!asin && manifestData['B00 Asin']) asin = manifestData['B00 Asin'];
+          if (!fnsku && manifestData['Fn Sku']) fnsku = manifestData['Fn Sku'];
+          if (manifestData['X-Z ASIN']) lpn = manifestData['X-Z ASIN'];
+          if (manifestData.image_url) image_url = manifestData.image_url;
+        } else if (fnsku && !asin) {
+          const manifestProduct = await productLookupService.getProductByFnsku(fnsku);
+          if (manifestProduct) {
+            if (!asin && manifestProduct.asin) asin = manifestProduct.asin;
+            if (!lpn && manifestProduct.lpn) lpn = manifestProduct.lpn;
+            if (!image_url && manifestProduct.image_url) image_url = manifestProduct.image_url;
+          }
+        }
+      } catch (err) {
+        console.warn('Could not fetch data from manifest_data:', err);
+      }
+    } else if (fnsku && !asin) {
+      try {
+        const manifestProduct = await productLookupService.getProductByFnsku(fnsku);
+        if (manifestProduct) {
+          if (!asin && manifestProduct.asin) asin = manifestProduct.asin;
+          if (!lpn && manifestProduct.lpn) lpn = manifestProduct.lpn;
+          if (!image_url && manifestProduct.image_url) image_url = manifestProduct.image_url;
+        }
+      } catch (err) {
+        console.warn('Could not fetch ASIN from manifest_data:', err);
+      }
+    }
+    if (asin && !image_url) {
+      try {
+        const cachedData = await apiCacheService.getCachedLookup(asin);
+        if (cachedData && cachedData.image_url) image_url = cachedData.image_url;
+        else if (fnsku) {
+          const cachedByFnsku = await apiCacheService.getCachedLookup(fnsku);
+          if (cachedByFnsku && cachedByFnsku.image_url) image_url = cachedByFnsku.image_url;
+        }
+      } catch (err) {
+        console.warn('Could not fetch image from cache:', err);
+      }
+    }
+    return {
+      id: item.id,
+      product_id: item.product_id,
+      'Description': item.name || 'Unknown Product',
+      'X-Z ASIN': lpn,
+      'Fn Sku': fnsku,
+      'B00 Asin': asin,
+      'Quantity': item.quantity || 0,
+      'MSRP': item.price || 0,
+      'Category': item.category || 'Uncategorized',
+      'Location': item.location || 'Default',
+      image_url,
+      source: 'inventory_table',
+      _rawData: item
+    };
+  }));
+
+  const manifestItems = (manifestResult.data || []).map(item => ({
+    ...item,
+    image_url: item.image_url || item['Image URL'] || '',
+    source: 'manifest_data'
+  }));
+
+  const combinedItems = [...inventoryItems];
+  manifestItems.forEach(manifestItem => {
+    const manifestSku = manifestItem['Fn Sku'] || manifestItem['X-Z ASIN'];
+    const manifestAsin = manifestItem['B00 Asin'];
+    const existingIndex = combinedItems.findIndex(invItem =>
+      (invItem['Fn Sku'] === manifestSku || invItem['X-Z ASIN'] === manifestSku || invItem['B00 Asin'] === manifestAsin)
+    );
+    if (existingIndex >= 0) {
+      if (!combinedItems[existingIndex].image_url && manifestItem.image_url) {
+        combinedItems[existingIndex].image_url = manifestItem.image_url;
+      }
+    } else {
+      combinedItems.push(manifestItem);
+    }
+  });
+
+  let filteredItems = combinedItems;
+  if (searchTerm && searchTerm.trim()) {
+    const searchLower = searchTerm.toLowerCase();
+    filteredItems = combinedItems.filter(item => {
+      const description = (item['Description'] || item.name || '').toLowerCase();
+      const asin = (item['B00 Asin'] || item.asin || '').toLowerCase();
+      const fnsku = (item['Fn Sku'] || item.sku || '').toLowerCase();
+      const lpn = (item['X-Z ASIN'] || item.lpn || '').toLowerCase();
+      return description.includes(searchLower) || asin.includes(searchLower) || fnsku.includes(searchLower) || lpn.includes(searchLower);
+    });
+  }
+
+  return filteredItems.map(item => ({
+    ...item,
+    image_url: item.image_url || item['Image URL'] || item._rawData?.image_url || ''
+  }));
+}
 
 const Inventory = () => {
   const { apiClient } = useAuth();
@@ -38,6 +166,11 @@ const Inventory = () => {
   const [showAddStockModal, setShowAddStockModal] = useState(false);
   const [selectedItems, setSelectedItems] = useState(new Set());
   const [isDeleting, setIsDeleting] = useState(false);
+  const [showMarketplaceExportModal, setShowMarketplaceExportModal] = useState(false);
+  const [marketplaceExportFormat, setMarketplaceExportFormat] = useState('facebook');
+  const [marketplaceExportScope, setMarketplaceExportScope] = useState('current');
+  const [marketplaceUniversalFormat, setMarketplaceUniversalFormat] = useState('xlsx');
+  const [isExportingMarketplace, setIsExportingMarketplace] = useState(false);
   
   // Sample data for locations, categories, etc.
   const locations = ['All Locations', 'Warehouse A', 'Warehouse B', 'Warehouse C', 'Warehouse D'];
@@ -76,191 +209,7 @@ const Inventory = () => {
       
       console.log("fetchInventory - Manifest table result:", manifestResult);
       
-      // Combine results, prioritizing inventory items
-      // Map inventory items to match the expected format
-      // Helper function to determine if a string is an ASIN (starts with B0 and is 10 chars)
-      const isAsin = (str) => str && typeof str === 'string' && str.length === 10 && str.startsWith('B0');
-      
-      // Helper function to determine if a string is an FNSKU (typically starts with X00 or similar)
-      const isFnsku = (str) => str && typeof str === 'string' && (str.startsWith('X') || str.length > 10);
-      
-      const inventoryItems = await Promise.all((inventoryResult.data || []).map(async (item) => {
-        let asin = item.asin || '';
-        let fnsku = '';
-        let lpn = '';
-        let image_url = '';
-        
-        // Determine what the SKU actually is
-        const skuValue = item.sku || '';
-        if (isAsin(skuValue)) {
-          // SKU is actually an ASIN
-          asin = skuValue;
-          fnsku = ''; // We don't have FNSKU in this case
-        } else if (isFnsku(skuValue)) {
-          // SKU is an FNSKU
-          fnsku = skuValue;
-        } else {
-          // SKU might be something else, use it as FNSKU by default
-          fnsku = skuValue;
-        }
-        
-        // If product_id exists, try to get ASIN and image_url from manifest_data
-        if (item.product_id) {
-          try {
-            // Try to get product from manifest_data using product_id
-            const { data: manifestData, error } = await supabase
-              .from('manifest_data')
-              .select('*')
-              .eq('id', item.product_id)
-              .maybeSingle();
-            
-            if (manifestData && !error) {
-              // Extract ASIN from manifest_data
-              if (!asin && manifestData['B00 Asin']) {
-                asin = manifestData['B00 Asin'];
-              }
-              // Extract FNSKU from manifest_data
-              if (!fnsku && manifestData['Fn Sku']) {
-                fnsku = manifestData['Fn Sku'];
-              }
-              // Extract LPN from manifest_data
-              if (manifestData['X-Z ASIN']) {
-                lpn = manifestData['X-Z ASIN'];
-              }
-              // Extract image_url if available
-              if (manifestData.image_url) {
-                image_url = manifestData.image_url;
-              }
-            } else if (fnsku && !asin) {
-              // Fallback: try to get by FNSKU
-              const manifestProduct = await productLookupService.getProductByFnsku(fnsku);
-              if (manifestProduct) {
-                if (!asin && manifestProduct.asin) {
-                  asin = manifestProduct.asin;
-                }
-                if (!lpn && manifestProduct.lpn) {
-                  lpn = manifestProduct.lpn;
-                }
-                if (!image_url && manifestProduct.image_url) {
-                  image_url = manifestProduct.image_url;
-                }
-              }
-            }
-          } catch (err) {
-            console.warn('Could not fetch data from manifest_data:', err);
-          }
-        } else if (fnsku && !asin) {
-          // If no product_id but we have FNSKU, try to lookup
-          try {
-            const manifestProduct = await productLookupService.getProductByFnsku(fnsku);
-            if (manifestProduct) {
-              if (!asin && manifestProduct.asin) {
-                asin = manifestProduct.asin;
-              }
-              if (!lpn && manifestProduct.lpn) {
-                lpn = manifestProduct.lpn;
-              }
-              if (!image_url && manifestProduct.image_url) {
-                image_url = manifestProduct.image_url;
-              }
-            }
-          } catch (err) {
-            console.warn('Could not fetch ASIN from manifest_data:', err);
-          }
-        }
-        
-        // If we have ASIN but no image, check cache first (NO API CALLS - only use Supabase data)
-        if (asin && !image_url) {
-          try {
-            // Check api_lookup_cache for image (no charge - just database lookup)
-            const cachedData = await apiCacheService.getCachedLookup(asin);
-            if (cachedData && cachedData.image_url) {
-              image_url = cachedData.image_url;
-              console.log(`✅ Found image in cache for ASIN ${asin} - no API charge`);
-            } else if (fnsku) {
-              // Also try by FNSKU
-              const cachedByFnsku = await apiCacheService.getCachedLookup(fnsku);
-              if (cachedByFnsku && cachedByFnsku.image_url) {
-                image_url = cachedByFnsku.image_url;
-                console.log(`✅ Found image in cache for FNSKU ${fnsku} - no API charge`);
-              }
-            }
-            // NO Rainforest API call - only use cached data to avoid charges
-          } catch (err) {
-            console.warn('Could not fetch image from cache:', err);
-            // Don't call Rainforest API - just use what we have
-          }
-        }
-        
-        return {
-          id: item.id,
-          product_id: item.product_id,
-          'Description': item.name || 'Unknown Product',
-          'X-Z ASIN': lpn, // LPN from manifest_data
-          'Fn Sku': fnsku,
-          'B00 Asin': asin,
-          'Quantity': item.quantity || 0,
-          'MSRP': item.price || 0,
-          'Category': item.category || 'Uncategorized',
-          'Location': item.location || 'Default',
-          image_url: image_url,
-          source: 'inventory_table',
-          // Store raw data for print label
-          _rawData: item
-        };
-      }));
-      
-      // Map manifest items to expected format
-      const manifestItems = (manifestResult.data || []).map(item => ({
-        ...item,
-        image_url: item.image_url || item['Image URL'] || '',
-        source: 'manifest_data'
-      }));
-      
-      // Combine and deduplicate by SKU/FNSKU/ASIN, preserving image_url
-      const combinedItems = [...inventoryItems];
-      manifestItems.forEach(manifestItem => {
-        const manifestSku = manifestItem['Fn Sku'] || manifestItem['X-Z ASIN'];
-        const manifestAsin = manifestItem['B00 Asin'];
-        const existingIndex = combinedItems.findIndex(invItem => 
-          (invItem['Fn Sku'] === manifestSku || 
-           invItem['X-Z ASIN'] === manifestSku ||
-           invItem['B00 Asin'] === manifestAsin)
-        );
-        
-        if (existingIndex >= 0) {
-          // Update existing item with image_url from manifest if it doesn't have one
-          if (!combinedItems[existingIndex].image_url && manifestItem.image_url) {
-            combinedItems[existingIndex].image_url = manifestItem.image_url;
-          }
-        } else {
-          combinedItems.push(manifestItem);
-        }
-      });
-      
-      // Apply client-side search filter if needed (for better matching)
-      let filteredItems = combinedItems;
-      if (debouncedSearchTerm && debouncedSearchTerm.trim()) {
-        const searchLower = debouncedSearchTerm.toLowerCase();
-        filteredItems = combinedItems.filter(item => {
-          const description = (item['Description'] || item.name || '').toLowerCase();
-          const asin = (item['B00 Asin'] || item.asin || '').toLowerCase();
-          const fnsku = (item['Fn Sku'] || item.sku || '').toLowerCase();
-          const lpn = (item['X-Z ASIN'] || item.lpn || '').toLowerCase();
-          
-          return description.includes(searchLower) ||
-                 asin.includes(searchLower) ||
-                 fnsku.includes(searchLower) ||
-                 lpn.includes(searchLower);
-        });
-      }
-      
-      // Ensure all items have image_url properly set
-      const itemsWithImages = filteredItems.map(item => ({
-        ...item,
-        image_url: item.image_url || item['Image URL'] || item._rawData?.image_url || ''
-      }));
-      
+      const itemsWithImages = await combineInventoryAndManifest(inventoryResult, manifestResult, debouncedSearchTerm);
       setProducts(itemsWithImages);
       setTotalItems(itemsWithImages.length);
     } catch (err) {
@@ -286,6 +235,27 @@ const Inventory = () => {
     } catch (error) {
       return 'Invalid Date';
     }
+  };
+
+  /** Resolve first image URL from image_url (plain URL or JSON { images, videos } or array) */
+  const resolveFirstImageUrl = (imageUrl) => {
+    if (!imageUrl) return '';
+    const s = typeof imageUrl === 'string' ? imageUrl.trim() : '';
+    if (!s) return '';
+    if (s.startsWith('{')) {
+      try {
+        const obj = JSON.parse(imageUrl);
+        const imgs = obj?.images;
+        if (Array.isArray(imgs) && imgs.length > 0) return imgs[0];
+      } catch { /* ignore */ }
+    }
+    if (s.startsWith('[')) {
+      try {
+        const arr = JSON.parse(imageUrl);
+        if (Array.isArray(arr) && arr.length > 0) return arr[0];
+      } catch { /* ignore */ }
+    }
+    return imageUrl;
   };
 
   // REMOVED: fetchImageFromRainforest function
@@ -638,6 +608,42 @@ const Inventory = () => {
     }
   };
 
+  /** Fetch all products for export (current filters) */
+  const fetchAllProductsForExport = useCallback(async () => {
+    const inventoryResult = await inventoryService.getInventory({
+      page: 1,
+      limit: EXPORT_ALL_LIMIT,
+      searchQuery: debouncedSearchTerm,
+    });
+    const manifestResult = await productLookupService.getProducts({
+      page: 1,
+      limit: EXPORT_ALL_LIMIT,
+      searchQuery: debouncedSearchTerm,
+    });
+    return combineInventoryAndManifest(inventoryResult, manifestResult, debouncedSearchTerm);
+  }, [debouncedSearchTerm]);
+
+  const handleMarketplaceExportDownload = async () => {
+    setIsExportingMarketplace(true);
+    try {
+      const list = marketplaceExportScope === 'all'
+        ? await fetchAllProductsForExport()
+        : products;
+      if (!list || list.length === 0) {
+        toast.warning('No products to export.');
+        return;
+      }
+      exportMarketplace(list, marketplaceExportFormat, marketplaceUniversalFormat);
+      toast.success(`Exported ${list.length} product(s) for ${marketplaceExportFormat}.`);
+      setShowMarketplaceExportModal(false);
+    } catch (err) {
+      console.error('Marketplace export failed:', err);
+      toast.error('Export failed. Please try again.');
+    } finally {
+      setIsExportingMarketplace(false);
+    }
+  };
+
   // Handle adding stock - open modal
   const handleAddStock = () => {
     setShowAddStockModal(true);
@@ -933,11 +939,11 @@ const Inventory = () => {
       accessor: 'Description',
       cell: (props) => {
         const rowData = props.row.original;
-            // Get image URL from multiple possible sources
-            const imageUrl = rowData.image_url || 
-                           rowData._rawData?.image_url || 
-                           (rowData.source === 'manifest_data' ? (rowData['Image URL'] || rowData.image_url) : '') || 
+            const rawImageUrl = rowData.image_url ||
+                           rowData._rawData?.image_url ||
+                           (rowData.source === 'manifest_data' ? (rowData['Image URL'] || rowData.image_url) : '') ||
                            '';
+            const imageUrl = resolveFirstImageUrl(rawImageUrl);
         // console.log("[Inventory.jsx Cell] Product Description Data:", rowData.Description, "LPN:", rowData['X-Z ASIN'], "Image:", imageUrl);
         return (
           <div className="flex items-start space-x-3">
@@ -1018,7 +1024,7 @@ const Inventory = () => {
             fnsku: fnsku,
             lpn: rowData['X-Z ASIN'] || '',
             price: rowData['MSRP'] || 0,
-            image_url: rowData.image_url || rowData._rawData?.image_url || ''
+            image_url: resolveFirstImageUrl(rowData.image_url || rowData._rawData?.image_url || '')
           };
           
           // Import and use the print label function from Scanner
@@ -1139,6 +1145,14 @@ const Inventory = () => {
             <ArrowDownTrayIcon className="h-5 w-5 mr-2" />
             Export
           </Button>
+          <Button 
+            variant="outline" 
+            className="flex items-center"
+            onClick={() => setShowMarketplaceExportModal(true)}
+          >
+            <ArrowDownTrayIcon className="h-5 w-5 mr-2" />
+            Export for marketplace
+          </Button>
           
           <Button 
             variant="primary"
@@ -1200,6 +1214,77 @@ const Inventory = () => {
           </div>
         )}
       </Card>
+
+      {/* Marketplace export modal */}
+      <Modal
+        isOpen={showMarketplaceExportModal}
+        onClose={() => !isExportingMarketplace && setShowMarketplaceExportModal(false)}
+        title="Export for marketplace"
+        size="md"
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Format</label>
+            <select
+              value={marketplaceExportFormat}
+              onChange={(e) => setMarketplaceExportFormat(e.target.value)}
+              className="w-full border border-gray-300 dark:border-gray-600 rounded-md px-3 py-2 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+            >
+              <option value="facebook">Facebook Commerce Manager</option>
+              <option value="shopify">Shopify</option>
+              <option value="whatnot">Whatnot</option>
+              <option value="ebay">eBay (Product feed)</option>
+              <option value="universal">Universal (all columns)</option>
+            </select>
+          </div>
+          {marketplaceExportFormat === 'universal' && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">File type</label>
+              <select
+                value={marketplaceUniversalFormat}
+                onChange={(e) => setMarketplaceUniversalFormat(e.target.value)}
+                className="w-full border border-gray-300 dark:border-gray-600 rounded-md px-3 py-2 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+              >
+                <option value="xlsx">Excel (.xlsx)</option>
+                <option value="csv">CSV</option>
+              </select>
+            </div>
+          )}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Scope</label>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="exportScope"
+                  checked={marketplaceExportScope === 'current'}
+                  onChange={() => setMarketplaceExportScope('current')}
+                  className="rounded border-gray-300"
+                />
+                <span className="text-gray-700 dark:text-gray-300">Current page ({products.length} items)</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="radio"
+                  name="exportScope"
+                  checked={marketplaceExportScope === 'all'}
+                  onChange={() => setMarketplaceExportScope('all')}
+                  className="rounded border-gray-300"
+                />
+                <span className="text-gray-700 dark:text-gray-300">All (current filters)</span>
+              </label>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="outline" onClick={() => setShowMarketplaceExportModal(false)} disabled={isExportingMarketplace}>
+              Cancel
+            </Button>
+            <Button variant="primary" onClick={handleMarketplaceExportDownload} disabled={isExportingMarketplace}>
+              {isExportingMarketplace ? 'Exporting…' : 'Download'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Temporarily comment out AddStockModal until its logic is refactored for Supabase */}
       {/* <AddStockModal 

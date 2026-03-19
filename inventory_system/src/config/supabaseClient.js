@@ -52,9 +52,8 @@ const getCurrentTenantId = async () => {
 };
 
 export const inventoryService = {
-  // We will add product and inventory related functions here,
-  // such as getInventoryBySku, addOrUpdateInventory, etc.
-  
+  lastInventoryError: null,
+
   /**
    * Get all items from the inventory table with optional search and pagination
    * Automatically filters by current user's ID
@@ -177,20 +176,22 @@ export const inventoryService = {
     // Get tenant_id for shared business account
     const tenantId = await getCurrentTenantId();
     
-    // Remove fields that don't exist in the inventory table
-    // Only keep essential fields: sku, name, quantity, location, condition, price, cost, image_url
+    // Remove fields that don't exist in the inventory table; ensure numbers are valid
+    const numPrice = (item.price != null && !Number.isNaN(Number(item.price))) ? Number(item.price) : 0;
+    const numCost = (item.cost != null && !Number.isNaN(Number(item.cost))) ? Number(item.cost) : 0;
+    const quantity = (item.quantity != null && !Number.isNaN(Number(item.quantity))) ? Number(item.quantity) : 1;
     const cleanItem = {
       sku: item.sku,
-      name: item.name,
-      quantity: item.quantity,
-      location: item.location,
-      condition: item.condition,
-      price: item.price,
-      cost: item.cost,
-      image_url: item.image_url, // Optional, but persisted if provided
-      user_id: userId, // Always set user_id to current user
-      tenant_id: tenantId // Set tenant_id for shared access
+      name: item.name || 'Unknown Product',
+      quantity,
+      location: item.location || 'Default',
+      condition: item.condition || 'New',
+      price: numPrice,
+      cost: numCost,
+      image_url: item.image_url ?? null,
+      user_id: userId
     };
+    if (tenantId != null) cleanItem.tenant_id = tenantId;
     
     // Only add product_id if it exists and is valid
     // We'll verify it exists in manifest_data before including it
@@ -274,9 +275,11 @@ export const inventoryService = {
           .single();
         
         if (error) {
+          this.lastInventoryError = error.message || 'Update failed';
           console.error('Error updating inventory:', error);
           return null;
         }
+        this.lastInventoryError = null;
         result = data;
         console.log('✅ Successfully updated inventory item:', result);
       } else {
@@ -288,16 +291,19 @@ export const inventoryService = {
           .single();
         
         if (error) {
+          this.lastInventoryError = error.message || 'Insert failed';
           console.error('Error inserting inventory:', error);
           console.error('Attempted to insert:', cleanItem);
           return null;
         }
+        this.lastInventoryError = null;
         result = data;
         console.log('✅ Successfully inserted inventory item:', result);
       }
       
       return result;
     } catch (error) {
+      this.lastInventoryError = error.message || 'Unexpected error';
       console.error('Exception in addOrUpdateInventory:', error);
       return null;
     }
