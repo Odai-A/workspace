@@ -700,6 +700,9 @@ const Scanner = () => {
         // Use centralized API config
         const scanUrl = getApiEndpoint('/scan');
         
+        // #region agent log
+        fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '54c5a5' }, body: JSON.stringify({ sessionId: '54c5a5', location: 'Scanner.jsx:scan_request', message: 'POST /scan sent', data: { code: upperCode }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => {});
+        // #endregion
         console.log("🚀 Calling unified scan endpoint:", scanUrl);
         const response = await axios.post(scanUrl, {
           code: upperCode,
@@ -709,6 +712,9 @@ const Scanner = () => {
         });
         
         const apiResult = response.data;
+        // #region agent log
+        fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '54c5a5' }, body: JSON.stringify({ sessionId: '54c5a5', location: 'Scanner.jsx:scan_response', message: 'POST /scan response', data: { success: !!apiResult?.success, processing: !!apiResult?.processing, not_in_api_database: !!apiResult?.not_in_api_database, has_asin: !!(apiResult?.asin && apiResult.asin.length >= 10) }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => {});
+        // #endregion
         console.log("🚀 Backend scan response:", apiResult);
         
         if (apiResult && apiResult.success) {
@@ -762,6 +768,9 @@ const Scanner = () => {
                 });
               }, 0);
             }
+            // #region agent log
+            fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '54c5a5' }, body: JSON.stringify({ sessionId: '54c5a5', location: 'Scanner.jsx:start_poll', message: 'Start processing poll', data: { code }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => {});
+            // #endregion
             startProcessingPoll(code);
             return;
           }
@@ -2284,6 +2293,9 @@ const Scanner = () => {
         });
         const data = res.data;
         if (data && data.not_in_api_database) {
+          // #region agent log
+          fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '54c5a5' }, body: JSON.stringify({ sessionId: '54c5a5', location: 'Scanner.jsx:status_not_in_db', message: 'Status poll returned not_in_api_database', data: { code: codeToPoll, attempt: attempts }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => {});
+          // #endregion
           if (processingPollRef.current) {
             clearInterval(processingPollRef.current);
             processingPollRef.current = null;
@@ -2302,6 +2314,9 @@ const Scanner = () => {
           return;
         }
         if (data && data.success && !data.processing && data.asin) {
+          // #region agent log
+          fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '54c5a5' }, body: JSON.stringify({ sessionId: '54c5a5', location: 'Scanner.jsx:status_success', message: 'Status poll returned full success', data: { code: codeToPoll, attempt: attempts }, timestamp: Date.now(), hypothesisId: 'A' }) }).catch(() => {});
+          // #endregion
           if (processingPollRef.current) {
             clearInterval(processingPollRef.current);
             processingPollRef.current = null;

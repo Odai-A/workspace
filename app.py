@@ -39,6 +39,18 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# #region agent log
+def _debug_log(location, message, data=None, hypothesis_id=None):
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug-54c5a5.log')
+        payload = {"sessionId": "54c5a5", "timestamp": int(__import__('time').time() * 1000), "location": location, "message": message, "data": data or {}, "hypothesisId": hypothesis_id or ""}
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(payload) + '\n')
+    except Exception:
+        pass
+# #endregion
+
 logger.info("=" * 60)
 logger.info("LOGGING CONFIGURED - All logs will appear in terminal")
 logger.info("=" * 60)
@@ -3808,6 +3820,9 @@ def scan_product():
                 print(f"❌ Cache check error: {cache_error}")
         
         # STEP 2: Not in cache - call FNSKU API. AddOrGet first for fastest first-scan (GetByBarCode often fails or is slow).
+        import time as _time
+        _t0 = _time.time() * 1000
+        _debug_log("app.py:fnsku_step2_start", "FNSKU API branch started", {"code": code, "code_type": code_type}, "A")
         logger.info(f"💰 {code_type} {code} not in cache - calling API (will be charged)")
         print(f"💰💰💰 CALLING EXTERNAL API - THIS WILL BE CHARGED")
         BASE_URL = "https://ato.fnskutoasin.com"
@@ -3837,8 +3852,10 @@ def scan_product():
                             logger.info(f"🎉 ASIN found immediately in AddOrGet response: {asin}")
                         else:
                             asin = None
+            _debug_log("app.py:add_or_get_done", "AddOrGet completed", {"asin_immediate": bool(asin and len(asin) >= 10), "status_code": response.status_code, "elapsed_ms": int(_time.time() * 1000 - _t0), "has_scan_data": bool(scan_data)}, "A")
         except Exception as e:
             logger.warning(f"AddOrGet failed: {e}")
+            _debug_log("app.py:add_or_get_failed", "AddOrGet exception", {"error": str(e), "elapsed_ms": int(_time.time() * 1000 - _t0)}, "A")
         
         # If AddOrGet didn't return a task or we need to check existing, try GetByBarCode once
         if not scan_data:
@@ -3857,6 +3874,7 @@ def scan_product():
                 logger.warning(f"GetByBarCode failed: {e}")
         
         if not scan_data:
+            _debug_log("app.py:return_404_no_scan_task", "Return 404 no scan task", {"code": code, "elapsed_ms": int(_time.time() * 1000 - _t0)}, "A")
             logger.error(f"❌ Failed to get or create scan task for FNSKU {code}")
             return jsonify({
                 "success": False,
@@ -3864,7 +3882,7 @@ def scan_product():
                 "message": "Could not create or retrieve scan task. Please try again."
             }), 404
         
-        # STEP 3: Short poll for ASIN (2-3 attempts only - fast return, then user can Check for Updates or poll status)
+        # STEP 3: Poll for ASIN so first scan often succeeds in one go (target ≤10s)
         # Only overwrite asin if we don't already have it from existing scan task
         if not asin or len(asin) < 10:
             potential_asin = scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or ''
@@ -3872,16 +3890,17 @@ def scan_product():
                 asin = str(potential_asin).strip()
         
         task_id = scan_data.get('id') if scan_data else None
-        max_polls = 4  # Short poll: up to 4 attempts then return processing; frontend auto-polls until ready
-        poll_interval = 1500  # 1.5 seconds between polls
+        max_polls = 10  # Poll up to ~10s so ASIN often ready in one request; frontend still polls if we return processing
+        poll_interval = 1000  # 1 second between polls
         retry_add_or_get_after = 2
         
         # If ASIN not available, poll for it
         if not asin or len(asin) < 10:
-            logger.info(f"⏳ ASIN not immediately available. Polling for task {task_id} (max {max_polls} attempts, ~{max_polls * 2}s)...")
+            logger.info(f"⏳ ASIN not immediately available. Polling for task {task_id} (max {max_polls} attempts, ~{max_polls}s)...")
             import time
             task_state = 0  # Initialize task_state before polling loop
-            
+            # Brief initial wait so FNSKU API has time to start processing after AddOrGet
+            time.sleep(1.0)
             for attempt in range(1, max_polls + 1):
                 # Retry AddOrGet after 2 polls to trigger processing
                 if attempt == retry_add_or_get_after:
@@ -3905,14 +3924,9 @@ def scan_product():
                     except Exception as e:
                         logger.warning(f"Retry AddOrGet failed: {e}")
                 
-                # Poll for ASIN - check immediately on first attempt, then wait between polls
-                # Only wait if this isn't the first attempt and we haven't just done a retry
+                # Wait between polls (skip wait after retry attempt)
                 if attempt > 1 and attempt != retry_add_or_get_after + 1:
-                    # Shorter waits so we get ASIN sooner; frontend auto-polls for full data
-                    if attempt == 2:
-                        time.sleep(0.5)
-                    else:
-                        time.sleep(poll_interval / 1000)  # 1.5 seconds between polls
+                    time.sleep(poll_interval / 1000)  # 1 second between polls
                 
                 try:
                     poll_response = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=5)  # Reduced timeout
@@ -3928,6 +3942,7 @@ def scan_product():
                                 asin = ''
                             
                             task_state = scan_data.get('taskState') or scan_data.get('task_state', 0)
+                            _debug_log("app.py:poll_attempt", "Poll GetByBarCode", {"attempt": attempt, "max_polls": max_polls, "asin_len": len(asin) if asin else 0, "task_state": task_state, "elapsed_ms": int(_time.time() * 1000 - _t0)}, "A")
                             
                             # Log what we found (every attempt for debugging)
                             logger.info(f"📊 Poll {attempt}/{max_polls}: ASIN='{asin}' (len={len(asin)}), State={task_state}")
@@ -3956,6 +3971,7 @@ def scan_product():
             
             # After short polling loop, no final long lookup - return processing quickly for good UX
             if not asin or not isinstance(asin, str) or len(asin.strip()) < 10:
+                _debug_log("app.py:return_processing", "Return processing (no ASIN after poll)", {"code": code, "elapsed_ms": int(_time.time() * 1000 - _t0), "max_polls": max_polls}, "A")
                 logger.info(f"⏳ Short poll done, ASIN not yet available. Returning processing - user can Check for Updates or scan again.")
         
         # Final ASIN validation - return processing response so frontend can show partial + Check for Updates
@@ -4152,6 +4168,7 @@ def scan_product():
             logger.warning(f"⚠️ Cannot call Rainforest API - ASIN invalid: '{asin}' (len={len(asin) if asin else 0})")
         
         # STEP 5: Build response and save to cache (shared helper used by POST /api/scan and GET /api/scan/status)
+        _debug_log("app.py:return_full_success", "Return full success with ASIN", {"code": code, "asin": asin, "elapsed_ms": int(_time.time() * 1000 - _t0)}, "A")
         if not scan_data:
             logger.error(f"❌ scan_data is None when building response for FNSKU {code}")
             return jsonify({
@@ -4434,14 +4451,14 @@ def scan_status():
             fnsku_json = resp.json() if resp.text and resp.text.strip() else {}
         except (ValueError, json.JSONDecodeError, requests.exceptions.JSONDecodeError) as json_err:
             logger.warning(f"FNSKU GetByBarCode returned non-JSON for {code}: {json_err}")
-            if attempt >= 5:
+            if attempt >= 15:
                 return jsonify({
                     "success": True, "processing": False, "not_in_api_database": True,
                     "fnsku": code, "message": FNSKU_NOT_IN_DATABASE_MESSAGE, "bar_code": code
                 }), 200
             return jsonify({"success": True, "processing": True, "fnsku": code, "message": FNSKU_PROCESSING_MESSAGE, "bar_code": code}), 200
         if resp.status_code != 200 or not (fnsku_json.get('succeeded') and fnsku_json.get('data')):
-            if attempt >= 5:
+            if attempt >= 15:
                 return jsonify({
                     "success": True, "processing": False, "not_in_api_database": True,
                     "fnsku": code, "message": FNSKU_NOT_IN_DATABASE_MESSAGE, "bar_code": code
@@ -4450,7 +4467,8 @@ def scan_status():
         scan_data = fnsku_json['data']
         asin = (scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or '').strip()
         if not asin or len(asin) < 10:
-            if attempt >= 5:
+            if attempt >= 15:
+                _debug_log("app.py:status_not_in_db", "scan/status returns not_in_api_database", {"code": code, "attempt": attempt}, "A")
                 return jsonify({
                     "success": True, "processing": False, "not_in_api_database": True,
                     "fnsku": code, "asin": "", "title": scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}",
