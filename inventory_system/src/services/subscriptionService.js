@@ -38,8 +38,11 @@ export const getSubscriptionStatus = async () => {
 
     const data = await response.json();
     const status = data.subscription_status || 'incomplete';
-    const hasActiveSubscription = ['active', 'trialing'].includes(status);
-    
+    const hasActiveSubscription =
+      typeof data.has_active_subscription === 'boolean'
+        ? data.has_active_subscription
+        : ['active', 'trialing', 'past_due'].includes(status);
+
     return {
       status,
       hasActiveSubscription,

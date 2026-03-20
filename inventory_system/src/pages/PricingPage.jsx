@@ -6,6 +6,13 @@ import { supabase } from '../config/supabaseClient';
 import PriceIdWarning from '../components/PriceIdWarning';
 import { getApiEndpoint } from '../utils/apiConfig';
 
+// Mirrors PLAN_CONFIG max_users in app.py — update both when plan limits change.
+const PLAN_MAX_TEAM_USERS = {
+  basic: 1,
+  pro: 3,
+  entrepreneur: 5,
+};
+
 // Price IDs from environment variables with validation
 const getValidPriceId = (envVar, fallback = null) => {
   const priceId = import.meta.env[envVar];
@@ -52,6 +59,7 @@ const plans = [
     features: [
       '1,000 scans per month included',
       '$0.11 per additional scan',
+      `Up to ${PLAN_MAX_TEAM_USERS.basic} user seat`,
       'Full inventory management',
       'Product scanning & lookup',
       'Basic reporting',
@@ -69,6 +77,7 @@ const plans = [
     features: [
       '5,000 scans per month included',
       '$0.11 per additional scan',
+      `Up to ${PLAN_MAX_TEAM_USERS.pro} user seats`,
       'All Basic features',
       'Advanced reporting & analytics',
       'API access',
@@ -89,7 +98,7 @@ const plans = [
       '20,000 scans per month included',
       '$0.11 per additional scan',
       'All Pro features',
-      'Unlimited team members',
+      `Up to ${PLAN_MAX_TEAM_USERS.entrepreneur} user seats`,
       'Dedicated account manager',
       '24/7 priority support',
       'Custom features & integrations',

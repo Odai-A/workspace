@@ -273,6 +273,9 @@ const ProductImport = () => {
   const [csvRows, setCsvRows] = useState([]);
   const [columnMappings, setColumnMappings] = useState({});
   const [previewData, setPreviewData] = useState([]);
+  const [includeInInventory, setIncludeInInventory] = useState(false);
+  const [enrichmentMode, setEnrichmentMode] = useState('missing_only');
+  const [maxEnrichmentCalls, setMaxEnrichmentCalls] = useState(100);
   const fileInputRef = useRef(null);
 
   const handleFileChange = (event) => {
@@ -429,6 +432,15 @@ const ProductImport = () => {
       let successCount = 0;
       let errorCount = 0;
       let batchNumber = 0;
+      let totalCacheHits = 0;
+      let totalEnrichmentsCharged = 0;
+      let totalEnrichmentsDeferred = 0;
+      let totalInventoryUpserted = 0;
+
+      const importSessionId =
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
 
       // Process all rows
       for (let i = 0; i < dataLines.length; i++) {
@@ -493,7 +505,12 @@ const ProductImport = () => {
             body: JSON.stringify({
               items: backendItems,
               batch: batchNum,
-              headers: Object.values(mappings) // Send mapped headers
+              headers: Object.values(mappings),
+              include_in_inventory: includeInInventory,
+              enrichment_mode: enrichmentMode,
+              max_enrichment_calls: maxEnrichmentCalls,
+              import_session_id: importSessionId,
+              file_name: selectedFile?.name || null
             })
           });
 
@@ -505,6 +522,10 @@ const ProductImport = () => {
           const result = await response.json();
           successCount += result.success || 0;
           errorCount += result.failed || 0;
+          totalCacheHits += result.cache_hits || 0;
+          totalEnrichmentsCharged += result.enrichments_charged || 0;
+          totalEnrichmentsDeferred += result.enrichments_deferred || 0;
+          totalInventoryUpserted += result.inventory_upserted || 0;
 
           return result;
         } catch (error) {
@@ -526,8 +547,18 @@ const ProductImport = () => {
 
       setImportProgress(dataLines.length);
 
-      let summaryMessage = `Import completed successfully. ${successCount} items have been imported.`;
-      if (errorCount > 0) summaryMessage += ` ${errorCount} items were skipped due to validation errors.`;
+      let summaryMessage = `Import completed. ${successCount} catalog/manifest rows processed.`;
+      if (includeInInventory) {
+        summaryMessage += ` Inventory: ${totalInventoryUpserted} SKU(s) updated or added.`;
+      }
+      summaryMessage += ` Cache hits: ${totalCacheHits}.`;
+      if (enrichmentMode !== 'none') {
+        summaryMessage += ` Paid enrichments (this import): ${totalEnrichmentsCharged}.`;
+        if (totalEnrichmentsDeferred > 0) {
+          summaryMessage += ` Deferred/skipped (cap or lock): ${totalEnrichmentsDeferred}.`;
+        }
+      }
+      if (errorCount > 0) summaryMessage += ` ${errorCount} rows skipped (validation).`;
       
       if (errorCount > 0) {
         toast.warning(summaryMessage, { autoClose: 10000 });
@@ -559,7 +590,55 @@ const ProductImport = () => {
       
       <Card className="max-w-4xl mx-auto">
         <div className="p-6">
-          <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Upload CSV to Inventory</h2>
+          <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Upload manifest (CSV)</h2>
+
+          <div className="mb-6 p-4 rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30">
+            <p className="text-sm text-amber-900 dark:text-amber-200 font-medium">API cost control</p>
+            <p className="text-xs text-amber-800 dark:text-amber-300/90 mt-1">
+              Product images and details from Rainforest are billed per request. Rows with an ASIN may trigger lookups until your cap is reached.
+              Global cache is shared across all businesses so the same ASIN is only enriched once.
+            </p>
+            <div className="mt-4 space-y-3">
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={includeInInventory}
+                  onChange={(e) => setIncludeInInventory(e.target.checked)}
+                  className="mt-1 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                />
+                <span className="text-sm text-gray-800 dark:text-gray-200">
+                  <strong>Add products to my business inventory</strong> (quantities from your CSV merge with existing SKUs). Leave off to only save catalog + manifest in the database.
+                </span>
+              </label>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Enrichment (Rainforest)
+                </label>
+                <select
+                  value={enrichmentMode}
+                  onChange={(e) => setEnrichmentMode(e.target.value)}
+                  className="w-full md:w-auto px-3 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-md text-sm"
+                >
+                  <option value="none">Cache only — never call Rainforest on import</option>
+                  <option value="missing_only">Fetch missing product data (recommended)</option>
+                  <option value="full">Re-fetch all ASINs (uses cap; highest cost)</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Max paid enrichments this import (per chunk cap)
+                </label>
+                <input
+                  type="number"
+                  min={0}
+                  max={5000}
+                  value={maxEnrichmentCalls}
+                  onChange={(e) => setMaxEnrichmentCalls(Math.max(0, Math.min(5000, parseInt(e.target.value, 10) || 0)))}
+                  className="w-full max-w-xs px-3 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-md text-sm"
+                />
+              </div>
+            </div>
+          </div>
           
           <div className="mb-6">
             <label htmlFor="file-upload" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -691,7 +770,7 @@ const ProductImport = () => {
                   Importing...
                 </>
               ) : (
-                'Import Products to Inventory'
+                includeInInventory ? 'Import & add to inventory' : 'Import manifest (catalog only)'
               )}
             </Button>
           </div>

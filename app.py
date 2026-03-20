@@ -9,6 +9,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import stripe
 from supabase import create_client, Client
+from subscription_usage_math import compute_stripe_overage_increment
 import logging # For better logging
 from facebook_service import (
     get_facebook_oauth_url, exchange_code_for_token, get_user_pages,
@@ -181,6 +182,53 @@ def get_plan_config_by_price_id(price_id):
         if config['base_price_id'] == price_id:
             return plan_id, config
     return None, None
+
+
+def validate_subscription_base_price_id(price_id):
+    """Ensure price_id is a configured SaaS base plan price (not an arbitrary Stripe price)."""
+    if not price_id:
+        return False, "Price ID is required"
+    plan_id, config = get_plan_config_by_price_id(price_id)
+    if not plan_id or not config:
+        return False, "Unknown subscription plan. Use a valid plan base price from the pricing page."
+    return True, None
+
+
+def build_subscription_checkout_session_kwargs(price_id, customer_id, tenant_id, supabase_user_id, frontend_url):
+    """
+    Keyword arguments for stripe.checkout.Session.create: fixed recurring price plus optional metered usage.
+    Caller should validate price_id with validate_price_id and validate_subscription_base_price_id.
+    """
+    plan_id, plan_config = get_plan_config_by_price_id(price_id)
+    usage_price_id = plan_config.get('usage_price_id') if plan_config else None
+    tid = str(tenant_id)
+    uid = str(supabase_user_id) if supabase_user_id else ''
+    line_items = [{'price': price_id, 'quantity': 1}]
+    subscription_items = [{'price': price_id}]
+    if usage_price_id:
+        line_items.append({'price': usage_price_id, 'quantity': 0})
+        subscription_items.append({'price': usage_price_id})
+        logger.info(f"Checkout: adding usage price {usage_price_id} for plan {plan_id}")
+    kwargs = {
+        'customer': customer_id,
+        'payment_method_types': ['card'],
+        'line_items': line_items,
+        'mode': 'subscription',
+        'success_url': f"{frontend_url}/checkout-success?session_id={{CHECKOUT_SESSION_ID}}",
+        'cancel_url': f"{frontend_url}/checkout-cancel",
+        'metadata': {
+            'tenant_id': tid,
+            'supabase_user_id': uid,
+            'plan_id': plan_id or 'unknown',
+        },
+    }
+    if usage_price_id:
+        kwargs['subscription_data'] = {
+            'items': subscription_items,
+            'metadata': {'tenant_id': tid, 'plan_id': plan_id or 'unknown'},
+        }
+    return kwargs
+
 
 def get_tenant_plan_and_limit(tenant_id):
     """
@@ -494,7 +542,11 @@ if STRIPE_API_KEY:
     for plan_id, config in PLAN_CONFIG.items():
         bid = config.get('base_price_id')
         uid = config.get('usage_price_id')
-        logger.info(f"   Plan {plan_id}: base_price_id={'SET' if bid else 'MISSING'}, usage_price_id={'SET' if uid else 'optional'}")
+        logger.info(f"   Plan {plan_id}: base_price_id={'SET' if bid else 'MISSING'}, usage_price_id={'SET' if uid else 'MISSING'}")
+        if bid and not uid:
+            logger.warning(
+                f"   Plan {plan_id}: metered usage price missing — checkout will not attach overage billing for this plan."
+            )
 else:
     logger.error("❌ STRIPE_API_KEY is empty or None - Stripe will not work!")
 
@@ -723,6 +775,13 @@ def signup_tenant():
     if not stripe.api_key:
         return jsonify({"error": "Stripe not configured."}), 500
 
+    is_valid, error_message = validate_price_id(price_id)
+    if not is_valid:
+        return jsonify({"error": error_message}), 400
+    ok_plan, plan_err = validate_subscription_base_price_id(price_id)
+    if not ok_plan:
+        return jsonify({"error": plan_err}), 400
+
     new_tenant_id = None
     stripe_customer_id_created = None
     supabase_auth_user_id = None
@@ -792,19 +851,11 @@ def signup_tenant():
         frontend_url = os.environ.get('FRONTEND_BASE_URL', request.host_url.rstrip('/'))
         logger.info(f"🔗 Signup checkout - Frontend URL: {frontend_url}")
         logger.info(f"🔗 FRONTEND_BASE_URL env var: {os.environ.get('FRONTEND_BASE_URL', 'NOT SET')}")
-        
-        checkout_session = stripe.checkout.Session.create(
-            customer=stripe_customer.id,
-            payment_method_types=['card'],
-            line_items=[{'price': price_id, 'quantity': 1}],
-            mode='subscription',
-            success_url=f"{frontend_url}/checkout-success?session_id={{CHECKOUT_SESSION_ID}}", # Redirect to frontend
-            cancel_url=f"{frontend_url}/checkout-cancel", # Redirect to frontend
-            metadata={ # Crucial for webhook
-                'tenant_id': new_tenant_id,
-                'supabase_user_id': supabase_auth_user_id
-            }
+
+        checkout_kwargs = build_subscription_checkout_session_kwargs(
+            price_id, stripe_customer.id, new_tenant_id, supabase_auth_user_id, frontend_url
         )
+        checkout_session = stripe.checkout.Session.create(**checkout_kwargs)
         logger.info(f"Stripe checkout session created for customer {stripe_customer_id_created}")
         return jsonify({'checkout_url': checkout_session.url})
 
@@ -843,7 +894,10 @@ def create_checkout_session():
     is_valid, error_message = validate_price_id(price_id)
     if not is_valid:
         return jsonify({"error": error_message}), 400
-        
+    ok_plan, plan_err = validate_subscription_base_price_id(price_id)
+    if not ok_plan:
+        return jsonify({"error": plan_err}), 400
+
     # IMPORTANT: For new users (no tenant_id), we'll create a tenant first
     if not tenant_id:
         print("No existing tenant_id found - this appears to be a new user subscription")
@@ -915,48 +969,12 @@ def create_checkout_session():
             return jsonify({"error": "FRONTEND_BASE_URL is not configured. Set it in .env for checkout redirects."}), 500
         logger.info(f"🔗 Creating checkout session - Frontend URL: {frontend_url}")
         logger.info(f"🔗 FRONTEND_BASE_URL env var: {os.environ.get('FRONTEND_BASE_URL', 'NOT SET')}")
-        
-        # Determine plan and get usage price ID
-        plan_id, plan_config = get_plan_config_by_price_id(price_id)
-        usage_price_id = plan_config.get('usage_price_id') if plan_config else None
-        
-        # Create line items - base subscription + usage-based (if configured)
-        line_items = [{'price': price_id, 'quantity': 1}]
-        subscription_items = [{'price': price_id}]
-        
-        # Add usage price if configured (for metered billing)
-        if usage_price_id:
-            line_items.append({'price': usage_price_id, 'quantity': 0})  # Start at 0 usage
-            subscription_items.append({'price': usage_price_id})
-            logger.info(f"Adding usage price {usage_price_id} to subscription for plan {plan_id}")
-        
-        # Create the checkout session
-        checkout_session_params = {
-            'customer': stripe_customer_id,
-            'payment_method_types': ['card'],
-            'line_items': line_items,
-            'mode': 'subscription',
-            'success_url': f"{frontend_url}/checkout-success?session_id={{CHECKOUT_SESSION_ID}}",
-            'cancel_url': f"{frontend_url}/checkout-cancel",
-            'metadata': {
-                'tenant_id': str(tenant_id), 
-                'supabase_user_id': user_id,
-                'plan_id': plan_id or 'unknown'
-            }
-        }
-        
-        # Add subscription_data if usage price is configured
-        if usage_price_id:
-            checkout_session_params['subscription_data'] = {
-                'items': subscription_items,
-                'metadata': {
-                    'tenant_id': str(tenant_id),
-                    'plan_id': plan_id or 'unknown'
-                }
-            }
-        
+
+        checkout_session_params = build_subscription_checkout_session_kwargs(
+            price_id, stripe_customer_id, tenant_id, user_id, frontend_url
+        )
         checkout_session = stripe.checkout.Session.create(**checkout_session_params)
-        
+
         logger.info(f"✅ Created checkout session: {checkout_session.id}")
         logger.info(f"🔗 Success URL: {checkout_session_params['success_url']}")
         logger.info(f"🔗 Cancel URL: {checkout_session_params['cancel_url']}")
@@ -1117,7 +1135,8 @@ def get_subscription_status():
         
         tenant_row = tenant_res.data[0] if tenant_res.data and len(tenant_res.data) > 0 else None
         subscription_status = tenant_row.get('subscription_status', 'incomplete') if tenant_row else 'incomplete'
-        has_active_subscription = subscription_status in ['active', 'trialing']
+        # Align with tenant_has_paid_subscription: past_due still has a subscription (payment retry).
+        has_active_subscription = subscription_status in ['active', 'trialing', 'past_due']
         
         return jsonify({
             'subscription_status': subscription_status,
@@ -1441,6 +1460,42 @@ def batch_import():
         
         batch_number = data.get('batch', 0)
         csv_headers = data.get('headers', [])
+
+        include_in_inventory = bool(data.get('include_in_inventory', False))
+        enrichment_mode = (data.get('enrichment_mode') or 'missing_only').strip().lower()
+        if enrichment_mode not in ('none', 'missing_only', 'full'):
+            enrichment_mode = 'missing_only'
+        try:
+            max_enrichment_calls = int(data.get('max_enrichment_calls', 100))
+        except (ValueError, TypeError):
+            max_enrichment_calls = 100
+        max_enrichment_calls = max(0, min(max_enrichment_calls, 5000))
+        import_session_id = data.get('import_session_id')
+        file_name = data.get('file_name')
+
+        import_batch_id = None
+        if supabase_admin:
+            try:
+                batch_insert = {
+                    'user_id': str(user_id),
+                    'include_in_inventory': include_in_inventory,
+                    'enrichment_mode': enrichment_mode,
+                    'max_enrichment_calls': max_enrichment_calls,
+                    'rows_total': len(items),
+                    'chunk_index': int(batch_number) if batch_number is not None else 0,
+                    'status': 'processing',
+                }
+                if tenant_id:
+                    batch_insert['tenant_id'] = str(tenant_id)
+                if import_session_id:
+                    batch_insert['import_session_id'] = import_session_id
+                if file_name and isinstance(file_name, str):
+                    batch_insert['file_name'] = file_name[:500]
+                ins = supabase_admin.table('import_batches').insert(batch_insert).execute()
+                if ins.data and len(ins.data) > 0:
+                    import_batch_id = ins.data[0].get('id')
+            except Exception as batch_err:
+                logger.warning(f"Could not create import_batches row (apply migration 020?): {batch_err}")
         
         # CSV column mapping - handle both raw CSV rows and pre-normalized data from frontend
         def get_value(row, key):
@@ -1478,6 +1533,7 @@ def batch_import():
         # Process each row
         products_to_insert = []
         manifest_data_to_insert = []
+        row_outcomes = []
         skipped_count = 0
         processed_count = 0
         
@@ -1514,6 +1570,30 @@ def batch_import():
                     continue  # Skip silently
                 
                 processed_count += 1
+
+                qty_parsed = _import_parse_quantity(raw_quantity)
+                try:
+                    if raw_price is None or raw_price == '':
+                        price_num = 0.0
+                    elif isinstance(raw_price, (int, float)):
+                        price_num = float(raw_price)
+                    else:
+                        price_num = float(str(raw_price).strip())
+                except (ValueError, TypeError):
+                    price_num = 0.0
+
+                row_outcomes.append({
+                    'row_index': idx,
+                    'fnsku': fnsku,
+                    'asin': asin,
+                    'lpn': lpn,
+                    'upc': upc,
+                    'product_name': raw_product_name,
+                    'price': price_num,
+                    'quantity': qty_parsed,
+                    'category': raw_category,
+                    'brand': raw_brand,
+                })
                 
                 # Prepare product data (if we have fnsku or asin)
                 if fnsku or asin:
@@ -1753,7 +1833,6 @@ def batch_import():
                                 # Count as successfully processed (they already exist)
                                 manifest_data_inserted = len(manifest_data_to_insert)
                                 logger.info(f"✅ Batch {batch_number}: All {manifest_data_inserted} manifest_data rows already exist (duplicates)")
-                            manifest_data_inserted = 0
                         else:
                             error_text = response.text[:500] if response.text else "No error message"
                             logger.error(f"❌ Batch {batch_number}: Manifest_data insert failed ({response.status_code}): {error_text}")
@@ -1770,22 +1849,274 @@ def batch_import():
                 import traceback
                 logger.error(f"Traceback: {traceback.format_exc()}")
         
-        # Calculate success count (frontend expects 'success' and 'failed')
+        # ----- Enrichment (Rainforest) — global api_lookup_cache, capped + DB locks -----
+        cache_hits = 0
+        enrichments_charged = 0
+        enrichments_deferred = 0
+        asin_enriched_locally = set()
+
+        if supabase_admin and row_outcomes:
+            for outcome in row_outcomes:
+                estatus = 'idle'
+                c_hit = False
+                charged = False
+                fn = outcome.get('fnsku')
+                a_raw = outcome.get('asin')
+
+                if enrichment_mode == 'none':
+                    estatus = 'skipped_mode_none'
+                elif not _import_valid_asin(a_raw):
+                    estatus = 'no_asin'
+                else:
+                    a = a_raw.strip().upper()
+                    cache_row = _import_get_api_cache_row(supabase_admin, fn, a_raw)
+                    complete = _import_rainforest_cache_complete(cache_row)
+
+                    if complete and enrichment_mode != 'full':
+                        cache_hits += 1
+                        c_hit = True
+                        estatus = 'cache_hit'
+                    elif enrichments_charged >= max_enrichment_calls:
+                        enrichments_deferred += 1
+                        estatus = 'deferred_cap'
+                    elif a in asin_enriched_locally and enrichment_mode != 'full':
+                        cache_hits += 1
+                        c_hit = True
+                        estatus = 'local_dedupe'
+                    else:
+                        lock_key = f'asin:{a}'
+                        got_lock = _import_try_enrichment_lock(supabase_admin, lock_key)
+                        if not got_lock:
+                            enrichments_deferred += 1
+                            estatus = 'deferred_lock'
+                        else:
+                            try:
+                                cache_row2 = _import_get_api_cache_row(supabase_admin, fn, a_raw)
+                                if _import_rainforest_cache_complete(cache_row2) and enrichment_mode != 'full':
+                                    cache_hits += 1
+                                    c_hit = True
+                                    estatus = 'cache_hit_after_lock'
+                                else:
+                                    rf = _import_fetch_rainforest_product(a_raw)
+                                    if rf and rf.get('product'):
+                                        cfnsku = fn.strip().upper() if fn else _import_synthetic_fnsku_for_asin(a_raw)
+                                        if cfnsku:
+                                            if import_save_rainforest_to_cache(supabase_admin, cfnsku, a_raw, rf):
+                                                enrichments_charged += 1
+                                                charged = True
+                                                estatus = 'enriched_rainforest'
+                                                asin_enriched_locally.add(a)
+                                                p = rf.get('product') or {}
+                                                imgs = []
+                                                mi = p.get('main_image', {}).get('link') if isinstance(p.get('main_image'), dict) else None
+                                                if mi:
+                                                    imgs.append(mi)
+                                                for im in p.get('images') or []:
+                                                    if isinstance(im, dict) and im.get('link'):
+                                                        imgs.append(im['link'])
+                                                if imgs:
+                                                    _import_patch_products_image(supabase_admin, fn, a_raw, imgs[0])
+                                            else:
+                                                enrichments_deferred += 1
+                                                estatus = 'cache_save_failed'
+                                        else:
+                                            enrichments_deferred += 1
+                                            estatus = 'no_cache_key'
+                                    else:
+                                        enrichments_deferred += 1
+                                        estatus = 'rainforest_empty_or_failed'
+                            finally:
+                                _import_release_enrichment_lock(supabase_admin, lock_key)
+
+                outcome['_import_meta'] = {
+                    'enrichment_status': estatus,
+                    'cache_hit': c_hit,
+                    'enrichment_charged': charged,
+                }
+
+        # ----- Optional per-business inventory (tenant / user scoped) -----
+        inventory_upserted = 0
+        if include_in_inventory and supabase_admin and row_outcomes:
+            inv_map = {}
+            for outcome in row_outcomes:
+                sku = (outcome.get('fnsku') or outcome.get('asin') or outcome.get('lpn') or '').strip()
+                if not sku:
+                    continue
+                name = (outcome.get('product_name') or '').strip() or f'Item {sku}'
+                qty = int(outcome.get('quantity') or 1)
+                price = float(outcome.get('price') or 0)
+                if sku not in inv_map:
+                    inv_map[sku] = {
+                        'sku': sku[:255],
+                        'name': name[:500],
+                        'quantity': max(1, qty),
+                        'price': price,
+                        'cost': 0.0,
+                        'location': 'Import',
+                        'condition': 'New',
+                        'fnsku': outcome.get('fnsku'),
+                        'asin': outcome.get('asin'),
+                    }
+                else:
+                    inv_map[sku]['quantity'] += max(1, qty)
+                    if name and (not inv_map[sku]['name'] or inv_map[sku]['name'].startswith('Item ')):
+                        inv_map[sku]['name'] = name[:500]
+
+            inv_candidates = []
+            for row in inv_map.values():
+                img_url = None
+                cr = _import_get_api_cache_row(supabase_admin, row.get('fnsku'), row.get('asin'))
+                if cr:
+                    try:
+                        iu = cr.get('image_url')
+                        if iu:
+                            if isinstance(iu, str) and iu.strip().startswith('['):
+                                parsed = json.loads(iu)
+                                if isinstance(parsed, list) and parsed:
+                                    img_url = parsed[0]
+                            else:
+                                img_url = iu
+                        if not img_url and cr.get('rainforest_raw_data'):
+                            urls = _all_image_urls_from_rainforest_raw(cr)
+                            if urls:
+                                img_url = urls[0]
+                    except Exception:
+                        pass
+                cand = {
+                    'sku': row['sku'],
+                    'name': row['name'],
+                    'quantity': row['quantity'],
+                    'price': row['price'],
+                    'cost': row['cost'],
+                    'location': row['location'],
+                    'condition': row['condition'],
+                    'image_url': img_url,
+                    'user_id': str(user_id),
+                }
+                if row.get('asin'):
+                    cand['asin'] = (row['asin'] or '')[:32]
+                if tenant_id:
+                    cand['tenant_id'] = str(tenant_id)
+                inv_candidates.append(cand)
+
+            skus_list = list(inv_map.keys())
+            existing_by_sku = {}
+            if skus_list:
+                try:
+                    CH = 80
+                    for i in range(0, len(skus_list), CH):
+                        chunk = skus_list[i:i + CH]
+                        q = supabase_admin.table('inventory').select('id,sku,quantity').eq('user_id', str(user_id))
+                        if tenant_id:
+                            q = q.eq('tenant_id', str(tenant_id))
+                        er = q.in_('sku', chunk).execute()
+                        for exrow in (er.data or []):
+                            existing_by_sku[exrow['sku']] = exrow
+                except Exception as inv_e:
+                    logger.warning(f"Inventory existing fetch failed: {inv_e}")
+
+            for cand in inv_candidates:
+                try:
+                    ex = existing_by_sku.get(cand['sku'])
+                    payload = {
+                        'sku': cand['sku'],
+                        'name': cand['name'],
+                        'quantity': (ex['quantity'] or 0) + cand['quantity'] if ex else cand['quantity'],
+                        'price': cand['price'],
+                        'cost': cand['cost'],
+                        'location': cand['location'],
+                        'condition': cand['condition'],
+                        'image_url': cand['image_url'],
+                        'user_id': cand['user_id'],
+                    }
+                    if cand.get('asin'):
+                        payload['asin'] = cand['asin']
+                    if tenant_id:
+                        payload['tenant_id'] = str(tenant_id)
+                    if ex:
+                        supabase_admin.table('inventory').update(payload).eq('id', ex['id']).execute()
+                    else:
+                        supabase_admin.table('inventory').insert(payload).execute()
+                    inventory_upserted += 1
+                except Exception as ie:
+                    logger.warning(f"Inventory row failed for sku {cand.get('sku')}: {ie}")
+
+        # ----- Persist import audit rows + finalize batch metrics -----
+        if import_batch_id and supabase_admin and row_outcomes:
+            try:
+                item_payloads = []
+                for outcome in row_outcomes:
+                    meta = outcome.get('_import_meta') or {}
+                    raw_row = {
+                        'fnsku': outcome.get('fnsku'),
+                        'asin': outcome.get('asin'),
+                        'lpn': outcome.get('lpn'),
+                        'upc': outcome.get('upc'),
+                        'product_name': outcome.get('product_name'),
+                        'price': outcome.get('price'),
+                        'quantity': outcome.get('quantity'),
+                        'category': outcome.get('category'),
+                        'brand': outcome.get('brand'),
+                    }
+                    item_payloads.append({
+                        'import_batch_id': import_batch_id,
+                        'row_index': outcome['row_index'],
+                        'fnsku': outcome.get('fnsku'),
+                        'asin': outcome.get('asin'),
+                        'lpn': outcome.get('lpn'),
+                        'enrichment_status': meta.get('enrichment_status'),
+                        'cache_hit': meta.get('cache_hit', False),
+                        'enrichment_charged': meta.get('enrichment_charged', False),
+                        'included_in_inventory': include_in_inventory,
+                        'raw_row': raw_row,
+                    })
+                STEP = 200
+                for i in range(0, len(item_payloads), STEP):
+                    supabase_admin.table('import_batch_items').insert(item_payloads[i:i + STEP]).execute()
+            except Exception as aud_e:
+                logger.warning(f"import_batch_items insert failed: {aud_e}")
+
+        if import_batch_id and supabase_admin:
+            try:
+                supabase_admin.table('import_batches').update({
+                    'rows_valid': processed_count,
+                    'rows_skipped': skipped_count,
+                    'cache_hits': cache_hits,
+                    'enrichments_charged': enrichments_charged,
+                    'enrichments_deferred': enrichments_deferred,
+                    'inventory_upserted': inventory_upserted,
+                    'products_touched': products_inserted,
+                    'manifest_rows_touched': manifest_data_inserted,
+                    'status': 'completed',
+                }).eq('id', import_batch_id).execute()
+            except Exception as ub_e:
+                logger.warning(f"import_batches final update failed: {ub_e}")
+
+        # Numeric `success` for frontend aggregation (sum across chunks); boolean status as import_ok
         success_count = products_inserted + manifest_data_inserted
         failed_count = skipped_count
-        
-        logger.info(f"✅ Batch {batch_number} complete: {success_count} inserted, {failed_count} skipped")
-        
-        # Return success summary (matching frontend expectations)
+
+        logger.info(
+            f"✅ Batch {batch_number} complete: {success_count} db rows touched, {failed_count} skipped, "
+            f"cache_hits={cache_hits}, enrichments_charged={enrichments_charged}, inventory={inventory_upserted}"
+        )
+
         return jsonify({
-            "success": True,
+            "import_ok": True,
             "processed": len(items),
-            "success": success_count,  # Frontend expects this
-            "failed": failed_count,    # Frontend expects this
+            "success": success_count,
+            "failed": failed_count,
             "products_inserted": products_inserted,
-            "manifest_items_inserted": manifest_data_inserted,  # Keep name for frontend compatibility
+            "manifest_items_inserted": manifest_data_inserted,
             "skipped": skipped_count,
-            "batch": batch_number
+            "batch": batch_number,
+            "include_in_inventory": include_in_inventory,
+            "enrichment_mode": enrichment_mode,
+            "cache_hits": cache_hits,
+            "enrichments_charged": enrichments_charged,
+            "enrichments_deferred": enrichments_deferred,
+            "inventory_upserted": inventory_upserted,
+            "import_batch_id": str(import_batch_id) if import_batch_id else None,
         }), 200
         
     except Exception as e:
@@ -2620,6 +2951,204 @@ def _build_fnsku_scan_response_and_save(code, asin, scan_data, rainforest_data, 
         import traceback
         logger.warning(traceback.format_exc())
     return response_data, cache_row_id
+
+
+# ----- Manifest batch import: shared api_lookup_cache + optional Rainforest enrichment -----
+
+def _import_valid_asin(asin):
+    """10-char Amazon ASIN (same rules as detect_code_type)."""
+    if not asin or not isinstance(asin, str):
+        return False
+    a = asin.strip().upper()
+    if len(a) != 10:
+        return False
+    if a.startswith('B0'):
+        return True
+    if a.startswith('B') and a[1:3].isdigit():
+        return True
+    return False
+
+
+def _import_synthetic_fnsku_for_asin(asin):
+    a = (asin or '').strip().upper()
+    return f'__ASIN__{a}' if _import_valid_asin(a) else None
+
+
+def _import_get_api_cache_row(supabase_admin, fnsku, asin):
+    """Global cache lookup: prefer real FNSKU, then ASIN match, then synthetic ASIN key."""
+    if not supabase_admin:
+        return None
+    try:
+        if fnsku:
+            fn = fnsku.strip().upper()
+            cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('fnsku', fn).limit(1).execute()
+            if cache_result and getattr(cache_result, 'data', None) and len(cache_result.data) > 0:
+                return cache_result.data[0]
+        if _import_valid_asin(asin):
+            a = asin.strip().upper()
+            cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('asin', a).limit(1).execute()
+            if cache_result and getattr(cache_result, 'data', None) and len(cache_result.data) > 0:
+                return cache_result.data[0]
+            syn = _import_synthetic_fnsku_for_asin(a)
+            if syn:
+                cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('fnsku', syn).limit(1).execute()
+                if cache_result and getattr(cache_result, 'data', None) and len(cache_result.data) > 0:
+                    return cache_result.data[0]
+    except Exception as e:
+        logger.warning(f"_import_get_api_cache_row failed: {e}")
+    return None
+
+
+def _import_rainforest_cache_complete(cached):
+    if not cached:
+        return False
+    raw = cached.get('rainforest_raw_data')
+    if not raw:
+        return False
+    try:
+        if isinstance(raw, str):
+            raw = json.loads(raw)
+        if not isinstance(raw, dict):
+            return False
+        p = raw.get('product')
+        if not isinstance(p, dict):
+            return False
+        title = (p.get('title') or '').strip()
+        return len(title) >= 3
+    except Exception:
+        return False
+
+
+def _import_try_enrichment_lock(supabase_admin, canonical_key):
+    if not supabase_admin or not canonical_key:
+        return True
+    try:
+        res = supabase_admin.rpc('try_lock_enrichment', {'p_key': canonical_key, 'p_seconds': 90}).execute()
+        data = getattr(res, 'data', None)
+        if data is None:
+            return True
+        if isinstance(data, bool):
+            return data
+        return bool(data)
+    except Exception as e:
+        logger.warning(f"try_lock_enrichment RPC unavailable or failed (proceed without lock): {e}")
+        return True
+
+
+def _import_release_enrichment_lock(supabase_admin, canonical_key):
+    if not supabase_admin or not canonical_key:
+        return
+    try:
+        supabase_admin.rpc('release_enrichment_lock', {'p_key': canonical_key}).execute()
+    except Exception as e:
+        logger.warning(f"release_enrichment_lock failed: {e}")
+
+
+def _import_fetch_rainforest_product(asin):
+    api_key = os.environ.get('RAINFOREST_API_KEY')
+    if not api_key or not _import_valid_asin(asin):
+        return None
+    try:
+        response = requests.get(
+            'https://api.rainforestapi.com/request',
+            params={
+                'api_key': api_key,
+                'type': 'product',
+                'amazon_domain': 'amazon.com',
+                'asin': asin.strip().upper()
+            },
+            timeout=20
+        )
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        logger.warning(f"Rainforest import fetch failed for {asin}: {e}")
+    return None
+
+
+def import_save_rainforest_to_cache(supabase_admin, cache_fnsku, asin, rf_full_json):
+    """Persist full Rainforest JSON globally on api_lookup_cache (one row per cache_fnsku)."""
+    if not supabase_admin or not cache_fnsku or not rf_full_json:
+        return False
+    product = rf_full_json.get('product') or {}
+    if not product:
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    all_images = []
+    main_image = product.get('main_image', {}).get('link') if isinstance(product.get('main_image'), dict) else None
+    if main_image:
+        all_images.append(main_image)
+    for img in product.get('images') or []:
+        link = img.get('link') if isinstance(img, dict) else None
+        if link and link not in all_images:
+            all_images.append(link)
+    image_url_json = json.dumps(all_images) if all_images else None
+    title = (product.get('title') or '')[:500]
+    try:
+        price_v = (
+            product.get('buybox_winner', {}).get('price', {}).get('value')
+            if isinstance(product.get('buybox_winner'), dict) else None
+        ) or (product.get('price', {}).get('value') if isinstance(product.get('price'), dict) else None) or 0
+        price_float = float(price_v) if price_v else 0
+    except (ValueError, TypeError):
+        price_float = 0
+    cat = product.get('category')
+    category = ((cat.get('name') if isinstance(cat, dict) else (cat or '')) or '')[:200]
+    description = (product.get('description') or title or '')[:2000]
+
+    try:
+        existing = supabase_admin.table('api_lookup_cache').select('id, lookup_count').eq('fnsku', cache_fnsku).limit(1).execute()
+        existing_data = existing.data[0] if existing and getattr(existing, 'data', None) and len(existing.data) > 0 else None
+        cache_data = {
+            'fnsku': cache_fnsku,
+            'asin': asin.strip().upper() if asin else None,
+            'product_name': title or f'Product {cache_fnsku}',
+            'description': description,
+            'price': price_float,
+            'category': category or 'External API',
+            'image_url': image_url_json,
+            'source': 'rainforest_import',
+            'asin_found': True,
+            'last_accessed': now,
+            'updated_at': now,
+            'rainforest_raw_data': rf_full_json,
+        }
+        if existing_data:
+            cache_data['lookup_count'] = (existing_data.get('lookup_count') or 0) + 1
+            supabase_admin.table('api_lookup_cache').update(cache_data).eq('id', existing_data['id']).execute()
+        else:
+            cache_data['created_at'] = now
+            cache_data['lookup_count'] = 1
+            supabase_admin.table('api_lookup_cache').insert(cache_data).execute()
+        return True
+    except Exception as e:
+        logger.error(f"import_save_rainforest_to_cache failed: {e}")
+        return False
+
+
+def _import_patch_products_image(supabase_admin, fnsku, asin, primary_image_url):
+    if not supabase_admin or not primary_image_url:
+        return
+    try:
+        if fnsku:
+            supabase_admin.table('products').update({'image': primary_image_url[:2000]}).eq('fnsku', fnsku.strip().upper()).execute()
+        elif _import_valid_asin(asin):
+            supabase_admin.table('products').update({'image': primary_image_url[:2000]}).eq('asin', asin.strip().upper()).execute()
+    except Exception as e:
+        logger.warning(f"_import_patch_products_image failed: {e}")
+
+
+def _import_parse_quantity(raw_quantity):
+    if raw_quantity is None or raw_quantity == '':
+        return 1
+    try:
+        if isinstance(raw_quantity, (int, float)):
+            q = int(raw_quantity)
+            return max(1, q)
+        q = int(float(str(raw_quantity).strip()))
+        return max(1, q)
+    except (ValueError, TypeError):
+        return 1
 
 
 @app.route('/api/scan', methods=['POST'])
@@ -5449,20 +5978,88 @@ def report_usage_to_stripe(tenant_id, usage_quantity):
         logger.error(f"Error reporting usage to Stripe for tenant {tenant_id}: {str(e)}")
         return False
 
+def _tenant_usage_reporting_state(tenant_id):
+    """Load persisted metered-usage reporting state; empty dict on failure."""
+    if not supabase_admin:
+        return {}
+    try:
+        tres = supabase_admin.table('tenants').select(
+            'usage_report_billing_period_start, usage_reported_overage_units'
+        ).eq('id', tenant_id).single().execute()
+        return tres.data if tres.data else {}
+    except Exception as ex:
+        logger.warning(f"Could not load usage reporting state for tenant {tenant_id}: {ex}")
+        return {}
+
+
+def _period_start_key_from_stripe_value(period_start_ts):
+    """Stable key for the subscription billing period (Stripe unix start)."""
+    return str(int(period_start_ts))
+
+
+def _persist_tenant_usage_reporting_cursor(tenant_id, period_start_iso, overage_units):
+    """Write usage reporting cursor; retries to reduce mismatch after a successful Stripe UsageRecord."""
+    if not supabase_admin:
+        return False
+    import time as time_module
+    last_err = None
+    payload = {
+        'usage_report_billing_period_start': period_start_iso,
+        'usage_reported_overage_units': overage_units,
+    }
+    for attempt in range(3):
+        try:
+            supabase_admin.table('tenants').update(payload).eq('id', tenant_id).execute()
+            return True
+        except Exception as e:
+            last_err = e
+            logger.warning(
+                "Persist usage cursor attempt %s/3 failed for tenant %s: %s",
+                attempt + 1, tenant_id, e,
+            )
+            if attempt < 2:
+                time_module.sleep(0.2 * (2 ** attempt))
+    logger.error(
+        "Failed to persist usage reporting cursor for tenant %s after retries: %s",
+        tenant_id, last_err,
+    )
+    return False
+
+
+def _parse_stored_period_key(stored_raw):
+    """Normalize DB value to same epoch string as _period_start_key_from_stripe_value."""
+    if stored_raw is None:
+        return ''
+    if isinstance(stored_raw, datetime):
+        return str(int(stored_raw.timestamp()))
+    if isinstance(stored_raw, (int, float)):
+        return str(int(stored_raw))
+    try:
+        s = str(stored_raw).replace('Z', '+00:00')
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return str(int(dt.timestamp()))
+    except Exception:
+        return ''
+
+
 def calculate_and_report_overage(tenant_id):
-    """Calculate overage for current billing period and report to Stripe"""
+    """
+    Calculate overage for the current Stripe billing period and report only the delta to Stripe
+    (idempotent across repeated /api/report-usage/ calls). Returns (total_overage, delta_reported).
+    """
     try:
         subscription_info = get_tenant_subscription_info(tenant_id)
         if not subscription_info:
-            return 0
-        
+            return 0, 0
+
         subscription = subscription_info['subscription']
-        
-        # Get current billing period
+
         current_period_start = datetime.fromtimestamp(subscription.current_period_start, tz=timezone.utc)
         current_period_end = datetime.fromtimestamp(subscription.current_period_end, tz=timezone.utc)
-        
-        # Determine plan type from subscription
+        period_key = _period_start_key_from_stripe_value(subscription.current_period_start)
+
         plan_id = None
         for item in subscription.items.data:
             price_id = item.price.id
@@ -5470,29 +6067,57 @@ def calculate_and_report_overage(tenant_id):
             if found_plan_id:
                 plan_id = found_plan_id
                 break
-        
+
         if not plan_id:
             logger.warning(f"Could not determine plan for tenant {tenant_id}")
-            return 0
-        
+            return 0, 0
+
         plan_config = PLAN_CONFIG[plan_id]
         included_scans = plan_config['included_scans']
-        
-        # Calculate total scans in current period
+
         total_scans = calculate_monthly_scan_count(tenant_id, current_period_start, current_period_end)
-        
-        # Calculate overage
-        overage = max(0, total_scans - included_scans)
-        
-        if overage > 0:
-            # Report overage to Stripe
-            report_usage_to_stripe(tenant_id, overage)
-            logger.info(f"Tenant {tenant_id}: {total_scans} scans, {overage} overage (included: {included_scans})")
-        
-        return overage
+        total_overage = max(0, total_scans - included_scans)
+
+        row = _tenant_usage_reporting_state(tenant_id)
+        stored_key = _parse_stored_period_key(row.get('usage_report_billing_period_start'))
+        stored_units = row.get('usage_reported_overage_units') or 0
+
+        delta, new_stored, _new_period_key, persist_reset = compute_stripe_overage_increment(
+            total_scans, included_scans, period_key, stored_key, stored_units
+        )
+
+        if persist_reset:
+            if _persist_tenant_usage_reporting_cursor(tenant_id, current_period_start.isoformat(), 0):
+                logger.info(f"Tenant {tenant_id}: new billing period — reset usage reporting cursor")
+            else:
+                logger.warning(f"Could not persist billing period reset for tenant {tenant_id}")
+
+        if delta > 0:
+            ok = report_usage_to_stripe(tenant_id, delta)
+            if ok:
+                if not _persist_tenant_usage_reporting_cursor(
+                    tenant_id, current_period_start.isoformat(), new_stored
+                ):
+                    logger.error(
+                        f"Reported {delta} to Stripe for tenant {tenant_id} but DB cursor not updated — "
+                        "risk of duplicate Stripe usage on next report; fix DB / re-run migration 022"
+                    )
+            elif not ok:
+                logger.warning(f"Stripe usage report failed for tenant {tenant_id}; DB cursor unchanged")
+            logger.info(
+                f"Tenant {tenant_id}: scans={total_scans}, total_overage={total_overage}, "
+                f"delta_reported={delta} (included: {included_scans})"
+            )
+        elif total_overage > 0:
+            logger.info(
+                f"Tenant {tenant_id}: scans={total_scans}, total_overage={total_overage}, "
+                f"delta=0 (already reported)"
+            )
+
+        return total_overage, delta
     except Exception as e:
         logger.error(f"Error calculating overage for tenant {tenant_id}: {str(e)}")
-        return 0
+        return 0, 0
 
 @app.route('/api/report-usage/', methods=['POST'])
 def report_usage_endpoint():
@@ -5502,11 +6127,16 @@ def report_usage_endpoint():
         return jsonify({"error": "Tenant not found"}), 401
     
     try:
-        overage = calculate_and_report_overage(tenant_id)
+        total_overage, delta_reported = calculate_and_report_overage(tenant_id)
         return jsonify({
             "success": True,
-            "overage_scans": overage,
-            "message": f"Reported {overage} overage scans to Stripe"
+            "overage_scans": total_overage,
+            "units_reported_this_run": delta_reported,
+            "message": (
+                f"Reported {delta_reported} overage unit(s) to Stripe"
+                if delta_reported
+                else f"No new usage to report (total overage {total_overage})"
+            ),
         })
     except Exception as e:
         logger.error(f"Error in report-usage endpoint: {str(e)}")
