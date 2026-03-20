@@ -177,6 +177,14 @@ const Inventory = () => {
   const categories = ['All Categories', 'Smart Speakers', 'Streaming Devices', 'E-readers', 'Smart Home', 'Tablets'];
   const statuses = ['All', 'In Stock', 'Low Stock', 'Out of Stock'];
   
+  // Current filter defaults. (The UI for changing filters may be implemented later; we keep this
+  // definition so helper functions like `getFilteredInventory()` have a stable shape.)
+  const filters = {
+    location: locations[0],
+    category: categories[0],
+    status: statuses[0]
+  };
+  
   // Debounce search term
   useEffect(() => {
     const timerId = setTimeout(() => {

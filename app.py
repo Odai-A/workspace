@@ -11,25 +11,23 @@ import stripe
 from supabase import create_client, Client
 from subscription_usage_math import compute_stripe_overage_increment
 import logging # For better logging
+import sys
 from facebook_service import (
     get_facebook_oauth_url, exchange_code_for_token, get_user_pages,
     get_page_access_token, create_catalog_product, upload_photo_to_page,
     create_page_post, encrypt_token, decrypt_token, verify_token
 )
 
-# Very verbose debug to see what's happening
-print("Current directory:", os.getcwd())
-print("Env file exists:", os.path.exists('.env'))
-print("Loading dotenv...")
-load_dotenv(verbose=True)  # This will print debug info
-print("Loaded environment variables:")
-print("SUPABASE_URL:", os.environ.get('SUPABASE_URL'))
-print("SUPABASE_KEY:", os.environ.get('SUPABASE_KEY'))
-print("SUPABASE_SERVICE_KEY:", os.environ.get('SUPABASE_SERVICE_KEY'))
-print("FRONTEND_BASE_URL:", os.environ.get('FRONTEND_BASE_URL', 'NOT SET'))
-
-# Load environment variables from .env file
+# Load environment variables from .env file.
+# Do not print env values/secrets at import time (also helps unit tests stay quiet).
 load_dotenv()
+
+# Ensure stdout supports Unicode output (prevents Windows cp1252 UnicodeEncodeError
+# when emoji/other non-ASCII characters are printed/logged).
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+except Exception:
+    pass
 
 # Configure logging - ensure it outputs to console
 logging.basicConfig(
@@ -444,7 +442,7 @@ def log_scan_to_history(user_id, tenant_id, code, asin, supabase_client, api_loo
     logger.info(f"{'='*60}")
     
     print(f"\n{'='*60}", flush=True)
-    print(f"🔍 LOG_SCAN_TO_HISTORY CALLED", flush=True)
+    print("LOG_SCAN_TO_HISTORY CALLED", flush=True)
     print(f"   user_id: {user_id}", flush=True)
     print(f"   tenant_id: {tenant_id}", flush=True)
     print(f"   code: {code}", flush=True)
@@ -467,7 +465,7 @@ def log_scan_to_history(user_id, tenant_id, code, asin, supabase_client, api_loo
     try:
         # Check if this user has already scanned this exact code
         logger.info(f"🔍 Checking for duplicate scan: user_id={user_id}, code={code}, tenant_id={tenant_id}")
-        print(f"🔍 Checking duplicates: user_id={user_id}, code={code}, tenant_id={tenant_id}")
+        print(f"Checking duplicates: user_id={user_id}, code={code}, tenant_id={tenant_id}")
         
         # Build query to check for existing scan
         # Use scanned_code column (this is the actual column name in scan_history table)
@@ -491,7 +489,7 @@ def log_scan_to_history(user_id, tenant_id, code, asin, supabase_client, api_loo
             return False
         else:
             logger.info(f"✅ New scan detected: user {user_id}, code {code} (no duplicates found)")
-            print(f"✅ NEW SCAN - WILL COUNT: code={code}")
+            print(f"NEW SCAN - WILL COUNT: code={code}")
         
         # This is a new scan - log it
         # Note: scan_history table uses 'scanned_code' column, not 'code' or 'fnsku'
@@ -508,12 +506,12 @@ def log_scan_to_history(user_id, tenant_id, code, asin, supabase_client, api_loo
         if product_description is not None:
             scan_insert['product_description'] = (str(product_description)[:2000] if product_description else '')
         
-        print(f"📝 Inserting scan: {scan_insert}")
+        print(f"Inserting scan: {scan_insert}")
         result = supabase_client.table('scan_history').insert(scan_insert).execute()
         
         logger.info(f"✅ Logged new scan to scan_history: user {user_id}, code {code}, tenant_id={tenant_id}")
         logger.info(f"   Insert result: {result.data if hasattr(result, 'data') else 'No data'}")
-        print(f"✅✅✅ SCAN LOGGED: user={user_id}, code={code}, tenant={tenant_id}")
+        print(f"SCAN LOGGED: user={user_id}, code={code}, tenant={tenant_id}")
         print(f"   Insert result: {result.data if hasattr(result, 'data') else 'No data'}")
         
         # Small delay to ensure database commit completes before counting
@@ -525,7 +523,7 @@ def log_scan_to_history(user_id, tenant_id, code, asin, supabase_client, api_loo
         logger.error(f"❌ Failed to log scan to scan_history: {e}")
         import traceback
         logger.error(f"   Traceback: {traceback.format_exc()}")
-        print(f"❌❌❌ SCAN LOG FAILED: {e}")
+        print(f"SCAN LOG FAILED: {e}")
         print(f"   Traceback: {traceback.format_exc()}")
         return False
 
@@ -3158,12 +3156,25 @@ def scan_product():
     Frontend makes ONE request and gets complete product data back.
     """
     try:
-        data = request.get_json()
-        code = data.get('code', '').strip().upper()  # Convert to uppercase
+        data = request.get_json(silent=True)
+        if data is None:
+            return jsonify({
+                "success": False,
+                "error": "invalid_json",
+                "message": "JSON body is required"
+            }), 400
+        if not isinstance(data, dict):
+            return jsonify({
+                "success": False,
+                "error": "invalid_json",
+                "message": "JSON body must be an object"
+            }), 400
+
+        code = str(data.get('code') or '').strip().upper()  # Convert to uppercase
 
         # Prefer authenticated user/tenant from JWT; fall back to body user_id if provided
         user_id_from_token, tenant_id = get_ids_from_request()
-        user_id_from_body = (data.get('user_id') or '').strip()
+        user_id_from_body = str(data.get('user_id') or '').strip()
         user_id = user_id_from_token or user_id_from_body
 
         # Detect code type
@@ -3171,7 +3182,7 @@ def scan_product():
         
         # Use both print and logger to ensure visibility
         print("\n" + "=" * 60)
-        print(f"🔍 SCAN REQUEST RECEIVED")
+        print("SCAN REQUEST RECEIVED")
         print(f"   Code: {code}")
         print(f"   Type: {code_type}")
         print(f"   UserID: {user_id}")
@@ -3187,10 +3198,10 @@ def scan_product():
         logger.info(f"   Supabase admin client: {supabase_admin is not None}")
         if supabase_admin:
             logger.info(f"   ✅ Supabase is READY for saving to api_lookup_cache")
-            print(f"✅ Supabase is READY for saving to api_lookup_cache")
+            print("Supabase is READY for saving to api_lookup_cache")
         else:
             logger.error(f"   ❌ Supabase is NOT READY - save will FAIL")
-            print(f"❌ Supabase is NOT READY - save will FAIL")
+            print("Supabase is NOT READY - save will FAIL")
         
         if not code:
             return jsonify({
@@ -3224,23 +3235,23 @@ def scan_product():
                 
                 # Log CEO/admin status for debugging
                 logger.info(f"👤 User role check: user_id={user_id}, role={user_role}, is_ceo_admin={is_ceo_admin}")
-                print(f"👤 User role check: user_id={user_id}, role={user_role}, is_ceo_admin={is_ceo_admin}")
+                print(f"User role check: user_id={user_id}, role={user_role}, is_ceo_admin={is_ceo_admin}")
                 
                 # CEO accounts completely bypass ALL pricing and trial restrictions
                 # Note: Creator check is only for upgrading TO CEO, not for using CEO privileges
                 if is_ceo_admin:
                     logger.info(f"✅✅✅ CEO/Admin account detected - BYPASSING ALL TRIAL LIMITS AND PRICING RESTRICTIONS")
-                    print(f"✅✅✅ CEO/Admin account - UNLIMITED SCANNING - NO TRIAL CHECKS - SKIPPING ALL PRICING CHECKS")
+                    print("CEO/Admin account - UNLIMITED SCANNING - NO TRIAL CHECKS - SKIPPING ALL PRICING CHECKS")
         except Exception as role_error:
             logger.error(f"Error checking user role: {role_error}")
-            print(f"❌ Error checking user role: {role_error}")
+            print(f"Error checking user role: {role_error}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
         
         # If CEO/admin, completely skip all trial/pricing checks
         if is_ceo_admin:
             logger.info(f"🚀 CEO/Admin account - proceeding with scan without any trial/pricing checks")
-            print(f"🚀 CEO/Admin account - proceeding with scan without any trial/pricing checks")
+            print("CEO/Admin account - proceeding with scan without any trial/pricing checks")
         elif supabase_admin:
             try:
                 # Treat tenants without an active subscription as on the free trial
@@ -3712,7 +3723,7 @@ def scan_product():
                             
                             # Log scan to history (even if cached, it counts toward trial limit)
                             # But only count unique scans per user
-                            print(f"\n🔵🔵🔵 ABOUT TO CALL log_scan_to_history (UPC)")
+                            print(f"\nABOUT TO CALL log_scan_to_history (UPC)")
                             print(f"   user_id: {user_id}")
                             print(f"   tenant_id: {tenant_id}")
                             print(f"   code: {code}")
@@ -3723,7 +3734,7 @@ def scan_product():
                                 api_lookup_cache_id=cached.get('id'),
                                 product_description=cached.get('product_name') or ''
                             )
-                            print(f"🔵🔵🔵 log_scan_to_history RETURNED (UPC): {scan_was_logged}")
+                            print(f"log_scan_to_history RETURNED (UPC): {scan_was_logged}")
                             logger.info(f"🔵 log_scan_to_history returned (UPC): {scan_was_logged}")
                             
                             # Get updated scan count for response (always calculate, not just if logged)
@@ -3735,7 +3746,7 @@ def scan_product():
                                         # Retry count query up to 5 times if scan was just logged (to account for DB commit delay)
                                         used_scans = 0
                                         max_retries = 5 if scan_was_logged else 1
-                                        print(f"\n📊 CALCULATING SCAN COUNT (UPC cached, was_logged={scan_was_logged}, max_retries={max_retries})")
+                                        print(f"\nCALCULATING SCAN COUNT (UPC cached, was_logged={scan_was_logged}, max_retries={max_retries})")
                                         print(f"   user_id: {user_id}")
                                         print(f"   tenant_id: {tenant_id}")
                                         
@@ -3745,7 +3756,7 @@ def scan_product():
                                             print(f"   Trial start date: {trial_start_date}")
                                         except Exception as trial_date_error:
                                             logger.error(f"Error getting trial start date: {trial_date_error}")
-                                            print(f"   ❌ Trial date error: {trial_date_error}, using fallback")
+                                            print(f"   Trial date error: {trial_date_error}, using fallback")
                                             # Use fallback: count all scans (better than failing)
                                             from datetime import timedelta
                                             trial_start_date = datetime.now(timezone.utc) - timedelta(days=30)
@@ -3758,14 +3769,14 @@ def scan_product():
                                                 if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
                                                     import time
                                                     wait_time = 0.3 * (attempt + 1)  # Increasing wait time
-                                                    print(f"   ⏳ Waiting {wait_time}s before retry...")
+                                                    print(f"   Waiting {wait_time}s before retry...")
                                                     time.sleep(wait_time)
                                                     logger.info(f"   Retry {attempt + 1}/{max_retries}: count was 0, retrying...")
                                                 else:
                                                     break
                                             except Exception as query_error:
                                                 logger.error(f"Error in scan count query attempt {attempt + 1}: {query_error}")
-                                                print(f"   ❌ Query error on attempt {attempt + 1}: {query_error}")
+                                                print(f"   Query error on attempt {attempt + 1}: {query_error}")
                                                 import traceback
                                                 logger.error(f"   Traceback: {traceback.format_exc()}")
                                                 if attempt == max_retries - 1:
@@ -3778,7 +3789,7 @@ def scan_product():
                                                     continue
                                         
                                         logger.info(f"📊 UPC cached scan count: used={used_scans}, was_logged={scan_was_logged}")
-                                        print(f"📊📊📊 FINAL SCAN COUNT (UPC): {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
+                                        print(f"FINAL SCAN COUNT (UPC): {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
                                         scan_count_data = {
                                             'used': used_scans,
                                             'limit': FREE_TRIAL_SCAN_LIMIT,
@@ -4063,7 +4074,7 @@ def scan_product():
                 cached = (cache_result.data[0] if (cache_result and getattr(cache_result, 'data', None) and len(cache_result.data) > 0) else None)
                 if cached:
                     logger.info(f"✅✅✅ FOUND IN CACHE! Code: {code}, ASIN: {cached.get('asin', 'N/A')}")
-                    print(f"✅✅✅ FOUND IN CACHE! Code: {code}")
+                    print(f"FOUND IN CACHE! Code: {code}")
                     from datetime import timedelta
                     now = datetime.now(timezone.utc)
                     cached_date = datetime.fromisoformat(cached.get('updated_at', cached.get('created_at', now.isoformat())))
@@ -4082,7 +4093,7 @@ def scan_product():
                         logger.info(f"✅ Found cached data for {code_type} {code} (age: {age_days} days)")
                         # Log scan to history (even if cached, it counts toward trial limit)
                         # But only count unique scans per user
-                        print(f"\n🔵🔵🔵 ABOUT TO CALL log_scan_to_history")
+                        print(f"\nABOUT TO CALL log_scan_to_history")
                         print(f"   user_id: {user_id}")
                         print(f"   tenant_id: {tenant_id}")
                         print(f"   code: {code}")
@@ -4093,7 +4104,7 @@ def scan_product():
                             api_lookup_cache_id=cached.get('id'),
                             product_description=cached.get('product_name') or ''
                         )
-                        print(f"🔵🔵🔵 log_scan_to_history RETURNED: {scan_was_logged}")
+                        print(f"log_scan_to_history RETURNED: {scan_was_logged}")
                         logger.info(f"🔵 log_scan_to_history returned: {scan_was_logged}")
                         
                         # Get updated scan count for response (always calculate, not just if logged)
@@ -4105,7 +4116,7 @@ def scan_product():
                                     # Retry count query up to 5 times if scan was just logged (to account for DB commit delay)
                                     used_scans = 0
                                     max_retries = 5 if scan_was_logged else 1
-                                    print(f"\n📊 CALCULATING SCAN COUNT (was_logged={scan_was_logged}, max_retries={max_retries})")
+                                    print(f"\nCALCULATING SCAN COUNT (was_logged={scan_was_logged}, max_retries={max_retries})")
                                     print(f"   user_id: {user_id}")
                                     print(f"   tenant_id: {tenant_id}")
                                     
@@ -4119,13 +4130,13 @@ def scan_product():
                                         if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
                                             import time
                                             wait_time = 0.3 * (attempt + 1)
-                                            print(f"   ⏳ Waiting {wait_time}s before retry...")
+                                            print(f"   Waiting {wait_time}s before retry...")
                                             time.sleep(wait_time)
                                             logger.info(f"   Retry {attempt + 1}/{max_retries}: count was 0, retrying...")
                                         else:
                                             break
                                     logger.info(f"📊 FNSKU cached scan count: used={used_scans}, was_logged={scan_was_logged}, limit={FREE_TRIAL_SCAN_LIMIT}")
-                                    print(f"📊📊📊 FINAL SCAN COUNT: {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
+                                    print(f"FINAL SCAN COUNT: {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
                                     scan_count_data = {
                                         'used': used_scans,
                                         'limit': FREE_TRIAL_SCAN_LIMIT,
@@ -4311,7 +4322,9 @@ def scan_product():
                         if scan_count_data:
                             response_data['scan_count'] = scan_count_data
                             logger.info(f"✅ Scan count included in response: {scan_count_data}")
-                            print(f"✅✅✅ SCAN COUNT IN RESPONSE: {scan_count_data.get('used', 'N/A')}/{scan_count_data.get('limit', 'N/A')}")
+                            print(
+                                f"SCAN COUNT IN RESPONSE: {scan_count_data.get('used', 'N/A')}/{scan_count_data.get('limit', 'N/A')}"
+                            )
                         else:
                             # Fallback: return basic count info even if calculation failed
                             logger.warning(f"⚠️ Scan count calculation failed, using fallback")
@@ -4322,23 +4335,23 @@ def scan_product():
                                 'is_paid': False
                             }
                         
-                        logger.info(f"✅ Returning cached data for {code_type} {code} (age: {age_days} days)")
+                        logger.info(f"Returning cached data for {code_type} {code} (age: {age_days} days)")
                         logger.info(f"   Response includes scan_count: {response_data.get('scan_count', 'MISSING')}")
-                        print(f"✅ Returning cached data - NO API CHARGE")
-                        print(f"📊 Final scan_count in response: {response_data.get('scan_count', {})}")
+                        print("Returning cached data - NO API CHARGE")
+                        print(f"Final scan_count in response: {response_data.get('scan_count', {})}")
                         return jsonify(response_data)
                 else:
-                    logger.info(f"❌ NOT FOUND IN CACHE: {code_type} {code}")
-                    print(f"❌ NOT FOUND IN CACHE: {code}")
+                    logger.info(f"NOT FOUND IN CACHE: {code_type} {code}")
+                    print(f"NOT FOUND IN CACHE: {code}")
             except Exception as cache_error:
                 logger.error(f"❌ Error checking cache: {cache_error}")
                 import traceback
                 logger.error(f"   Traceback: {traceback.format_exc()}")
-                print(f"❌ Cache check error: {cache_error}")
+                print(f"Cache check error: {cache_error}")
         
         # STEP 2: Not in cache - call FNSKU API. AddOrGet first for fastest first-scan (GetByBarCode often fails or is slow).
         logger.info(f"💰 {code_type} {code} not in cache - calling API (will be charged)")
-        print(f"💰💰💰 CALLING EXTERNAL API - THIS WILL BE CHARGED")
+        print(f"CALLING EXTERNAL API - THIS WILL BE CHARGED")
         BASE_URL = "https://ato.fnskutoasin.com"
         headers = {
             'api-key': FNSKU_API_KEY,
@@ -4721,7 +4734,7 @@ def scan_product():
                     # Retry count query up to 5 times if scan was just logged (to account for DB commit delay)
                     used_scans = 0
                     max_retries = 5 if scan_was_logged else 1
-                    print(f"\n📊 CALCULATING SCAN COUNT (non-cached, was_logged={scan_was_logged}, max_retries={max_retries})")
+                    print(f"\nCALCULATING SCAN COUNT (non-cached, was_logged={scan_was_logged}, max_retries={max_retries})")
                     print(f"   user_id: {user_id}")
                     print(f"   tenant_id: {tenant_id}")
                     
@@ -4735,14 +4748,14 @@ def scan_product():
                         if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
                             import time
                             wait_time = 0.3 * (attempt + 1)
-                            print(f"   ⏳ Waiting {wait_time}s before retry...")
+                            print(f"   Waiting {wait_time}s before retry...")
                             time.sleep(wait_time)
                             logger.info(f"   Retry {attempt + 1}/{max_retries}: count was 0, retrying...")
                         else:
                             break
                     logger.info(f"📊 Scan count calculated: used={used_scans}, limit={FREE_TRIAL_SCAN_LIMIT}, "
                                f"was_logged={scan_was_logged}, user_id={user_id}, tenant_id={tenant_id}")
-                    print(f"📊📊📊 FINAL SCAN COUNT (non-cached): {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
+                    print(f"FINAL SCAN COUNT (non-cached): {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
                     
                     response_data['scan_count'] = {
                         'used': used_scans,
@@ -4764,7 +4777,7 @@ def scan_product():
         
         # Log final response status
         print("\n" + "=" * 60)
-        print(f"📤 FINAL RESPONSE STATUS:")
+        print("FINAL RESPONSE STATUS:")
         print(f"   - saved_to_cache: {response_data.get('saved_to_cache', 'NOT SET')}")
         print(f"   - cached: {response_data.get('cached', False)}")
         print(f"   - asin: {asin}")
@@ -6961,7 +6974,7 @@ if __name__ == '__main__':
     print(f"FRONTEND_BASE_URL: {os.environ.get('FRONTEND_BASE_URL', 'NOT SET')}")
     print("=" * 60)
     logger.info(f"Starting Flask app on port {port} with debug mode: {debug_mode}")
-    print(f"\n✅ Backend server is RUNNING - waiting for requests...")
-    print(f"📡 API Endpoint: http://localhost:{port}/api/scan")
-    print(f"💡 All API requests will be logged below:\n")
+    print("\nBackend server is RUNNING - waiting for requests...")
+    print(f"API Endpoint: http://localhost:{port}/api/scan")
+    print("All API requests will be logged below:\n")
     app.run(debug=debug_mode, port=port, host='0.0.0.0') 

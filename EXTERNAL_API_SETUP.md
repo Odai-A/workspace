@@ -20,7 +20,7 @@ The external scanner allows you to scan FNSKU barcodes and lookup ASIN informati
 
 The API is pre-configured with:
 - **Base URL**: `https://ato.fnskutoasin.com`
-- **API Key**: `20a98a6a-437e-497c-b64c-ec97ec2fbc19`
+- **API Key**: `VITE_FNSKU_API_KEY` (set via environment / `.env` — avoid committing keys to the repo)
 - **Authentication**: Uses `apiKey` header
 
 ## API Workflow

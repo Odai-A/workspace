@@ -37,7 +37,7 @@ Create a `.env` file in the `inventory_system` directory:
 ```bash
 # External API Configuration
 VITE_FNSKU_API_BASE_URL=https://ato.fnskutoasin.com
-VITE_FNSKU_API_KEY=20a98a6a-437e-497c-b64c-ec97ec2fbc19
+VITE_FNSKU_API_KEY=your-fnsku-api-key-here
 
 # Development Settings
 VITE_USE_MOCK_DATA=false
@@ -97,7 +97,7 @@ Open your browser to: `http://localhost:3000` (or whatever port Vite shows)
 - `POST /api/v1/ScanTask/AddOrGet` - Create new scan tasks
 
 ### API Key
-The API key `20a98a6a-437e-497c-b64c-ec97ec2fbc19` is currently hardcoded but can be moved to environment variables for production.
+Use `VITE_FNSKU_API_KEY` from your environment for production (avoid hardcoding keys in source code).
 
 ## Troubleshooting
 

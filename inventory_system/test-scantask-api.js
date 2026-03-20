@@ -2,7 +2,12 @@ import axios from 'axios';
 
 // Test barcode/FNSKU
 const barCode = 'X000ABCDEF';
-const apiKey = '20a98a6a-437e-497c-b64c-ec97ec2fbc19';
+const apiKey = process.env.VITE_FNSKU_API_KEY;
+
+if (!apiKey) {
+  console.error('Missing `VITE_FNSKU_API_KEY`. Set it in your environment (e.g., from inventory_system/.env) before running this script.');
+  process.exit(1);
+}
 
 console.log('Testing ScanTask API with:');
 console.log('- Barcode:', barCode);

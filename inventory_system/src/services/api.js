@@ -21,8 +21,18 @@ apiClient.interceptors.response.use(
   }
 );
 
-// Add this near the top of the file, after the other imports
-const FNSKU_TO_ASIN_API_KEY = '20a98a6a-437e-497c-b64c-ec97ec2fbc19'; // TEMPORARY - Move to .env file in production
+// Centralized access to the fnskutoasin.com API key.
+// If it's missing, we fail early with a clear message rather than using a hardcoded fallback.
+const getFnskuToAsinApiKey = () => {
+  const apiKey = import.meta.env.VITE_FNSKU_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      'Missing `VITE_FNSKU_API_KEY`. Add it to `inventory_system/.env` to enable fnskutoasin.com direct API calls.'
+    );
+  }
+  return apiKey;
+};
+
 const FNSKU_API_ENDPOINT = 'https://ato.fnskutoasin.com/api/v1/ScanTask/GetMyByBarCode';
 
 // External fnskutoasin.com API service
@@ -34,7 +44,7 @@ export const externalApiService = {
   async testConnection() {
     try {
       const BASE_URL = 'https://ato.fnskutoasin.com';
-      const API_KEY = '20a98a6a-437e-497c-b64c-ec97ec2fbc19';
+      const API_KEY = getFnskuToAsinApiKey();
       
       console.log('🧪 Testing API connection...');
       
@@ -98,8 +108,7 @@ export const externalApiService = {
         throw new Error('FNSKU is required');
       }
 
-      // Get API key from environment or use hardcoded fallback
-      const API_KEY = import.meta.env.VITE_FNSKU_API_KEY || '20a98a6a-437e-497c-b64c-ec97ec2fbc19';
+      const API_KEY = getFnskuToAsinApiKey();
       const BASE_URL = 'https://ato.fnskutoasin.com';
       
       console.log(`🔍 Looking up FNSKU: ${fnsku} directly from FNSKU API`);
@@ -556,7 +565,7 @@ export const scanTaskService = {
       }
       
       // Use the same endpoint base and key as the GetMyByBarCode call
-      const apiKey = FNSKU_TO_ASIN_API_KEY; // Use consistent key
+      const apiKey = getFnskuToAsinApiKey(); // Use consistent key
       // Construct the AddOrGet URL from the known base endpoint
       const addOrGetUrl = FNSKU_API_ENDPOINT.replace('/GetMyByBarCode', '/AddOrGet'); 
       console.log(`Calling AddOrGet API: ${addOrGetUrl} for ${barCode}`); // Add log
@@ -985,11 +994,12 @@ export const fetchProductByFnsku = async (fnsku, options = {}) => {
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           console.log(`Polling attempt ${attempt}/${maxAttempts} for FNSKU: ${fnsku}`);
+          const apiKey = getFnskuToAsinApiKey();
           const response = await axios.get(FNSKU_API_ENDPOINT, {
             params: { BarCode: fnsku },
             headers: { 
               'accept': 'application/json', 
-              'api-key': FNSKU_TO_ASIN_API_KEY 
+              'api-key': apiKey
             },
             timeout: 5000
           });
