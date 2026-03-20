@@ -3156,7 +3156,11 @@ def scan_product():
     Frontend makes ONE request and gets complete product data back.
     """
     try:
-        data = request.get_json(silent=True)
+        try:
+            data = request.get_json(silent=True)
+        except Exception:
+            # If Flask still raises a BadRequest on malformed JSON, treat it as invalid input.
+            data = None
         if data is None:
             return jsonify({
                 "success": False,
