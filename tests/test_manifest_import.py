@@ -70,6 +70,13 @@ class TestManifestImportHelpers(unittest.TestCase):
         self.assertTrue(p.is_file())
         self.assertIn("raw_row", p.read_text(encoding="utf-8"))
 
+    def test_migration_022_inventory_soft_remove_exists(self):
+        p = ROOT / "supabase_migrations" / "022_inventory_soft_remove.sql"
+        self.assertTrue(p.is_file())
+        text = p.read_text(encoding="utf-8")
+        self.assertIn("hidden_from_inventory_list", text)
+        self.assertIn("inventory_hidden_manifest", text)
+
     def test_get_api_cache_row_prefers_fnsku(self):
         """Global cache: first lookup by FNSKU when present."""
         admin = MagicMock()

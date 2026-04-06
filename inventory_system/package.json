@@ -26,6 +26,7 @@
     "axios": "^1.8.4",
     "chart.js": "^4.4.9",
     "jsbarcode": "^3.11.6",
+    "jszip": "^3.10.1",
     "jwt-decode": "^4.0.0",
     "prop-types": "^15.8.1",
     "qrcode.react": "^4.2.0",

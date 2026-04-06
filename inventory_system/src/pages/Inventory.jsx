@@ -25,13 +25,33 @@ import { inventoryService, supabase } from '../config/supabaseClient';
 import { exportMarketplace } from '../utils/marketplaceExport';
 import axios from 'axios';
 
-const ITEMS_PER_PAGE = 15;
+const INVENTORY_PAGE_SIZE_OPTIONS = [25, 50, 75, 100];
 const EXPORT_ALL_LIMIT = 10000;
+const ITEMS_PER_PAGE_STORAGE_KEY = 'inventoryItemsPerPage';
+
+function readStoredItemsPerPage() {
+  try {
+    const v = parseInt(localStorage.getItem(ITEMS_PER_PAGE_STORAGE_KEY), 10);
+    if (INVENTORY_PAGE_SIZE_OPTIONS.includes(v)) return v;
+  } catch {
+    /* ignore */
+  }
+  return INVENTORY_PAGE_SIZE_OPTIONS[0];
+}
+/** Load up to this many rows from each source, merge, then paginate in the UI (avoids broken totals from paging two tables separately). */
+const INVENTORY_FETCH_LIMIT = 10000;
+
+/** Stable row id for selection (inventory and manifest rows can share numeric ids). */
+function getInventoryRowKey(item) {
+  if (!item || item.id == null) return '';
+  const src = item.source === 'manifest_data' ? 'm' : 'i';
+  return `${src}:${item.id}`;
+}
 
 /**
- * Combine inventory and manifest results into a single list (used by fetchInventory and export-all).
+ * Combine inventory and manifest results into a single list (used by Inventory load and export-all).
  */
-async function combineInventoryAndManifest(inventoryResult, manifestResult, searchTerm) {
+async function combineInventoryAndManifest(inventoryResult, manifestResult, searchTerm, hiddenManifestIds = new Set()) {
   const isAsin = (str) => str && typeof str === 'string' && str.length === 10 && str.startsWith('B0');
   const isFnsku = (str) => str && typeof str === 'string' && (str.startsWith('X') || str.length > 10);
 
@@ -39,7 +59,8 @@ async function combineInventoryAndManifest(inventoryResult, manifestResult, sear
     let asin = item.asin || '';
     let fnsku = '';
     let lpn = '';
-    let image_url = '';
+    // Keep inventory.image_url first (often JSON with all Scanner images); manifest fills gaps only.
+    let image_url = item.image_url || '';
     const skuValue = item.sku || '';
     if (isAsin(skuValue)) {
       asin = skuValue;
@@ -60,7 +81,7 @@ async function combineInventoryAndManifest(inventoryResult, manifestResult, sear
           if (!asin && manifestData['B00 Asin']) asin = manifestData['B00 Asin'];
           if (!fnsku && manifestData['Fn Sku']) fnsku = manifestData['Fn Sku'];
           if (manifestData['X-Z ASIN']) lpn = manifestData['X-Z ASIN'];
-          if (manifestData.image_url) image_url = manifestData.image_url;
+          if (!image_url && manifestData.image_url) image_url = manifestData.image_url;
         } else if (fnsku && !asin) {
           const manifestProduct = await productLookupService.getProductByFnsku(fnsku);
           if (manifestProduct) {
@@ -113,11 +134,13 @@ async function combineInventoryAndManifest(inventoryResult, manifestResult, sear
     };
   }));
 
-  const manifestItems = (manifestResult.data || []).map(item => ({
-    ...item,
-    image_url: item.image_url || item['Image URL'] || '',
-    source: 'manifest_data'
-  }));
+  const manifestItems = (manifestResult.data || [])
+    .filter((item) => item?.id != null && !hiddenManifestIds.has(String(item.id)))
+    .map((item) => ({
+      ...item,
+      image_url: item.image_url || item['Image URL'] || '',
+      source: 'manifest_data',
+    }));
 
   const combinedItems = [...inventoryItems];
   manifestItems.forEach(manifestItem => {
@@ -161,6 +184,7 @@ const Inventory = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
+  const [itemsPerPage, setItemsPerPage] = useState(readStoredItemsPerPage);
   const [totalItems, setTotalItems] = useState(0);
   const [error, setError] = useState(null);
   const [showAddStockModal, setShowAddStockModal] = useState(false);
@@ -194,47 +218,94 @@ const Inventory = () => {
     return () => clearTimeout(timerId);
   }, [searchTerm]);
 
-  const fetchInventory = useCallback(async () => {
-    console.log("fetchInventory called. Page:", currentPage, "Search:", debouncedSearchTerm);
+  /** Full merged list for current search; UI shows one page via slice (see effect below). */
+  const [fullCombinedList, setFullCombinedList] = useState([]);
+
+  const loadInventoryData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      // First, try to get from inventory table (items added via scanner)
       const inventoryResult = await inventoryService.getInventory({
-        page: currentPage,
-        limit: ITEMS_PER_PAGE,
+        page: 1,
+        limit: INVENTORY_FETCH_LIMIT,
         searchQuery: debouncedSearchTerm,
       });
-      
-      console.log("fetchInventory - Inventory table result:", inventoryResult);
-      
-      // Also get from manifest_data for products that might not be in inventory yet
+
       const manifestResult = await productLookupService.getProducts({
-        page: currentPage,
-        limit: ITEMS_PER_PAGE,
+        page: 1,
+        limit: INVENTORY_FETCH_LIMIT,
         searchQuery: debouncedSearchTerm,
       });
-      
-      console.log("fetchInventory - Manifest table result:", manifestResult);
-      
-      const itemsWithImages = await combineInventoryAndManifest(inventoryResult, manifestResult, debouncedSearchTerm);
-      setProducts(itemsWithImages);
-      setTotalItems(itemsWithImages.length);
+
+      const hiddenManifestList = await inventoryService.getHiddenManifestIds();
+      const hiddenManifestIds = new Set(hiddenManifestList);
+
+      const combined = await combineInventoryAndManifest(
+        inventoryResult,
+        manifestResult,
+        debouncedSearchTerm,
+        hiddenManifestIds
+      );
+
+      setFullCombinedList(combined);
+
+      const invCap = (inventoryResult.data || []).length >= INVENTORY_FETCH_LIMIT;
+      const manCap = (manifestResult.data || []).length >= INVENTORY_FETCH_LIMIT;
+      if (invCap || manCap) {
+        toast.info(
+          `Showing up to ${INVENTORY_FETCH_LIMIT.toLocaleString()} items per source. Narrow search if something is missing.`,
+          { autoClose: 5000 }
+        );
+      }
     } catch (err) {
       console.error('Error loading inventory:', err);
       setError('Failed to load inventory data');
       toast.error('Failed to load inventory data. Please try again.');
+      setFullCombinedList([]);
       setProducts([]);
       setTotalItems(0);
     } finally {
       setLoading(false);
-      console.log("fetchInventory finished.");
     }
-  }, [currentPage, debouncedSearchTerm]);
+  }, [debouncedSearchTerm]);
 
   useEffect(() => {
-    fetchInventory();
-  }, [fetchInventory]);
+    void loadInventoryData();
+  }, [loadInventoryData]);
+
+  useEffect(() => {
+    const total = fullCombinedList.length;
+    const totalPages = Math.max(1, Math.ceil(total / itemsPerPage) || 1);
+    if (total > 0 && currentPage > totalPages) {
+      setCurrentPage(totalPages);
+      return;
+    }
+    const start = (currentPage - 1) * itemsPerPage;
+    setProducts(fullCombinedList.slice(start, start + itemsPerPage));
+    setTotalItems(total);
+  }, [fullCombinedList, currentPage, itemsPerPage]);
+
+  const handleItemsPerPageChange = (e) => {
+    const next = Number(e.target.value);
+    if (!INVENTORY_PAGE_SIZE_OPTIONS.includes(next)) return;
+    try {
+      localStorage.setItem(ITEMS_PER_PAGE_STORAGE_KEY, String(next));
+    } catch {
+      /* ignore */
+    }
+    setItemsPerPage(next);
+    setCurrentPage(1);
+  };
+
+  useEffect(() => {
+    setSelectedItems(new Set());
+  }, [currentPage, debouncedSearchTerm, itemsPerPage]);
+
+  useEffect(() => {
+    if (marketplaceExportScope === 'selected' && selectedItems.size === 0) {
+      setMarketplaceExportScope('current');
+    }
+  }, [marketplaceExportScope, selectedItems.size]);
 
   const formatDate = (dateString) => {
     if (!dateString) return 'N/A';
@@ -571,10 +642,12 @@ const Inventory = () => {
     toast.info('Filters have been reset to default values.');
   };
 
-  // Export to CSV
+  const getSelectedProductRows = () =>
+    products.filter((p) => selectedItems.has(getInventoryRowKey(p)));
+
+  // Export to CSV (current page / current list)
   const handleExport = () => {
     try {
-      // Filter items if needed based on current filters/search
       const dataToExport = products;
       
       // Convert data to CSV format
@@ -616,6 +689,43 @@ const Inventory = () => {
     }
   };
 
+  const handleExportSelected = () => {
+    const rows = getSelectedProductRows();
+    if (rows.length === 0) {
+      toast.warning('Select at least one row to export.');
+      return;
+    }
+    try {
+      const headers = ['Product Description', 'LPN', 'ASIN', 'Quantity', 'MSRP', 'Category'];
+      const csvRows = [
+        headers.join(','),
+        ...rows.map((item) => [
+          `"${(item.Description || '').replace(/"/g, '""')}"`,
+          `"${(item['X-Z ASIN'] || '').replace(/"/g, '""')}"`,
+          `"${(item['B00 Asin'] || '').replace(/"/g, '""')}"`,
+          item.Quantity !== null && item.Quantity !== undefined ? item.Quantity.toString() : 'N/A',
+          item.MSRP !== null && item.MSRP !== undefined ? `$${item.MSRP.toFixed(2)}` : 'N/A',
+          `"${(item.Category || '').replace(/"/g, '""')}"`,
+        ].join(',')),
+      ];
+      const csvString = csvRows.join('\n');
+      const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.setAttribute('href', url);
+      link.setAttribute('download', `inventory_selected_${new Date().toISOString().split('T')[0]}.csv`);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      toast.success(`Exported ${rows.length} selected row(s) to CSV.`);
+    } catch (error) {
+      console.error('Error exporting selected inventory:', error);
+      toast.error('Failed to export selected rows.');
+    }
+  };
+
   /** Fetch all products for export (current filters) */
   const fetchAllProductsForExport = useCallback(async () => {
     const inventoryResult = await inventoryService.getInventory({
@@ -628,20 +738,31 @@ const Inventory = () => {
       limit: EXPORT_ALL_LIMIT,
       searchQuery: debouncedSearchTerm,
     });
-    return combineInventoryAndManifest(inventoryResult, manifestResult, debouncedSearchTerm);
+    const hiddenManifestList = await inventoryService.getHiddenManifestIds();
+    return combineInventoryAndManifest(
+      inventoryResult,
+      manifestResult,
+      debouncedSearchTerm,
+      new Set(hiddenManifestList)
+    );
   }, [debouncedSearchTerm]);
 
   const handleMarketplaceExportDownload = async () => {
     setIsExportingMarketplace(true);
     try {
-      const list = marketplaceExportScope === 'all'
-        ? await fetchAllProductsForExport()
-        : products;
+      let list;
+      if (marketplaceExportScope === 'all') {
+        list = await fetchAllProductsForExport();
+      } else if (marketplaceExportScope === 'selected') {
+        list = getSelectedProductRows();
+      } else {
+        list = products;
+      }
       if (!list || list.length === 0) {
         toast.warning('No products to export.');
         return;
       }
-      exportMarketplace(list, marketplaceExportFormat, marketplaceUniversalFormat);
+      await exportMarketplace(list, marketplaceExportFormat, marketplaceUniversalFormat);
       toast.success(`Exported ${list.length} product(s) for ${marketplaceExportFormat}.`);
       setShowMarketplaceExportModal(false);
     } catch (err) {
@@ -720,7 +841,7 @@ const Inventory = () => {
       }
       
       // Refresh inventory list
-      fetchInventory();
+      loadInventoryData();
       
       // Show success message
       toast.success(`Successfully added ${addedItems.length} items to inventory.`);
@@ -745,134 +866,140 @@ const Inventory = () => {
     }
   };
 
-  // Delete an inventory item
+  // Remove from inventory list only (no DELETE of inventory or manifest_data rows in Supabase)
   const handleDeleteItem = async (item) => {
-    if (!window.confirm(`Are you sure you want to delete "${item.Description}" from inventory?`)) {
+    const rowKey = getInventoryRowKey(item);
+    if (!rowKey) {
+      toast.error('Cannot remove: missing row id');
+      return;
+    }
+    if (!window.confirm(
+      `Remove "${item.Description}" from your inventory list?\n\nYour data stays in the database; this only hides the row from this view.`
+    )) {
       return;
     }
 
     setIsDeleting(true);
     try {
-      // Determine which service to use based on source
       let result;
       if (item.source === 'inventory_table' && item.id) {
-        // Delete from inventory table
-        result = await inventoryService.deleteInventoryItem(item.id);
+        result = await inventoryService.hideInventoryItem(item.id);
       } else if (item.source === 'manifest_data' && item.id) {
-        // Delete from manifest_data (if user has permission)
-        result = await productLookupService.deleteProduct(item.id);
+        result = await inventoryService.hideManifestFromInventoryList(item.id);
       } else {
-        toast.error('Cannot delete: Item source unknown or missing ID');
+        toast.error('Cannot remove: item source unknown or missing ID');
         return;
       }
 
-      if (result && (result.success || !result.error)) {
-        // Update the local state
-        setProducts(products.filter(i => i.id !== item.id));
-        // Remove from selected items if it was selected
-        const newSelected = new Set(selectedItems);
-        newSelected.delete(item.id);
-        setSelectedItems(newSelected);
-        
-        toast.success(`${item.Description} has been removed from inventory`);
-        // Refresh inventory to ensure consistency
-        fetchInventory();
+      if (result?.success === true) {
+        setProducts((prev) => prev.filter((i) => getInventoryRowKey(i) !== rowKey));
+        setSelectedItems((prev) => {
+          const next = new Set(prev);
+          next.delete(rowKey);
+          return next;
+        });
+
+        toast.success(`${item.Description} removed from list (data kept in database)`);
+        loadInventoryData();
       } else {
-        throw new Error(result?.error?.message || 'Delete failed');
+        throw new Error(result?.error?.message || result?.error || 'Remove failed');
       }
     } catch (error) {
-      console.error('Error deleting inventory item:', error);
-      toast.error(`Failed to delete inventory item: ${error.message || 'Unknown error'}`);
+      console.error('Error removing inventory row:', error);
+      toast.error(`Failed to remove from list: ${error.message || 'Unknown error'}`);
     } finally {
       setIsDeleting(false);
     }
   };
 
-  // Handle bulk delete
+  // Bulk remove from list only (no DELETE in Supabase for inventory or manifest_data)
   const handleBulkDelete = async () => {
     if (selectedItems.size === 0) {
-      toast.warning('Please select at least one item to delete');
+      toast.warning('Please select at least one item to remove');
       return;
     }
 
     const selectedArray = Array.from(selectedItems);
-    const selectedProducts = products.filter(p => selectedArray.includes(p.id));
+    const selectedProducts = products.filter((p) => selectedArray.includes(getInventoryRowKey(p)));
     const itemNames = selectedProducts.map(p => p.Description || 'Unknown').join(', ');
     
-    if (!window.confirm(`Are you sure you want to delete ${selectedItems.size} item(s)?\n\n${itemNames}`)) {
+    if (!window.confirm(
+      `Remove ${selectedItems.size} item(s) from your inventory list?\n\n${itemNames}\n\nNothing is deleted from the database; rows are only hidden from this view.`
+    )) {
       return;
     }
 
     setIsDeleting(true);
     try {
-      // Separate items by source
       const inventoryItems = selectedProducts.filter(p => p.source === 'inventory_table' && p.id);
       const manifestItems = selectedProducts.filter(p => p.source === 'manifest_data' && p.id);
 
-      let deletedCount = 0;
-      let errors = [];
+      let removedCount = 0;
+      const errors = [];
 
-      // Delete from inventory table
       if (inventoryItems.length > 0) {
         const inventoryIds = inventoryItems.map(i => i.id);
-        const result = await inventoryService.deleteInventoryItems(inventoryIds);
+        const result = await inventoryService.hideInventoryItems(inventoryIds);
         if (result.success) {
-          deletedCount += result.deletedCount || inventoryIds.length;
+          removedCount += result.hiddenCount ?? inventoryIds.length;
         } else {
-          errors.push(`Failed to delete ${inventoryItems.length} inventory item(s)`);
+          errors.push(`Failed to hide ${inventoryItems.length} inventory row(s)`);
         }
       }
 
-      // Delete from manifest_data (one by one since we don't have bulk delete there)
-      for (const item of manifestItems) {
-        try {
-          const result = await productLookupService.deleteProduct(item.id);
-          if (result) {
-            deletedCount++;
-          } else {
-            errors.push(`Failed to delete ${item.Description}`);
-          }
-        } catch (error) {
-          errors.push(`Failed to delete ${item.Description}: ${error.message}`);
+      if (manifestItems.length > 0) {
+        const manifestIds = manifestItems.map((i) => i.id);
+        const result = await inventoryService.hideManifestFromInventoryListBulk(manifestIds);
+        if (result.success) {
+          removedCount += manifestIds.length;
+        } else {
+          errors.push(`Failed to hide ${manifestItems.length} manifest row(s) from list`);
         }
       }
 
-      if (deletedCount > 0) {
-        toast.success(`Successfully deleted ${deletedCount} item(s)`);
+      if (removedCount > 0) {
+        toast.success(`Removed ${removedCount} item(s) from list (data kept in database)`);
         setSelectedItems(new Set());
-        fetchInventory();
+        loadInventoryData();
       }
 
       if (errors.length > 0) {
-        toast.error(`Some items could not be deleted: ${errors.join(', ')}`);
+        toast.error(errors.join(' '));
       }
     } catch (error) {
-      console.error('Error in bulk delete:', error);
-      toast.error(`Failed to delete items: ${error.message || 'Unknown error'}`);
+      console.error('Error in bulk remove:', error);
+      toast.error(`Failed to remove items: ${error.message || 'Unknown error'}`);
     } finally {
       setIsDeleting(false);
     }
   };
 
   // Handle item selection
-  const handleSelectItem = (itemId) => {
+  const handleSelectItem = (rowKey) => {
+    if (!rowKey) return;
     const newSelected = new Set(selectedItems);
-    if (newSelected.has(itemId)) {
-      newSelected.delete(itemId);
+    if (newSelected.has(rowKey)) {
+      newSelected.delete(rowKey);
     } else {
-      newSelected.add(itemId);
+      newSelected.add(rowKey);
     }
     setSelectedItems(newSelected);
   };
 
-  // Handle select all
+  // Handle select all (current page only)
   const handleSelectAll = () => {
-    if (selectedItems.size === products.length) {
+    const keysOnPage = products.map(getInventoryRowKey).filter(Boolean);
+    const allSelected = keysOnPage.length > 0 && keysOnPage.every((k) => selectedItems.has(k));
+    if (allSelected) {
       setSelectedItems(new Set());
     } else {
-      setSelectedItems(new Set(products.map(p => p.id).filter(id => id)));
+      setSelectedItems(new Set(keysOnPage));
     }
   };
+
+  const selectedOnPageCount = products.filter((p) => selectedItems.has(getInventoryRowKey(p))).length;
+  const allOnPageSelected = products.length > 0 && selectedOnPageCount === products.length;
+  const someOnPageSelected = selectedOnPageCount > 0 && selectedOnPageCount < products.length;
 
   // Get inventory status based on quantity vs min quantity
   const getInventoryStatus = (quantity, minQuantity) => {
@@ -919,7 +1046,11 @@ const Inventory = () => {
         <div className="flex items-center">
           <input
             type="checkbox"
-            checked={selectedItems.size > 0 && selectedItems.size === products.length}
+            aria-label="Select all on this page"
+            checked={allOnPageSelected}
+            ref={(el) => {
+              if (el) el.indeterminate = someOnPageSelected;
+            }}
             onChange={handleSelectAll}
             className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
             onClick={(e) => e.stopPropagation()}
@@ -929,13 +1060,14 @@ const Inventory = () => {
       accessor: 'select',
       cell: (props) => {
         const rowData = props.row.original;
-        const itemId = rowData.id;
-        if (!itemId) return null;
+        const rowKey = getInventoryRowKey(rowData);
+        if (!rowKey) return null;
         return (
           <input
             type="checkbox"
-            checked={selectedItems.has(itemId)}
-            onChange={() => handleSelectItem(itemId)}
+            aria-label={`Select ${rowData.Description || 'row'}`}
+            checked={selectedItems.has(rowKey)}
+            onChange={() => handleSelectItem(rowKey)}
             onClick={(e) => e.stopPropagation()}
             className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
           />
@@ -1096,7 +1228,7 @@ const Inventory = () => {
                   handleDeleteItem(rowData); 
                 }}
                 className="p-1 text-red-600 hover:text-red-800"
-                title="Delete Item"
+                title="Remove from list (keeps data in database)"
                 disabled={isDeleting}
             >
                 <TrashIcon className="h-5 w-5" />
@@ -1133,7 +1265,12 @@ const Inventory = () => {
           </p>
         </div>
         
-        <div className="flex flex-col sm:flex-row gap-3">
+        <div className="flex flex-col sm:flex-row gap-3 flex-wrap items-stretch sm:items-center">
+          {selectedItems.size > 0 && (
+            <span className="text-sm text-gray-600 dark:text-gray-400 self-center">
+              {selectedItems.size} selected
+            </span>
+          )}
           {selectedItems.size > 0 && (
             <Button 
               variant="danger"
@@ -1142,7 +1279,7 @@ const Inventory = () => {
               disabled={isDeleting}
             >
               <TrashIcon className="h-5 w-5 mr-2" />
-              Delete Selected ({selectedItems.size})
+              Remove selected ({selectedItems.size})
             </Button>
           )}
           <Button 
@@ -1151,8 +1288,18 @@ const Inventory = () => {
             onClick={handleExport}
           >
             <ArrowDownTrayIcon className="h-5 w-5 mr-2" />
-            Export
+            Export page (CSV)
           </Button>
+          {selectedItems.size > 0 && (
+            <Button 
+              variant="outline" 
+              className="flex items-center"
+              onClick={handleExportSelected}
+            >
+              <ArrowDownTrayIcon className="h-5 w-5 mr-2" />
+              Export selected (CSV)
+            </Button>
+          )}
           <Button 
             variant="outline" 
             className="flex items-center"
@@ -1211,13 +1358,34 @@ const Inventory = () => {
         )}
 
         {!loading && totalItems > 0 && (
-          <div className="p-4">
+          <div className="p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-t border-gray-200 dark:border-gray-700">
+            <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
+              <label htmlFor="inventory-items-per-page" className="font-medium text-gray-700 dark:text-gray-300">
+                Rows per page
+              </label>
+              <select
+                id="inventory-items-per-page"
+                value={itemsPerPage}
+                onChange={handleItemsPerPageChange}
+                className="border border-gray-300 dark:border-gray-600 rounded-md px-2 py-1.5 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm focus:ring-blue-500 focus:border-blue-500"
+              >
+                {INVENTORY_PAGE_SIZE_OPTIONS.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+              <span className="text-gray-500 dark:text-gray-500">
+                Showing {(currentPage - 1) * itemsPerPage + 1}–
+                {Math.min(currentPage * itemsPerPage, totalItems)} of {totalItems}
+              </span>
+            </div>
             <Pagination
               currentPage={currentPage}
-              totalPages={Math.ceil(totalItems / ITEMS_PER_PAGE)}
+              totalPages={Math.ceil(totalItems / itemsPerPage)}
               onPageChange={handlePageChange}
               totalItems={totalItems}
-              itemsPerPage={ITEMS_PER_PAGE}
+              itemsPerPage={itemsPerPage}
             />
           </div>
         )}
@@ -1238,7 +1406,7 @@ const Inventory = () => {
               onChange={(e) => setMarketplaceExportFormat(e.target.value)}
               className="w-full border border-gray-300 dark:border-gray-600 rounded-md px-3 py-2 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
             >
-              <option value="facebook">Facebook Commerce Manager</option>
+              <option value="facebook">Facebook Marketplace (template + image pack)</option>
               <option value="shopify">Shopify</option>
               <option value="whatnot">Whatnot</option>
               <option value="ebay">eBay (Product feed)</option>
@@ -1261,6 +1429,18 @@ const Inventory = () => {
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Scope</label>
             <div className="space-y-2">
+              {selectedItems.size > 0 && (
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="exportScope"
+                    checked={marketplaceExportScope === 'selected'}
+                    onChange={() => setMarketplaceExportScope('selected')}
+                    className="rounded border-gray-300"
+                  />
+                  <span className="text-gray-700 dark:text-gray-300">Selected rows ({selectedItems.size})</span>
+                </label>
+              )}
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="radio"
@@ -1269,7 +1449,9 @@ const Inventory = () => {
                   onChange={() => setMarketplaceExportScope('current')}
                   className="rounded border-gray-300"
                 />
-                <span className="text-gray-700 dark:text-gray-300">Current page ({products.length} items)</span>
+                <span className="text-gray-700 dark:text-gray-300">
+                  Current page ({products.length} of {itemsPerPage} rows shown)
+                </span>
               </label>
               <label className="flex items-center gap-2 cursor-pointer">
                 <input

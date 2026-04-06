@@ -69,6 +69,7 @@ const Scanner = () => {
   const [inventoryLocation, setInventoryLocation] = useState('');
   const [inventoryCondition, setInventoryCondition] = useState('New');
   const [isAddingToInventory, setIsAddingToInventory] = useState(false);
+  const [isBulkAddingBatchToInventory, setIsBulkAddingBatchToInventory] = useState(false);
   
   // State for scanner: live camera (BarcodeScanner) primary, photo (BarcodeReader) fallback
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -2646,13 +2647,93 @@ const Scanner = () => {
     setShowAddToInventoryModal(true);
   };
 
-  // Handle adding product to inventory
+  /**
+   * Core path used by single-item modal and batch queue "add all to inventory".
+   * @returns {{ ok: boolean, message?: string }}
+   */
+  const addProductInfoToInventory = async (pi, { quantity, location, condition }) => {
+    if (!pi) {
+      return { ok: false, message: 'No product information' };
+    }
+    const qty = parseInt(quantity, 10);
+    if (!qty || qty < 1) {
+      return { ok: false, message: 'Invalid quantity' };
+    }
+
+    let productId = null;
+    const existingProduct = await dbProductLookupService.getProductByFnsku(pi.fnsku || pi.sku);
+
+    if (existingProduct) {
+      productId = existingProduct.id;
+    } else {
+      try {
+        const allImages = pi.images || (pi.image_url ? [pi.image_url] : []);
+        const allVideos = pi.videos || [];
+        const mediaPayload = (allImages.length > 0 || allVideos.length > 0)
+          ? JSON.stringify({ images: allImages, videos: allVideos })
+          : (allImages.length > 0 ? JSON.stringify(allImages) : null);
+
+        const productData = {
+          name: pi.name || 'Unknown Product',
+          sku: pi.fnsku || pi.sku || pi.asin,
+          fnsku: pi.fnsku,
+          asin: pi.asin,
+          lpn: pi.lpn,
+          upc: pi.upc,
+          price: pi.price,
+          category: pi.category || 'Uncategorized',
+          description: pi.description || pi.name,
+          image_url: mediaPayload,
+          condition: condition || 'New',
+          source: 'Scanner',
+          created_at: new Date().toISOString(),
+        };
+
+        const savedProduct = await dbProductLookupService.saveProductToManifest(productData, { conflictKey: 'fnsku' });
+        productId = savedProduct?.id;
+      } catch (manifestError) {
+        console.warn('Could not save to manifest_data (may be RLS restricted):', manifestError);
+      }
+    }
+
+    const existingInventory = await inventoryService.getInventoryBySku(pi.fnsku || pi.sku || pi.asin);
+    const allImages = pi.images || (pi.image_url ? [pi.image_url] : []);
+    const allVideos = pi.videos || [];
+    const imageUrlForInventory = (allImages.length > 0 || allVideos.length > 0)
+      ? JSON.stringify({ images: allImages, videos: allVideos })
+      : (pi.image_url || '');
+
+    const inventoryItem = {
+      sku: pi.fnsku || pi.sku || pi.asin,
+      name: pi.name || 'Unknown Product',
+      quantity: qty,
+      location: location || 'Default',
+      condition: condition || 'New',
+      price: pi.price != null ? Number(pi.price) : 0,
+      cost: pi.price != null ? (Number(pi.price) * ((100 - (parseFloat(localStorage.getItem('labelDiscountPercent')) || 50)) / 100)) : 0,
+      image_url: imageUrlForInventory,
+    };
+
+    if (productId) {
+      inventoryItem.product_id = productId;
+    }
+
+    const result = await inventoryService.addOrUpdateInventory(inventoryItem);
+    if (result) {
+      return {
+        ok: true,
+        message: `${qty} ${qty === 1 ? 'item' : 'items'}${existingInventory ? ' (quantity updated)' : ''}`,
+      };
+    }
+    return { ok: false, message: inventoryService.lastInventoryError || 'Please try again.' };
+  };
+
+  // Handle adding product to inventory (modal)
   const handleAddToInventory = async () => {
     if (!productInfo) {
       toast.error("No product information available");
       return;
     }
-
     if (!inventoryQuantity || inventoryQuantity < 1) {
       toast.error("Please enter a valid quantity (at least 1)");
       return;
@@ -2660,92 +2741,64 @@ const Scanner = () => {
 
     setIsAddingToInventory(true);
     try {
-      // First, check if product exists in product lookup database
-      let productId = null;
-      const existingProduct = await dbProductLookupService.getProductByFnsku(productInfo.fnsku || productInfo.sku);
-      
-      if (existingProduct) {
-        productId = existingProduct.id;
-      } else {
-        // Try to create a new product lookup entry (optional - may fail due to RLS)
-        // If it fails, we'll still add to inventory without product_id
-        try {
-          // Collect all images and videos for manifest
-          const allImages = productInfo.images || (productInfo.image_url ? [productInfo.image_url] : []);
-          const allVideos = productInfo.videos || [];
-          const mediaPayload = (allImages.length > 0 || allVideos.length > 0)
-            ? JSON.stringify({ images: allImages, videos: allVideos })
-            : (allImages.length > 0 ? JSON.stringify(allImages) : null);
-          
-          const productData = {
-            name: productInfo.name || 'Unknown Product',
-            sku: productInfo.fnsku || productInfo.sku || productInfo.asin,
-            fnsku: productInfo.fnsku,
-            asin: productInfo.asin,
-            lpn: productInfo.lpn,
-            upc: productInfo.upc,
-            price: productInfo.price,
-            category: productInfo.category || 'Uncategorized',
-            description: productInfo.description || productInfo.name,
-            image_url: mediaPayload,
-            condition: inventoryCondition,
-            source: 'Scanner',
-            created_at: new Date().toISOString()
-          };
-          
-          const savedProduct = await dbProductLookupService.saveProductToManifest(productData, { conflictKey: 'fnsku' });
-          productId = savedProduct?.id;
-        } catch (manifestError) {
-          // If saving to manifest_data fails (e.g., RLS policy), continue without product_id
-          console.warn('Could not save to manifest_data (may be RLS restricted):', manifestError);
-          // Continue without productId - inventory item will still be saved
-        }
-      }
-
-      // Check if inventory item already exists
-      const existingInventory = await inventoryService.getInventoryBySku(productInfo.fnsku || productInfo.sku || productInfo.asin);
-      
-      // Build image_url: store all images and videos as JSON for exports/display
-      const allImages = productInfo.images || (productInfo.image_url ? [productInfo.image_url] : []);
-      const allVideos = productInfo.videos || [];
-      const imageUrlForInventory = (allImages.length > 0 || allVideos.length > 0)
-        ? JSON.stringify({ images: allImages, videos: allVideos })
-        : (productInfo.image_url || '');
-
-      // Only include fields that exist in the inventory table
-      const inventoryItem = {
-        sku: productInfo.fnsku || productInfo.sku || productInfo.asin,
-        name: productInfo.name || 'Unknown Product',
-        quantity: parseInt(inventoryQuantity, 10),
-        location: inventoryLocation || 'Default',
+      const { ok, message } = await addProductInfoToInventory(productInfo, {
+        quantity: inventoryQuantity,
+        location: inventoryLocation,
         condition: inventoryCondition,
-        price: productInfo.price != null ? Number(productInfo.price) : 0,
-        cost: productInfo.price != null ? (Number(productInfo.price) * ((100 - (parseFloat(localStorage.getItem('labelDiscountPercent')) || 50)) / 100)) : 0,
-        image_url: imageUrlForInventory
-      };
-      
-      // Only add product_id if it exists (may be null if manifest_data save failed)
-      if (productId) {
-        inventoryItem.product_id = productId;
-      }
-
-      const result = await inventoryService.addOrUpdateInventory(inventoryItem);
-      
-      if (result) {
-        toast.success(`✅ Added ${inventoryQuantity} ${inventoryQuantity === 1 ? 'item' : 'items'} to inventory${existingInventory ? ' (quantity updated)' : ''}!`);
+      });
+      if (ok) {
+        toast.success(`Added to inventory: ${message}`);
         setShowAddToInventoryModal(false);
         setInventoryQuantity(1);
         setInventoryLocation('');
         setInventoryCondition('New');
       } else {
-        const errMsg = inventoryService.lastInventoryError || 'Please try again.';
-        toast.error(`Failed to add to inventory. ${errMsg}`);
+        toast.error(`Failed to add to inventory. ${message || ''}`);
       }
     } catch (error) {
       console.error("Error adding to inventory:", error);
       toast.error(`Failed to add to inventory: ${error.message || 'Unknown error'}`);
     } finally {
       setIsAddingToInventory(false);
+    }
+  };
+
+  /** Add every ready item in batch queue to inventory (qty 1 each, Default / New). */
+  const handleAddBatchQueueToInventory = async () => {
+    const ready = batchQueue.filter(
+      (q) => q.product && !q.isProcessing && !q.hasFailed && (q.product.fnsku || q.product.sku || q.product.asin)
+    );
+    if (ready.length === 0) {
+      toast.warning('No completed products in the batch queue to add. Wait for lookups to finish or fix failed rows.');
+      return;
+    }
+    if (!window.confirm(`Add ${ready.length} product(s) to inventory with quantity 1 each (location: Default, condition: New)?`)) {
+      return;
+    }
+    setIsBulkAddingBatchToInventory(true);
+    let okCount = 0;
+    let failCount = 0;
+    try {
+      for (const q of ready) {
+        const { ok } = await addProductInfoToInventory(q.product, {
+          quantity: 1,
+          location: 'Default',
+          condition: 'New',
+        });
+        if (ok) okCount += 1;
+        else failCount += 1;
+      }
+      if (okCount > 0) {
+        toast.success(`Added ${okCount} product(s) to inventory.${failCount ? ` ${failCount} failed.` : ''}`);
+      }
+      if (failCount > 0 && okCount === 0) {
+        toast.error(`Could not add batch to inventory (${failCount} failed). Check login and SKU data.`);
+      }
+    } catch (e) {
+      console.error(e);
+      toast.error(e.message || 'Batch add to inventory failed');
+    } finally {
+      setIsBulkAddingBatchToInventory(false);
     }
   };
 
@@ -2855,11 +2908,20 @@ const Scanner = () => {
           )}
         </div>
         {batchMode && batchQueue.length > 0 && (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2 justify-end">
+            <button
+              type="button"
+              onClick={handleAddBatchQueueToInventory}
+              disabled={isBulkAddingBatchToInventory || isPrintingBatch}
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50"
+            >
+              <ShoppingBagIcon className="-ml-1 mr-2 h-5 w-5" />
+              {isBulkAddingBatchToInventory ? 'Adding…' : 'Add all to inventory'}
+            </button>
             <button
               type="button"
               onClick={handlePrintAllBatch}
-              disabled={isPrintingBatch}
+              disabled={isPrintingBatch || isBulkAddingBatchToInventory}
               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-50"
             >
               <PrinterIcon className="-ml-1 mr-2 h-5 w-5" />
@@ -2868,7 +2930,8 @@ const Scanner = () => {
             <button
               type="button"
               onClick={handleClearBatchQueue}
-              className="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 text-sm font-medium rounded-md shadow-sm text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+              disabled={isBulkAddingBatchToInventory}
+              className="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 text-sm font-medium rounded-md shadow-sm text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
             >
               Clear Queue
             </button>

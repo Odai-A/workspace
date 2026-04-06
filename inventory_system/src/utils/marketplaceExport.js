@@ -4,8 +4,114 @@
  */
 
 import * as XLSX from 'xlsx';
+import JSZip from 'jszip';
 
 const UTF8_BOM = '\uFEFF';
+
+/** Turn API image entries (string or { link, url, src }) into a fetchable URL string. */
+export function coalesceMediaUrl(entry) {
+  if (entry == null) return '';
+  if (typeof entry === 'string') return entry.trim();
+  if (typeof entry === 'object') {
+    const u = entry.link ?? entry.url ?? entry.src ?? entry.href;
+    if (typeof u === 'string') return u.trim();
+  }
+  return '';
+}
+
+/** Dedupe URLs that differ only by query string (e.g. Amazon resize params). */
+function mediaUrlDedupeKey(url) {
+  const s = coalesceMediaUrl(url);
+  if (!s) return '';
+  try {
+    const u = new URL(s);
+    return `${u.origin}${u.pathname}`.toLowerCase();
+  } catch {
+    return s.replace(/\?.*$/, '').toLowerCase();
+  }
+}
+
+/**
+ * Expand one stored field (plain URL, JSON array, or { images, videos }) into URL strings.
+ * @param {unknown} value
+ * @returns {string[]}
+ */
+export function expandMediaValueToUrls(value) {
+  if (value == null || value === '') return [];
+  if (Array.isArray(value)) {
+    return value.flatMap((v) => expandMediaValueToUrls(v)).map(coalesceMediaUrl).filter(Boolean);
+  }
+  if (typeof value === 'object') {
+    const imgs = Array.isArray(value.images) ? value.images : [];
+    const vids = Array.isArray(value.videos) ? value.videos : [];
+    return [...imgs, ...vids].map(coalesceMediaUrl).filter(Boolean);
+  }
+  if (typeof value !== 'string') {
+    const one = coalesceMediaUrl(value);
+    return one ? [one] : [];
+  }
+  const t = value.trim();
+  if (!t) return [];
+  if (t.startsWith('{')) {
+    try {
+      const obj = JSON.parse(t);
+      return expandMediaValueToUrls(obj);
+    } catch {
+      const one = coalesceMediaUrl(t);
+      return one ? [one] : [];
+    }
+  }
+  if (t.startsWith('[')) {
+    try {
+      const arr = JSON.parse(t);
+      return expandMediaValueToUrls(Array.isArray(arr) ? arr : [t]);
+    } catch {
+      const one = coalesceMediaUrl(t);
+      return one ? [one] : [];
+    }
+  }
+  const one = coalesceMediaUrl(t);
+  return one ? [one] : [];
+}
+
+/**
+ * Collect every image/video URL from an Inventory row (merged inventory + manifest + raw DB).
+ * Merges top-level fields with _rawData so Scanner multi-image JSON is not lost when manifest adds a single URL.
+ * @param {Object} item
+ * @returns {string[]}
+ */
+export function collectProductMediaUrls(item) {
+  if (!item || typeof item !== 'object') return [];
+  const chunks = [];
+  const add = (v) => {
+    if (v == null || v === '') return;
+    chunks.push(v);
+  };
+  add(item.image_url);
+  add(item['Image URL']);
+  if (Array.isArray(item.images)) {
+    for (const x of item.images) add(x);
+  }
+  const raw = item._rawData;
+  if (raw && typeof raw === 'object') {
+    add(raw.image_url);
+    if (Array.isArray(raw.images)) {
+      for (const x of raw.images) add(x);
+    }
+  }
+
+  const seen = new Set();
+  const out = [];
+  for (const chunk of chunks) {
+    for (const u of expandMediaValueToUrls(chunk)) {
+      const key = mediaUrlDedupeKey(u);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(u);
+    }
+  }
+  return out;
+}
 
 /**
  * Normalize a product row from Inventory page (inventory + manifest shape) to canonical fields.
@@ -13,7 +119,7 @@ const UTF8_BOM = '\uFEFF';
  * @returns {Object} Canonical row: id, title, description, sku, asin, fnsku, upc, price, quantity, category, condition, availability, image_url, brand, location, images
  */
 export function normalizeProductRow(item) {
-  const title = (item['Description'] ?? item.name ?? '').trim() || 'Untitled Product';
+  const title = (item.name ?? item.title ?? item['Description'] ?? '').trim() || 'Untitled Product';
   const description = (item.description ?? item['Description'] ?? item.name ?? title).trim();
   const fnsku = (item['Fn Sku'] ?? item.fnsku ?? item.sku ?? '').trim();
   const asin = (item['B00 Asin'] ?? item.asin ?? '').trim();
@@ -22,7 +128,6 @@ export function normalizeProductRow(item) {
   const priceNum = typeof item.MSRP === 'number' ? item.MSRP : (item.price != null ? parseFloat(item.price) : 0);
   const price = Number.isFinite(priceNum) ? priceNum : 0;
   const category = (item.Category ?? item.category ?? '').trim() || 'Uncategorized';
-  const imageUrl = (item.image_url ?? item['Image URL'] ?? '').trim();
   const rawCondition = (item._rawData?.condition ?? item.condition ?? '').toString().toLowerCase();
   const location = (item.Location ?? item.location ?? '').trim() || '';
 
@@ -36,30 +141,7 @@ export function normalizeProductRow(item) {
   // Unique id for catalogs (prefer sku/fnsku/asin)
   const id = (fnsku || asin || lpn || item.id || '').toString().trim() || `row-${Math.random().toString(36).slice(2, 11)}`;
 
-  // Image array: support single URL, JSON array [...], or JSON object { images: [...], videos: [...] }
-  let images = [];
-  if (imageUrl) {
-    const raw = typeof imageUrl === 'string' ? imageUrl.trim() : '';
-    if (raw.startsWith('{')) {
-      try {
-        const obj = JSON.parse(imageUrl);
-        const imgs = Array.isArray(obj.images) ? obj.images : [];
-        const videos = Array.isArray(obj.videos) ? obj.videos : [];
-        images = [...imgs, ...videos];
-      } catch {
-        images = [imageUrl];
-      }
-    } else if (raw.startsWith('[')) {
-      try {
-        const arr = JSON.parse(imageUrl);
-        images = Array.isArray(arr) ? arr : [imageUrl];
-      } catch {
-        images = [imageUrl];
-      }
-    } else {
-      images = [imageUrl];
-    }
-  }
+  const images = collectProductMediaUrls(item);
 
   return {
     id,
@@ -74,8 +156,8 @@ export function normalizeProductRow(item) {
     category,
     condition,
     availability,
-    image_url: images[0] || '',
-    images, // all image + video URLs in one array for exports
+    image_url: coalesceMediaUrl(images[0]) || '',
+    images: images.map(coalesceMediaUrl).filter(Boolean),
     brand: (item.brand ?? '').trim() || '',
     location,
   };
@@ -106,31 +188,228 @@ function csvRow(row, headerOrder) {
   return headerOrder.map((h) => escapeCsvCell(row[h] ?? '')).join(',');
 }
 
+function toFacebookTemplateCondition(condition) {
+  const c = (condition || '').toLowerCase();
+  if (c === 'refurbished') return 'Used - Like New';
+  if (c === 'used') return 'Used - Good';
+  return 'New';
+}
+
+function toFacebookMarketplaceCategory(category, title, description) {
+  const raw = (category || '').trim();
+  if (raw.includes('//')) return raw;
+
+  const haystack = `${raw} ${title || ''} ${description || ''}`.toLowerCase();
+  const rules = [
+    { match: /(shirt|t-shirt|hoodie|jacket|pants|jeans|dress|clothing|apparel)/, value: "Clothing, Shoes & Accessories//Men's Clothing//Shirts" },
+    { match: /(shoe|sneaker|boot|sandal)/, value: "Clothing, Shoes & Accessories//Shoes" },
+    { match: /(phone|iphone|android|samsung|mobile|cell)/, value: 'Electronics//Cell Phones & Smartphones' },
+    { match: /(laptop|notebook|macbook|chromebook)/, value: 'Electronics//Computers & Tablets//Laptops' },
+    { match: /(tv|television|monitor)/, value: 'Electronics//TVs & Video Equipment//TVs' },
+    { match: /(headphone|earbud|speaker|audio)/, value: 'Electronics//Audio' },
+    { match: /(desk|chair|sofa|table|furniture)/, value: 'Home & Garden//Furniture' },
+    { match: /(toy|lego|doll|game)/, value: 'Toys & Games' },
+    { match: /(book|novel|textbook)/, value: 'Books, Movies & Music//Books' },
+    { match: /(tool|drill|saw|hardware)/, value: 'Home Improvement Supplies//Tools' },
+    { match: /(watch|jewelry|ring|necklace)/, value: 'Jewelry & Accessories' },
+    { match: /(bike|bicycle|cycling)/, value: 'Sporting Goods//Bicycles' },
+  ];
+
+  for (const rule of rules) {
+    if (rule.match.test(haystack)) return rule.value;
+  }
+  return 'Miscellaneous';
+}
+
+function toFacebookMarketplaceTitle(title, description) {
+  const source = (title || '').trim() || (description || '').trim() || 'Untitled Product';
+  // Keep titles concise for Marketplace review and reduce auto-rejection risk.
+  return source.replace(/\s+/g, ' ').slice(0, 80);
+}
+
 /**
- * Facebook Commerce Manager CSV: id, title, description, availability, condition, price, image_link, additional_image_link.
- * image_link = primary image (required). additional_image_link = comma-separated list of up to 20 extra images/videos (max 2000 chars).
+ * Facebook Commerce Manager CSV feed with image URLs.
+ * This format supports image_link/additional_image_link so photos can import.
  */
-export function toFacebookCSV(canonicalRows) {
-  const headers = ['id', 'title', 'description', 'availability', 'condition', 'price', 'image_link', 'additional_image_link'];
+export function toFacebookCommerceCSV(canonicalRows) {
+  const headers = [
+    'id',
+    'title',
+    'description',
+    'availability',
+    'condition',
+    'price',
+    'image_link',
+    'additional_image_link',
+    'google_product_category',
+  ];
+  const rows = canonicalRows.map((r) => ({
+    id: r.id,
+    title: toFacebookMarketplaceTitle(r.title, r.description),
+    description: (r.description || r.title || '').slice(0, 5000),
+    availability: r.availability || 'in stock',
+    condition: toFacebookTemplateCondition(r.condition),
+    price: Number.isFinite(r.price) ? `${Number(r.price).toFixed(2)} USD` : '0.00 USD',
+    image_link: coalesceMediaUrl((r.images && r.images[0]) || r.image_url) || '',
+    additional_image_link: (r.images || []).slice(1, 21).map(coalesceMediaUrl).filter(Boolean).join(',').slice(0, 2000),
+    google_product_category: toFacebookMarketplaceCategory(r.category, r.title, r.description),
+  }));
   const headerLine = headers.join(',');
-  const priceFormat = (p) => (Number.isFinite(p) ? `${Number(p).toFixed(2)} USD` : '0.00 USD');
-  const rows = canonicalRows.map((r) => {
-    const allMedia = r.images || [];
-    const imageLink = allMedia[0] || '';
-    const additional = allMedia.slice(1, 21).join(','); // Facebook: up to 20 additional
-    return {
-      id: r.id,
-      title: r.title,
-      description: r.description || r.title,
-      availability: r.availability,
-      condition: r.condition,
-      price: priceFormat(r.price),
-      image_link: imageLink,
-      additional_image_link: additional.slice(0, 2000), // max 2000 chars
-    };
-  });
   const dataLines = rows.map((row) => csvRow(row, headers));
   return UTF8_BOM + [headerLine, ...dataLines].join('\r\n');
+}
+
+function toFacebookMarketplaceTemplateXLSX(canonicalRows) {
+  const guidance = [
+    'REQUIRED | Plain text (up to 150 characters',
+    'REQUIRED | A whole number in $',
+    'REQUIRED | Supported values: "New"; "Used - Like New"; "Used - Good"; "Used - Fair"',
+    'OPTIONAL | Plain text (up to 5000 characters)',
+    'OPTIONAL | Type of listing',
+    'OPTIONAL | ',
+  ];
+  const headers = ['TITLE', 'PRICE', 'CONDITION', 'DESCRIPTION', 'CATEGORY', 'OFFER SHIPPING'];
+  const rows = canonicalRows.map((r) => ([
+    toFacebookMarketplaceTitle(r.title, r.description).slice(0, 150),
+    Number.isFinite(r.price) ? Math.max(0, Math.round(Number(r.price))) : 0,
+    toFacebookTemplateCondition(r.condition),
+    (r.description || r.title || '').slice(0, 5000),
+    toFacebookMarketplaceCategory(r.category, r.title, r.description),
+    '',
+  ]));
+
+  const ws = XLSX.utils.aoa_to_sheet([
+    ['Facebook Marketplace Bulk Upload Template'],
+    ['You can create up to 50 listings at once. When you are finished, be sure to save or export this as an XLS/XLSX file.'],
+    guidance,
+    headers,
+    ...rows,
+  ]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Bulk Upload Template');
+  return wb;
+}
+
+function safeFileSegment(input) {
+  return (input || 'item')
+    .toString()
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60) || 'item';
+}
+
+function inferImageExtension(url, contentType) {
+  const byType = {
+    'image/jpeg': 'jpg',
+    'image/jpg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+    'image/gif': 'gif',
+  };
+  const ct = (contentType || '').toLowerCase().split(';')[0].trim();
+  if (byType[ct]) return byType[ct];
+  const urlStr = coalesceMediaUrl(url);
+  const m = urlStr.match(/\.([a-zA-Z0-9]{2,5})(?:[?#]|$)/);
+  return m ? m[1].toLowerCase() : 'jpg';
+}
+
+async function fetchImageAsBlob(url) {
+  const urlStr = coalesceMediaUrl(url);
+  if (!urlStr) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const res = await fetch(urlStr, { mode: 'cors', signal: controller.signal });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    return { blob, contentType: res.headers.get('content-type') || '' };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function exportFacebookMarketplacePackage(canonicalRows, date) {
+  const zip = new JSZip();
+  const wb = toFacebookMarketplaceTemplateXLSX(canonicalRows);
+  const xlsxBytes = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+  zip.file(`marketplace_template_${date}.xlsx`, xlsxBytes);
+
+  const imagesFolder = zip.folder('images');
+  const imageManifestHeaders = ['TITLE', 'SKU', 'IMAGE_FILE', 'SOURCE_URL', 'STATUS'];
+  const imageManifestRows = [];
+
+  for (const row of canonicalRows) {
+    const baseName = `${safeFileSegment(row.sku || row.id)}-${safeFileSegment(toFacebookMarketplaceTitle(row.title, row.description))}`;
+    const media = (
+      Array.isArray(row.images) && row.images.length > 0
+        ? row.images
+        : row.image_url
+          ? [row.image_url]
+          : []
+    )
+      .map(coalesceMediaUrl)
+      .filter(Boolean);
+
+    if (!media.length) {
+      imageManifestRows.push({
+        TITLE: toFacebookMarketplaceTitle(row.title, row.description),
+        SKU: row.sku || row.id,
+        IMAGE_FILE: '',
+        SOURCE_URL: '',
+        STATUS: 'missing_image_url',
+      });
+      continue;
+    }
+
+    for (let i = 0; i < media.length; i += 1) {
+      const url = coalesceMediaUrl(media[i]);
+      const fetched = url ? await fetchImageAsBlob(url) : null;
+      const fileIndex = i + 1;
+      if (!fetched) {
+        imageManifestRows.push({
+          TITLE: toFacebookMarketplaceTitle(row.title, row.description),
+          SKU: row.sku || row.id,
+          IMAGE_FILE: '',
+          SOURCE_URL: url,
+          STATUS: 'download_failed_or_blocked',
+        });
+        continue;
+      }
+      const ext = inferImageExtension(url, fetched.contentType);
+      const fileName = `${baseName}-${fileIndex}.${ext}`;
+      imagesFolder.file(fileName, fetched.blob);
+      imageManifestRows.push({
+        TITLE: toFacebookMarketplaceTitle(row.title, row.description),
+        SKU: row.sku || row.id,
+        IMAGE_FILE: `images/${fileName}`,
+        SOURCE_URL: url,
+        STATUS: 'downloaded',
+      });
+    }
+  }
+
+  const headerLine = imageManifestHeaders.join(',');
+  const dataLines = imageManifestRows.map((r) => csvRow(r, imageManifestHeaders));
+  zip.file('image_manifest.csv', UTF8_BOM + [headerLine, ...dataLines].join('\r\n'));
+  zip.file(
+    'README.txt',
+    [
+      'Facebook Marketplace upload package',
+      '',
+      '1) Upload marketplace_template_*.xlsx in Facebook Marketplace bulk upload.',
+      '2) Open images/ folder from this zip.',
+      '3) On Facebook listing review/edit step, drag images from images/ onto each matching listing.',
+      '4) Use image_manifest.csv to match SKU/TITLE to image files quickly.',
+      '',
+      'Note: some source URLs block browser download via CORS; those rows appear as download_failed_or_blocked in image_manifest.csv.',
+    ].join('\r\n')
+  );
+
+  const zipBlob = await zip.generateAsync({ type: 'blob' });
+  downloadBlob(zipBlob, `facebook_marketplace_upload_package_${date}.zip`);
 }
 
 /**
@@ -177,7 +456,7 @@ export function toShopifyCSV(canonicalRows) {
       allMedia.forEach((url, idx) => {
         rows.push({
           ...base,
-          image_src: url || '',
+          image_src: url,
           image_position: String(idx + 1),
         });
       });
@@ -196,7 +475,7 @@ export function toWhatnotCSV(canonicalRows) {
   const headers = ['title', 'description', 'price', 'condition', 'quantity', ...imageHeaders];
   const headerLine = headers.join(',');
   const rows = canonicalRows.map((r) => {
-    const allMedia = r.images || [];
+    const allMedia = (r.images || []).map(coalesceMediaUrl).filter(Boolean);
     const row = {
       title: r.title,
       description: r.description || r.title,
@@ -204,7 +483,8 @@ export function toWhatnotCSV(canonicalRows) {
       condition: r.condition,
       quantity: String(r.quantity),
     };
-    allMedia.slice(0, MAX_MEDIA_COLUMNS).forEach((url, i) => {
+    allMedia.slice(0, MAX_MEDIA_COLUMNS).forEach((raw, i) => {
+      const url = coalesceMediaUrl(raw);
       row[i === 0 ? 'image_url' : `image_${i + 1}`] = url || '';
     });
     imageHeaders.forEach((h) => { if (row[h] === undefined) row[h] = ''; });
@@ -361,14 +641,12 @@ export function downloadBlob(blob, filename) {
  * @param {'facebook'|'shopify'|'whatnot'|'ebay'|'universal'} format
  * @param {'csv'|'xlsx'} universalFormat - For 'universal', use 'csv' or 'xlsx'
  */
-export function exportMarketplace(products, format, universalFormat = 'xlsx') {
+export async function exportMarketplace(products, format, universalFormat = 'xlsx') {
   const rows = exportProductRows(products);
   const date = getDateSuffix();
 
   if (format === 'facebook') {
-    const csv = toFacebookCSV(rows);
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    downloadBlob(blob, `inventory_facebook_${date}.csv`);
+    await exportFacebookMarketplacePackage(rows, date);
     return;
   }
   if (format === 'shopify') {

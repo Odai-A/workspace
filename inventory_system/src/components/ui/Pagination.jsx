@@ -1,12 +1,13 @@
 import React from 'react';
 import { ChevronLeftIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 
-const Pagination = ({ 
-  currentPage = 1, 
-  totalPages = 1, 
+const Pagination = ({
+  currentPage = 1,
+  totalPages = 1,
   onPageChange,
   className = '',
-  ...props 
+  totalItems: _totalItems,
+  itemsPerPage: _itemsPerPage,
 }) => {
   // Generate array of page numbers to show
   const getPageNumbers = () => {
@@ -58,7 +59,7 @@ const Pagination = ({
   const pageNumbers = getPageNumbers();
 
   return (
-    <div className={`flex items-center justify-center mt-4 ${className}`} {...props}>
+    <div className={`flex items-center justify-center mt-4 ${className}`}>
       <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
         <button
           onClick={handlePrevious}

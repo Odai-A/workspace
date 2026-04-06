@@ -51,6 +51,20 @@ const getCurrentTenantId = async () => {
   }
 };
 
+/**
+ * Inventory rows use user_id unless you migrated `inventory.tenant_id` and set
+ * VITE_INVENTORY_USE_TENANT_ID=true. If the JWT has tenant_id but the column
+ * does not exist, filtering by tenant_id causes PostgREST "column does not exist".
+ */
+async function getInventoryTenantScope() {
+  const enabled = import.meta.env.VITE_INVENTORY_USE_TENANT_ID === 'true';
+  if (!enabled) {
+    return { useTenantColumn: false, tenantId: null };
+  }
+  const tenantId = await getCurrentTenantId();
+  return { useTenantColumn: !!tenantId, tenantId };
+}
+
 export const inventoryService = {
   lastInventoryError: null,
 
@@ -78,18 +92,13 @@ export const inventoryService = {
     } = options;
     
     const offset = (page - 1) * limit;
-    
-    // Get tenant_id for shared inventory access
-    const tenantId = await getCurrentTenantId();
-    
-    // Build query - RLS policies will handle tenant-based filtering
-    // We still filter by user_id for backward compatibility, but RLS will allow tenant access
+
+    // RLS restricts rows to the current user (and optionally tenant when policies support it).
     let query = supabase.from('inventory').select('*', { count: 'exact' });
-    
-    // RLS policies will automatically filter by tenant_id if available
-    // For backward compatibility, we still include user_id filter
-    // The RLS policy allows access if either user_id matches OR tenant_id matches
-    
+
+    // Omit rows the user removed from the list (soft-hide; row still exists in DB)
+    query = query.eq('hidden_from_inventory_list', false);
+
     // Add search functionality
     if (searchQuery && searchQuery.trim()) {
       const searchTerm = `%${searchQuery.trim()}%`;
@@ -173,9 +182,8 @@ export const inventoryService = {
       return null;
     }
     
-    // Get tenant_id for shared business account
-    const tenantId = await getCurrentTenantId();
-    
+    const { useTenantColumn, tenantId } = await getInventoryTenantScope();
+
     // Remove fields that don't exist in the inventory table; ensure numbers are valid
     const numPrice = (item.price != null && !Number.isNaN(Number(item.price))) ? Number(item.price) : 0;
     const numCost = (item.cost != null && !Number.isNaN(Number(item.cost))) ? Number(item.cost) : 0;
@@ -189,9 +197,10 @@ export const inventoryService = {
       price: numPrice,
       cost: numCost,
       image_url: item.image_url ?? null,
-      user_id: userId
+      user_id: userId,
+      hidden_from_inventory_list: false,
     };
-    if (tenantId != null) cleanItem.tenant_id = tenantId;
+    if (useTenantColumn && tenantId != null) cleanItem.tenant_id = tenantId;
     
     // Only add product_id if it exists and is valid
     // We'll verify it exists in manifest_data before including it
@@ -234,10 +243,10 @@ export const inventoryService = {
         .select('*')
         .eq('sku', skuValue);
       
-      if (tenantId) {
-        query = query.eq('tenant_id', tenantId); // Check within tenant
+      if (useTenantColumn && tenantId) {
+        query = query.eq('tenant_id', tenantId);
       } else {
-        query = query.eq('user_id', userId); // Fallback to user_id
+        query = query.eq('user_id', userId);
       }
       
       const { data: existingData, error: searchError } = await query
@@ -257,6 +266,8 @@ export const inventoryService = {
           // If both have quantity, add them together
           updateData.quantity = (existingData.quantity || 0) + (cleanItem.quantity || 0);
         }
+        // Show again in inventory list if it was previously soft-removed
+        updateData.hidden_from_inventory_list = false;
         
         // Update query - use tenant_id if available, otherwise user_id
         let updateQuery = supabase
@@ -264,7 +275,7 @@ export const inventoryService = {
           .update(updateData)
           .eq('sku', skuValue);
         
-        if (tenantId) {
+        if (useTenantColumn && tenantId) {
           updateQuery = updateQuery.eq('tenant_id', tenantId);
         } else {
           updateQuery = updateQuery.eq('user_id', userId);
@@ -310,88 +321,172 @@ export const inventoryService = {
   },
 
   /**
-   * Delete an inventory item by ID
-   * When user has a tenant: deletes if item belongs to that tenant (any employee can delete).
-   * When user has no tenant: deletes only if item belongs to current user (legacy).
+   * Soft-remove an inventory row from the UI (does not DELETE the row in Supabase).
    */
-  async deleteInventoryItem(id) {
+  async hideInventoryItem(id) {
     if (!supabaseUrl || !supabaseAnonKey) {
       console.error("Supabase client not initialized.");
-      return null;
+      return { success: false, error: 'Not initialized' };
     }
-    
+
     const userId = await getCurrentUserId();
     if (!userId) {
-      console.error('deleteInventoryItem: User must be logged in');
       return { success: false, error: 'User must be logged in' };
     }
-    
-    const tenantId = await getCurrentTenantId();
-    
+
+    const { useTenantColumn, tenantId } = await getInventoryTenantScope();
+
     try {
-      let query = supabase.from('inventory').delete().eq('id', id);
-      if (tenantId) {
+      let query = supabase
+        .from('inventory')
+        .update({ hidden_from_inventory_list: true })
+        .eq('id', id);
+      if (useTenantColumn && tenantId) {
         query = query.eq('tenant_id', tenantId);
       } else {
         query = query.eq('user_id', userId);
       }
       const { error } = await query;
-      
+
       if (error) {
-        console.error('Error deleting inventory item:', error);
+        console.error('Error hiding inventory item:', error);
         return { success: false, error };
       }
-      
+
       return { success: true };
     } catch (error) {
-      console.error('Exception in deleteInventoryItem:', error);
+      console.error('Exception in hideInventoryItem:', error);
       return { success: false, error };
     }
   },
 
   /**
-   * Delete multiple inventory items by IDs
-   * When user has a tenant: deletes if items belong to that tenant (any employee can delete).
-   * When user has no tenant: deletes only items belonging to current user (legacy).
+   * Soft-remove multiple inventory rows (does not DELETE rows in Supabase).
    */
-  async deleteInventoryItems(ids) {
+  async hideInventoryItems(ids) {
     if (!supabaseUrl || !supabaseAnonKey) {
-      console.error("Supabase client not initialized.");
-      return { success: false, error: "Supabase not initialized" };
+      return { success: false, error: 'Supabase not initialized' };
     }
-    
+
     if (!ids || ids.length === 0) {
-      return { success: false, error: "No IDs provided" };
+      return { success: false, error: 'No IDs provided' };
     }
-    
+
     const userId = await getCurrentUserId();
     if (!userId) {
-      console.error('deleteInventoryItems: User must be logged in');
       return { success: false, error: 'User must be logged in' };
     }
-    
-    const tenantId = await getCurrentTenantId();
-    
+
+    const { useTenantColumn, tenantId } = await getInventoryTenantScope();
+
     try {
-      let query = supabase.from('inventory').delete().in('id', ids);
-      if (tenantId) {
+      let query = supabase
+        .from('inventory')
+        .update({ hidden_from_inventory_list: true })
+        .in('id', ids);
+      if (useTenantColumn && tenantId) {
         query = query.eq('tenant_id', tenantId);
       } else {
         query = query.eq('user_id', userId);
       }
       const { error } = await query;
-      
+
       if (error) {
-        console.error('Error deleting inventory items:', error);
+        console.error('Error hiding inventory items:', error);
         return { success: false, error };
       }
-      
-      return { success: true, deletedCount: ids.length };
+
+      return { success: true, hiddenCount: ids.length };
     } catch (error) {
-      console.error('Exception in deleteInventoryItems:', error);
+      console.error('Exception in hideInventoryItems:', error);
       return { success: false, error };
     }
-  }
+  },
+
+  /** @deprecated Use hideInventoryItem — kept for callers; does not DELETE from DB. */
+  async deleteInventoryItem(id) {
+    return this.hideInventoryItem(id);
+  },
+
+  /** @deprecated Use hideInventoryItems — kept for callers; does not DELETE from DB. */
+  async deleteInventoryItems(ids) {
+    const r = await this.hideInventoryItems(ids);
+    if (r.success) return { success: true, deletedCount: r.hiddenCount };
+    return r;
+  },
+
+  /**
+   * Manifest IDs the user hid from the combined inventory list (manifest_data rows are untouched).
+   */
+  async getHiddenManifestIds() {
+    if (!supabaseUrl || !supabaseAnonKey) return [];
+
+    const userId = await getCurrentUserId();
+    if (!userId) return [];
+
+    const { data, error } = await supabase
+      .from('inventory_hidden_manifest')
+      .select('manifest_id')
+      .eq('user_id', userId);
+
+    if (error) {
+      console.error('Error fetching hidden manifest ids:', error);
+      return [];
+    }
+    return (data || []).map((row) => String(row.manifest_id));
+  },
+
+  /**
+   * Hide a manifest_data row from the inventory UI only (does not DELETE manifest_data).
+   */
+  async hideManifestFromInventoryList(manifestId) {
+    if (!supabaseUrl || !supabaseAnonKey) {
+      return { success: false, error: 'Not initialized' };
+    }
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { success: false, error: 'User must be logged in' };
+    }
+    if (manifestId == null || manifestId === '') {
+      return { success: false, error: 'manifest_id required' };
+    }
+
+    const { error } = await supabase.from('inventory_hidden_manifest').upsert(
+      { user_id: userId, manifest_id: String(manifestId) },
+      { onConflict: 'user_id,manifest_id' }
+    );
+
+    if (error) {
+      console.error('Error hiding manifest from inventory list:', error);
+      return { success: false, error };
+    }
+    return { success: true };
+  },
+
+  /**
+   * Bulk hide manifest rows from inventory UI only.
+   */
+  async hideManifestFromInventoryListBulk(manifestIds) {
+    if (!manifestIds || manifestIds.length === 0) {
+      return { success: true, hiddenCount: 0 };
+    }
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { success: false, error: 'User must be logged in' };
+    }
+    const rows = [...new Set(manifestIds.map((id) => String(id)))].map((manifest_id) => ({
+      user_id: userId,
+      manifest_id,
+    }));
+    const { error } = await supabase
+      .from('inventory_hidden_manifest')
+      .upsert(rows, { onConflict: 'user_id,manifest_id' });
+    if (error) {
+      console.error('Error bulk-hiding manifest rows:', error);
+      return { success: false, error };
+    }
+    return { success: true, hiddenCount: rows.length };
+  },
 };
 
 // Function to check Supabase connection (used by DatabaseCheck.jsx)
