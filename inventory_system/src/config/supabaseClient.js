@@ -65,6 +65,22 @@ async function getInventoryTenantScope() {
   return { useTenantColumn: !!tenantId, tenantId };
 }
 
+/** Readable message from Supabase / PostgREST errors (avoid [object Object] in UI). */
+export function formatSupabaseError(error) {
+  if (error == null) return 'Unknown error';
+  if (typeof error === 'string') return error;
+  const msg = error.message || error.details || error.hint || error.description;
+  if (msg) {
+    const code = error.code ? ` (${error.code})` : '';
+    return `${msg}${code}`;
+  }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
 export const inventoryService = {
   lastInventoryError: null,
 
@@ -334,29 +350,77 @@ export const inventoryService = {
       return { success: false, error: 'User must be logged in' };
     }
 
-    const { useTenantColumn, tenantId } = await getInventoryTenantScope();
+    let rowId = id != null ? String(id).trim() : '';
+    if (!rowId) {
+      return { success: false, error: 'Invalid inventory id' };
+    }
+    // UUID strings should match Postgres uuid type (case-insensitive; normalize for .eq)
+    if (rowId.length === 36 && rowId.includes('-')) {
+      rowId = rowId.toLowerCase();
+    }
+
+    const normalizeRows = (d) => {
+      if (d == null) return [];
+      return Array.isArray(d) ? d : [d];
+    };
 
     try {
-      let query = supabase
+      // Do not filter by user_id here: RLS already restricts UPDATE to auth.uid() = user_id.
+      // Extra .eq('user_id', userId) can fail if the row's user_id ever differs from getUser().id formatting,
+      // and some PostgREST setups return an empty body on UPDATE+RETURNING even when the row updated.
+      let { data, error } = await supabase
         .from('inventory')
         .update({ hidden_from_inventory_list: true })
-        .eq('id', id);
-      if (useTenantColumn && tenantId) {
-        query = query.eq('tenant_id', tenantId);
-      } else {
-        query = query.eq('user_id', userId);
-      }
-      const { error } = await query;
+        .eq('id', rowId)
+        .select('id');
 
       if (error) {
         console.error('Error hiding inventory item:', error);
-        return { success: false, error };
+        return { success: false, error: formatSupabaseError(error) };
       }
 
-      return { success: true };
+      if (normalizeRows(data).length > 0) {
+        return { success: true };
+      }
+
+      // Retry with explicit user_id (helps if RLS is misconfigured and row matched only via legacy paths)
+      ({ data, error } = await supabase
+        .from('inventory')
+        .update({ hidden_from_inventory_list: true })
+        .eq('id', rowId)
+        .eq('user_id', userId)
+        .select('id'));
+
+      if (error) {
+        console.error('Error hiding inventory item (retry):', error);
+        return { success: false, error: formatSupabaseError(error) };
+      }
+      if (normalizeRows(data).length > 0) {
+        return { success: true };
+      }
+
+      // Confirm whether the row is already hidden or the update actually applied
+      const { data: row, error: readErr } = await supabase
+        .from('inventory')
+        .select('id, hidden_from_inventory_list')
+        .eq('id', rowId)
+        .maybeSingle();
+
+      if (readErr) {
+        return { success: false, error: formatSupabaseError(readErr) };
+      }
+      if (row?.hidden_from_inventory_list === true) {
+        return { success: true };
+      }
+
+      return {
+        success: false,
+        error:
+          'Could not update this inventory row. It may belong to another account, or the database is missing column hidden_from_inventory_list — run migration 022_inventory_soft_remove.sql.',
+      };
     } catch (error) {
       console.error('Exception in hideInventoryItem:', error);
-      return { success: false, error };
+      return { success: false, error: formatSupabaseError(error) };
     }
   },
 
@@ -377,29 +441,53 @@ export const inventoryService = {
       return { success: false, error: 'User must be logged in' };
     }
 
-    const { useTenantColumn, tenantId } = await getInventoryTenantScope();
+    const idList = [...new Set(ids.map((x) => (x != null ? String(x).trim() : '')).filter(Boolean))];
+    if (idList.length === 0) {
+      return { success: false, error: 'No valid IDs provided' };
+    }
+
+    const normalizeUuid = (s) => {
+      const t = String(s).trim();
+      if (t.length === 36 && t.includes('-')) return t.toLowerCase();
+      return t;
+    };
+    const normalizedIds = idList.map(normalizeUuid);
 
     try {
-      let query = supabase
-        .from('inventory')
-        .update({ hidden_from_inventory_list: true })
-        .in('id', ids);
-      if (useTenantColumn && tenantId) {
-        query = query.eq('tenant_id', tenantId);
-      } else {
-        query = query.eq('user_id', userId);
-      }
-      const { error } = await query;
+      const BATCH = 200;
+      let hiddenCount = 0;
+      for (let i = 0; i < normalizedIds.length; i += BATCH) {
+        const chunk = normalizedIds.slice(i, i + BATCH);
+        let { data, error } = await supabase
+          .from('inventory')
+          .update({ hidden_from_inventory_list: true })
+          .in('id', chunk)
+          .select('id');
 
-      if (error) {
-        console.error('Error hiding inventory items:', error);
-        return { success: false, error };
+        if (error) {
+          console.error('Error hiding inventory items:', error);
+          return { success: false, error: formatSupabaseError(error) };
+        }
+        let n = Array.isArray(data) ? data.length : data ? 1 : 0;
+        if (n === 0) {
+          ({ data, error } = await supabase
+            .from('inventory')
+            .update({ hidden_from_inventory_list: true })
+            .in('id', chunk)
+            .eq('user_id', userId)
+            .select('id'));
+          if (error) {
+            console.error('Error hiding inventory items (retry):', error);
+            return { success: false, error: formatSupabaseError(error) };
+          }
+          n = Array.isArray(data) ? data.length : data ? 1 : 0;
+        }
+        hiddenCount += n;
       }
-
-      return { success: true, hiddenCount: ids.length };
+      return { success: true, hiddenCount };
     } catch (error) {
       console.error('Exception in hideInventoryItems:', error);
-      return { success: false, error };
+      return { success: false, error: formatSupabaseError(error) };
     }
   },
 
@@ -458,7 +546,7 @@ export const inventoryService = {
 
     if (error) {
       console.error('Error hiding manifest from inventory list:', error);
-      return { success: false, error };
+      return { success: false, error: formatSupabaseError(error) };
     }
     return { success: true };
   },
@@ -478,12 +566,16 @@ export const inventoryService = {
       user_id: userId,
       manifest_id,
     }));
-    const { error } = await supabase
-      .from('inventory_hidden_manifest')
-      .upsert(rows, { onConflict: 'user_id,manifest_id' });
-    if (error) {
-      console.error('Error bulk-hiding manifest rows:', error);
-      return { success: false, error };
+    const BATCH = 500;
+    for (let i = 0; i < rows.length; i += BATCH) {
+      const chunk = rows.slice(i, i + BATCH);
+      const { error } = await supabase
+        .from('inventory_hidden_manifest')
+        .upsert(chunk, { onConflict: 'user_id,manifest_id' });
+      if (error) {
+        console.error('Error bulk-hiding manifest rows:', error);
+        return { success: false, error: formatSupabaseError(error) };
+      }
     }
     return { success: true, hiddenCount: rows.length };
   },

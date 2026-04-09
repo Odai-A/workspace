@@ -3221,6 +3221,9 @@ def scan_product():
                 "message": "User is required to scan products"
             }), 401
 
+        # When true, skip fast paths that return manifest/products rows without images and fetch Amazon/Rainforest data when possible
+        force_api_lookup = bool(data.get('force_api_lookup') or data.get('forceApiLookup'))
+
         # Get API keys from environment (needed for ASIN, UPC, and FNSKU handling)
         FNSKU_API_KEY = os.environ.get('FNSKU_API_KEY')
         RAINFOREST_API_KEY = os.environ.get('RAINFOREST_API_KEY')
@@ -3305,8 +3308,8 @@ def scan_product():
                 supabase_client=supabase_admin
             )
             
-            # If found in any table, return it
-            if product_data or manifest_item_data:
+            # If found in any table, return it (unless client asked to enrich from Amazon API — manifest/products responses omit images)
+            if (product_data or manifest_item_data) and not force_api_lookup:
                 # Format response based on source
                 if source == 'manifest_data' and manifest_item_data:
                     # Return manifest_data row with product data
@@ -3373,8 +3376,8 @@ def scan_product():
                         
                         logger.info(f"📊 ASIN cache completeness: is_placeholder={is_placeholder}, has_price={has_price}, has_image={has_image}, complete={has_complete_data}")
                         
-                        # If cache is fresh and complete, return it
-                        if age_days < 30 and has_complete_data:
+                        # If cache is fresh and complete, return it (unless client requests a fresh Amazon fetch)
+                        if age_days < 30 and has_complete_data and not force_api_lookup:
                             # Extract images
                             all_images = []
                             try:
@@ -4212,7 +4215,8 @@ def scan_product():
                         logger.info(f"📊 Cache completeness check for {code}: ASIN={cached_asin}, has_rainforest={has_rainforest_data}, is_placeholder={is_placeholder}, has_price={has_price}, has_image={has_image}, complete={has_complete_data}")
                         
                         # If we have ASIN but incomplete data, fetch from Rainforest API to enrich
-                        if cached_asin and len(cached_asin) >= 10 and RAINFOREST_API_KEY and not has_complete_data:
+                        # force_api_lookup: refresh from Amazon even when cache looked complete (e.g. user wants images)
+                        if cached_asin and len(cached_asin) >= 10 and RAINFOREST_API_KEY and (not has_complete_data or force_api_lookup):
                             logger.info(f"📦 Cache has ASIN {cached_asin} but incomplete data - fetching from Rainforest API to enrich...")
                             try:
                                 rainforest_response = requests.get(
@@ -4259,6 +4263,36 @@ def scan_product():
                                             videos_count = product.get('videos_count', len(videos))
                                         
                                         logger.info(f"✅ Enriched cached data with Rainforest API: title={enriched_title[:50]}, price={enriched_price}, brand={enriched_brand}")
+                                        
+                                        # Persist to api_lookup_cache so the next scan loads images/details without another Rainforest call
+                                        if supabase_admin and cached.get('id'):
+                                            try:
+                                                now_persist = datetime.now(timezone.utc).isoformat()
+                                                try:
+                                                    price_val = float(enriched_price) if enriched_price is not None and str(enriched_price).strip() != '' else None
+                                                except (ValueError, TypeError):
+                                                    price_val = cached.get('price')
+                                                cache_upd = {
+                                                    'product_name': (enriched_title[:500] if enriched_title else None) or cached.get('product_name'),
+                                                    'price': price_val if price_val is not None else cached.get('price'),
+                                                    'image_url': json.dumps(all_images) if all_images else cached.get('image_url'),
+                                                    'rainforest_raw_data': json.dumps(response_json),
+                                                    'last_accessed': now_persist,
+                                                    'updated_at': now_persist,
+                                                    'source': 'rainforest_api',
+                                                }
+                                                if enriched_brand:
+                                                    cache_upd['brand'] = enriched_brand[:200] if isinstance(enriched_brand, str) else str(enriched_brand)[:200]
+                                                if enriched_category:
+                                                    cat_s = enriched_category if isinstance(enriched_category, str) else str(enriched_category)
+                                                    cache_upd['category'] = cat_s[:200]
+                                                if enriched_description:
+                                                    desc_s = enriched_description if isinstance(enriched_description, str) else str(enriched_description)
+                                                    cache_upd['description'] = desc_s[:2000]
+                                                supabase_admin.table('api_lookup_cache').update(cache_upd).eq('id', cached['id']).execute()
+                                                logger.info(f"✅ Persisted Rainforest enrich to api_lookup_cache id={cached['id']} (fnsku={code})")
+                                            except Exception as persist_e:
+                                                logger.warning(f"⚠️ Could not persist enrich to api_lookup_cache: {persist_e}")
                                         
                                         # Build enriched response
                                         response_data = {

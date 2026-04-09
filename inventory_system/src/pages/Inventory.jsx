@@ -21,7 +21,7 @@ import Modal from '../components/ui/Modal';
 import { useAuth } from '../contexts/AuthContext';
 import { toast } from 'react-toastify';
 import { productLookupService, apiCacheService } from '../services/databaseService';
-import { inventoryService, supabase } from '../config/supabaseClient';
+import { inventoryService, supabase, formatSupabaseError } from '../config/supabaseClient';
 import { exportMarketplace } from '../utils/marketplaceExport';
 import axios from 'axios';
 
@@ -46,6 +46,17 @@ function getInventoryRowKey(item) {
   if (!item || item.id == null) return '';
   const src = item.source === 'manifest_data' ? 'm' : 'i';
   return `${src}:${item.id}`;
+}
+
+function getInventoryDisplayName(item) {
+  if (!item) return 'Item';
+  return item.Description || item['Description'] || item.name || 'Item';
+}
+
+function normalizeRemoveError(err) {
+  if (err == null) return 'Remove failed';
+  if (typeof err === 'string') return err;
+  return formatSupabaseError(err);
 }
 
 /**
@@ -873,8 +884,9 @@ const Inventory = () => {
       toast.error('Cannot remove: missing row id');
       return;
     }
+    const label = getInventoryDisplayName(item);
     if (!window.confirm(
-      `Remove "${item.Description}" from your inventory list?\n\nYour data stays in the database; this only hides the row from this view.`
+      `Remove "${label}" from your inventory list?\n\nYour product catalog and scan cache are not deleted — this only hides the row here. Scanning the item again can show full details.`
     )) {
       return;
     }
@@ -882,9 +894,9 @@ const Inventory = () => {
     setIsDeleting(true);
     try {
       let result;
-      if (item.source === 'inventory_table' && item.id) {
+      if (item.source === 'inventory_table' && item.id != null) {
         result = await inventoryService.hideInventoryItem(item.id);
-      } else if (item.source === 'manifest_data' && item.id) {
+      } else if (item.source === 'manifest_data' && item.id != null) {
         result = await inventoryService.hideManifestFromInventoryList(item.id);
       } else {
         toast.error('Cannot remove: item source unknown or missing ID');
@@ -899,10 +911,10 @@ const Inventory = () => {
           return next;
         });
 
-        toast.success(`${item.Description} removed from list (data kept in database)`);
+        toast.success(`"${label}" removed from list (catalog and scan data kept)`);
         loadInventoryData();
       } else {
-        throw new Error(result?.error?.message || result?.error || 'Remove failed');
+        throw new Error(normalizeRemoveError(result?.error));
       }
     } catch (error) {
       console.error('Error removing inventory row:', error);
@@ -941,9 +953,9 @@ const Inventory = () => {
         const inventoryIds = inventoryItems.map(i => i.id);
         const result = await inventoryService.hideInventoryItems(inventoryIds);
         if (result.success) {
-          removedCount += result.hiddenCount ?? inventoryIds.length;
+          removedCount += result.hiddenCount ?? 0;
         } else {
-          errors.push(`Failed to hide ${inventoryItems.length} inventory row(s)`);
+          errors.push(normalizeRemoveError(result.error) || `Failed to hide ${inventoryItems.length} inventory row(s)`);
         }
       }
 
@@ -951,9 +963,9 @@ const Inventory = () => {
         const manifestIds = manifestItems.map((i) => i.id);
         const result = await inventoryService.hideManifestFromInventoryListBulk(manifestIds);
         if (result.success) {
-          removedCount += manifestIds.length;
+          removedCount += result.hiddenCount ?? 0;
         } else {
-          errors.push(`Failed to hide ${manifestItems.length} manifest row(s) from list`);
+          errors.push(normalizeRemoveError(result.error) || `Failed to hide ${manifestItems.length} manifest row(s) from list`);
         }
       }
 
@@ -969,6 +981,85 @@ const Inventory = () => {
     } catch (error) {
       console.error('Error in bulk remove:', error);
       toast.error(`Failed to remove items: ${error.message || 'Unknown error'}`);
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  /** Soft-hide every row in the current merged list (respects search). Does not DELETE catalog or api_lookup_cache. */
+  const handleDeleteAllFromInventoryList = async () => {
+    const list = fullCombinedList;
+    if (list.length === 0) {
+      toast.info('Nothing to remove.');
+      return;
+    }
+
+    const inventoryRows = list.filter((p) => p.source === 'inventory_table' && p.id != null);
+    const manifestRows = list.filter((p) => p.source === 'manifest_data' && p.id != null);
+    const n = list.length;
+
+    const firstConfirm =
+      `Remove ALL ${n} item(s) from your inventory list?\n\n` +
+      `This uses the items currently loaded (including your search filter). Up to ${INVENTORY_FETCH_LIMIT.toLocaleString()} rows are loaded per source.\n\n` +
+      `• manifest_data and api_lookup_cache are NOT deleted — products and scan history stay in the database.\n` +
+      `• Only this inventory view is cleared (rows are hidden, not erased).\n` +
+      `• Scanning or adding stock again can bring items back with full details.\n\n` +
+      `Press OK for the next confirmation step.`;
+
+    if (!window.confirm(firstConfirm)) {
+      return;
+    }
+
+    if (!window.confirm(`Final confirmation: remove ${n} item(s) from the list only?`)) {
+      return;
+    }
+
+    setIsDeleting(true);
+    try {
+      let removedCount = 0;
+      const errors = [];
+
+      if (inventoryRows.length > 0) {
+        const ids = inventoryRows.map((i) => i.id);
+        const result = await inventoryService.hideInventoryItems(ids);
+        if (result.success) {
+          removedCount += result.hiddenCount ?? 0;
+          if (result.hiddenCount != null && result.hiddenCount < ids.length) {
+            toast.warning(
+              `${ids.length - result.hiddenCount} inventory row(s) could not be updated (wrong user or missing column hidden_from_inventory_list).`,
+              { autoClose: 8000 }
+            );
+          }
+        } else {
+          errors.push(normalizeRemoveError(result.error) || 'Inventory bulk hide failed');
+        }
+      }
+
+      if (manifestRows.length > 0) {
+        const manifestIds = manifestRows.map((i) => i.id);
+        const result = await inventoryService.hideManifestFromInventoryListBulk(manifestIds);
+        if (result.success) {
+          removedCount += result.hiddenCount ?? 0;
+        } else {
+          errors.push(normalizeRemoveError(result.error) || 'Manifest bulk hide failed');
+        }
+      }
+
+      if (removedCount > 0) {
+        toast.success(`Removed ${removedCount} item(s) from the list. Catalog and scan data were not deleted.`);
+        setSelectedItems(new Set());
+        setCurrentPage(1);
+        loadInventoryData();
+      }
+
+      if (errors.length > 0) {
+        toast.error(errors.join(' '), { autoClose: 8000 });
+      } else if (removedCount === 0 && n > 0) {
+        toast.error('No rows were updated. Check the database migration for hidden_from_inventory_list and inventory_hidden_manifest.');
+      }
+    } catch (error) {
+      console.error('Error removing all from inventory list:', error);
+      toast.error(`Failed: ${error.message || 'Unknown error'}`);
     } finally {
       setIsDeleting(false);
     }
@@ -1282,6 +1373,18 @@ const Inventory = () => {
               Remove selected ({selectedItems.size})
             </Button>
           )}
+          {fullCombinedList.length > 0 && (
+            <Button
+              variant="danger"
+              className="flex items-center"
+              onClick={handleDeleteAllFromInventoryList}
+              disabled={isDeleting}
+              title="Hides every row in the current list from this page only. Does not delete products or scan cache."
+            >
+              <TrashIcon className="h-5 w-5 mr-2" />
+              Remove all from list ({fullCombinedList.length})
+            </Button>
+          )}
           <Button 
             variant="outline" 
             className="flex items-center"
@@ -1344,8 +1447,6 @@ const Inventory = () => {
             </div>
         ) : (
             <>
-              {console.log("RENDERING TABLE: products state:", products)} 
-              {console.log("RENDERING TABLE: columns state:", columns)} 
               <Table 
                   data={products}
                   columns={columns}

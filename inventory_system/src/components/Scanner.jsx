@@ -77,6 +77,9 @@ const Scanner = () => {
   
   // Add states for manual database check and processing status
   const [isCheckingDatabase, setIsCheckingDatabase] = useState(false);
+  const [apiEnrichLoading, setApiEnrichLoading] = useState(false);
+  const [batchForceLookupCode, setBatchForceLookupCode] = useState(null);
+  const [batchEnrichAllRunning, setBatchEnrichAllRunning] = useState(false);
   const [lastScannedCode, setLastScannedCode] = useState('');
   const [isApiProcessing, setIsApiProcessing] = useState(false);
   const [notInDatabaseMessage, setNotInDatabaseMessage] = useState(null);
@@ -612,7 +615,8 @@ const Scanner = () => {
   };
 
   // Helper function to handle product info - adds to batch queue or sets productInfo based on mode
-  const handleProductFound = async (product, code, apiResult = null) => {
+  const handleProductFound = async (product, code, apiResult = null, options = {}) => {
+    const { skipAutoInventory = false } = options;
     if (batchMode) {
       // Check if product data is incomplete
       const isIncomplete = isProductIncomplete(product, apiResult);
@@ -663,16 +667,28 @@ const Scanner = () => {
       setProductInfo(product);
       
       // Auto-process: automatically add to inventory if enabled
-      await autoAddToInventory(product);
+      if (!skipAutoInventory) {
+        await autoAddToInventory(product);
+      }
     }
   };
 
-  async function lookupProductByCode(code) {
+  async function lookupProductByCode(code, options = {}) {
+    const forceApiLookup = options.forceApiLookup === true;
+    const suppressBatchItemToast = options.suppressBatchItemToast === true;
     // Ensure code is uppercase (safety measure)
     const upperCode = code.trim().toUpperCase();
-    console.log(`🔍 Looking up product by code: ${upperCode}, UserID: ${userId || 'N/A'}, Batch Mode: ${batchMode}`);
-    setLoading(true);
-    if (!batchMode) {
+    console.log(`🔍 Looking up product by code: ${upperCode}, UserID: ${userId || 'N/A'}, Batch Mode: ${batchMode}, forceApiLookup: ${forceApiLookup}`);
+    if (forceApiLookup) {
+      if (batchMode) {
+        setBatchForceLookupCode(upperCode);
+      } else {
+        setApiEnrichLoading(true);
+      }
+    } else {
+      setLoading(true);
+    }
+    if (!batchMode && !forceApiLookup) {
       setProductInfo(null); // Clear previous product info only in normal mode
     }
     setIsApiProcessing(false); // Reset processing state
@@ -698,9 +714,12 @@ const Scanner = () => {
       // Backend will check cache first and return cached data quickly if available
       // This ensures all scans are properly logged to scan_history for trial tracking
       console.log(`Calling backend /api/scan to log scan and get updated count for code: ${upperCode}`);
-      toast.info(batchMode ? "Scanning..." : "Scanning product. Please wait...", {
-        autoClose: batchMode ? 1000 : 2000
-      });
+      toast.info(
+        batchMode
+          ? (forceApiLookup ? `Amazon API: ${upperCode}…` : 'Scanning...')
+          : (forceApiLookup ? 'Fetching images and details from Amazon…' : 'Scanning product. Please wait...'),
+        { autoClose: batchMode ? (forceApiLookup ? 2000 : 1000) : forceApiLookup ? 3500 : 2000 }
+      );
       
       try {
         // Use centralized API config
@@ -709,7 +728,8 @@ const Scanner = () => {
         console.log("🚀 Calling unified scan endpoint:", scanUrl);
         const response = await axios.post(scanUrl, {
           code: upperCode,
-          user_id: userId
+          user_id: userId,
+          ...(forceApiLookup ? { force_api_lookup: true } : {})
         }, {
           timeout: 60000 // 60 seconds timeout
         });
@@ -748,7 +768,7 @@ const Scanner = () => {
               cost_status: apiResult.cost_status || 'charged'
             };
             toast.info(batchMode ? "Looking up..." : (apiResult.message || "Looking up this product. It will update automatically when ready."), { autoClose: batchMode ? 1500 : 4000 });
-            handleProductFound(displayableProduct, code, apiResult);
+            handleProductFound(displayableProduct, code, apiResult, { skipAutoInventory: forceApiLookup });
             if (apiResult.scan_count) {
               const used = apiResult.scan_count.used || 0;
               const limit = apiResult.scan_count.limit || null;
@@ -798,14 +818,24 @@ const Scanner = () => {
           };
           
           if (!batchMode) {
-            if (apiResult.cached) {
+            if (forceApiLookup) {
+              if (apiResult.source === 'rainforest_api' || apiResult.source === 'cache_enriched' || apiResult.cost_status === 'charged') {
+                toast.success(`Fetched from Amazon: ${allImages.length} image${allImages.length !== 1 ? 's' : ''} and updated details.`, { icon: "💚" });
+              } else if (apiResult.cached) {
+                toast.success('Product updated (cache). If images are still missing, the listing may not have photos on Amazon.', { icon: "💚" });
+              } else {
+                toast.success('Product information updated.', { icon: "💚" });
+              }
+            } else if (apiResult.cached) {
               toast.success("Product information retrieved from cache. No API charges incurred.", { icon: "💚" });
             } else if (apiResult.source === 'api') {
               toast.success(`Product scanned successfully. Retrieved ${allImages.length} images.`, { icon: "💚" });
             }
+          } else if (batchMode && forceApiLookup && !suppressBatchItemToast) {
+            toast.success(`${upperCode}: saved to catalog (${allImages.length} image${allImages.length !== 1 ? 's' : ''}).`, { autoClose: 2000 });
           }
           // Set product info - pass apiResult to detect incomplete data
-          handleProductFound(displayableProduct, code, apiResult);
+          handleProductFound(displayableProduct, code, apiResult, { skipAutoInventory: forceApiLookup });
           
           // Prefer scan_count from response to avoid extra /api/scan-count refetch; backend includes it in all scan responses
           requestAnimationFrame(() => {
@@ -912,6 +942,8 @@ const Scanner = () => {
         }
       } finally {
         setLoading(false);
+        setApiEnrichLoading(false);
+        setBatchForceLookupCode(null);
       }
     } catch (error) {
       console.error("Error looking up product by code:", error);
@@ -932,6 +964,8 @@ const Scanner = () => {
       }
     } finally {
       setLoading(false);
+      setApiEnrichLoading(false);
+      setBatchForceLookupCode(null);
       // In batch mode, refocus search bar after scan completes for continuous scanning
       if (batchMode && searchInputRef.current) {
         setTimeout(() => {
@@ -940,6 +974,22 @@ const Scanner = () => {
       }
     }
   }
+
+  const enrichCodeFromProduct = (info) => {
+    if (!info) return '';
+    const raw = (info.fnsku || info.asin || info.upc || '').toString().trim();
+    return raw ? raw.toUpperCase() : '';
+  };
+
+  const handleFetchImagesFromApi = () => {
+    if (!productInfo || batchMode) return;
+    const code = (lastScannedCode && String(lastScannedCode).trim()) || enrichCodeFromProduct(productInfo);
+    if (!code) {
+      toast.error('No barcode or ASIN available to look up.');
+      return;
+    }
+    lookupProductByCode(code, { forceApiLookup: true });
+  };
 
   const handleManualScan = async (barcodeToScan) => {
     if (!barcodeToScan.trim()) {
@@ -2802,6 +2852,46 @@ const Scanner = () => {
     }
   };
 
+  function productNeedsAmazonEnrich(product) {
+    if (!product) return false;
+    const hasImg = !!(product.image_url && String(product.image_url).trim()) ||
+      (Array.isArray(product.images) && product.images.length > 0);
+    const minimal = product.source === 'manifest_data' || product.source === 'products';
+    return !hasImg || minimal;
+  }
+
+  const showAmazonEnrichButton = !batchMode && !!productInfo && productNeedsAmazonEnrich(productInfo);
+
+  const handleEnrichAllBatchFromAmazon = async () => {
+    if (!userId) {
+      toast.error('Sign in required');
+      return;
+    }
+    const targets = batchQueue.filter(
+      (q) => q.product && !q.isProcessing && !q.hasFailed && productNeedsAmazonEnrich(q.product)
+    );
+    if (targets.length === 0) {
+      toast.info('No queue items need Amazon enrichment (all have images and full listing data).');
+      return;
+    }
+    setBatchEnrichAllRunning(true);
+    try {
+      toast.info(`Fetching Amazon details for ${targets.length} item(s)…`, { autoClose: 3000 });
+      for (let i = 0; i < targets.length; i += 1) {
+        await lookupProductByCode(targets[i].code, { forceApiLookup: true, suppressBatchItemToast: true });
+        if (i < targets.length - 1) {
+          await new Promise((r) => setTimeout(r, 450));
+        }
+      }
+      toast.success(`Finished Amazon enrichment for ${targets.length} item(s). Data is saved for future scans.`, { autoClose: 4500 });
+    } catch (e) {
+      console.error(e);
+      toast.error(e?.message || 'Batch Amazon enrichment failed.');
+    } finally {
+      setBatchEnrichAllRunning(false);
+    }
+  };
+
   return (
     <div className="p-4 md:p-6 lg:p-8">
 
@@ -2911,8 +3001,18 @@ const Scanner = () => {
           <div className="flex flex-wrap gap-2 justify-end">
             <button
               type="button"
+              onClick={handleEnrichAllBatchFromAmazon}
+              disabled={isBulkAddingBatchToInventory || isPrintingBatch || batchEnrichAllRunning || batchForceLookupCode !== null}
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+              title="Fetches images and listing details from Amazon for every queue item that still needs them, and saves to the database"
+            >
+              <ArrowPathIcon className={`-ml-1 mr-2 h-5 w-5 shrink-0 ${batchEnrichAllRunning ? 'animate-spin' : ''}`} />
+              {batchEnrichAllRunning ? 'Enriching queue…' : 'Amazon API (all needing data)'}
+            </button>
+            <button
+              type="button"
               onClick={handleAddBatchQueueToInventory}
-              disabled={isBulkAddingBatchToInventory || isPrintingBatch}
+              disabled={isBulkAddingBatchToInventory || isPrintingBatch || batchEnrichAllRunning}
               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50"
             >
               <ShoppingBagIcon className="-ml-1 mr-2 h-5 w-5" />
@@ -2921,7 +3021,7 @@ const Scanner = () => {
             <button
               type="button"
               onClick={handlePrintAllBatch}
-              disabled={isPrintingBatch || isBulkAddingBatchToInventory}
+              disabled={isPrintingBatch || isBulkAddingBatchToInventory || batchEnrichAllRunning}
               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-50"
             >
               <PrinterIcon className="-ml-1 mr-2 h-5 w-5" />
@@ -2930,7 +3030,7 @@ const Scanner = () => {
             <button
               type="button"
               onClick={handleClearBatchQueue}
-              disabled={isBulkAddingBatchToInventory}
+              disabled={isBulkAddingBatchToInventory || batchEnrichAllRunning}
               className="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 text-sm font-medium rounded-md shadow-sm text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
             >
               Clear Queue
@@ -3022,6 +3122,23 @@ const Scanner = () => {
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                     </svg>
                   </div>
+                )}
+                {item.product && productNeedsAmazonEnrich(item.product) && !item.isProcessing && !item.hasFailed && (
+                  <button
+                    type="button"
+                    onClick={() => lookupProductByCode(item.code, { forceApiLookup: true })}
+                    disabled={!userId || batchEnrichAllRunning || batchForceLookupCode !== null}
+                    className="mt-2 w-full px-2 py-1.5 text-xs font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {batchForceLookupCode === item.code ? (
+                      <span className="inline-flex items-center justify-center gap-1.5">
+                        <span className="h-3 w-3 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0" aria-hidden="true" />
+                        Fetching…
+                      </span>
+                    ) : (
+                      'Fetch images & details (Amazon API)'
+                    )}
+                  </button>
                 )}
               </div>
             ))}
@@ -3240,6 +3357,30 @@ const Scanner = () => {
               <div className="mb-2 p-2 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-md">
                   <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Code Type: {productInfo.code_type || 'N/A'} ({productInfo.code_type === 'FNSKU' ? 'Fulfillment Network Stock Keeping Unit' : productInfo.code_type})</span>
               </div>
+
+              {apiEnrichLoading && (
+                <div className="mb-3 p-3 bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded-md flex items-center gap-2">
+                  <span className="inline-block h-4 w-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin shrink-0" aria-hidden="true" />
+                  <p className="text-sm text-indigo-800 dark:text-indigo-200">Loading images and details from Amazon…</p>
+                </div>
+              )}
+
+              {showAmazonEnrichButton && (
+                <div className="mb-4 p-3 bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-600 rounded-md">
+                  <p className="text-xs text-gray-600 dark:text-gray-400 mb-2">
+                    Missing photos or only basic catalog data? Fetch listing images and extra details from Amazon. Live lookups may count toward your scan quota or incur API usage.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleFetchImagesFromApi}
+                    disabled={apiEnrichLoading || loading || !userId}
+                    className="inline-flex items-center px-3 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <ArrowPathIcon className={`h-4 w-4 mr-2 shrink-0 ${apiEnrichLoading ? 'animate-spin' : ''}`} />
+                    {apiEnrichLoading ? 'Fetching from Amazon…' : 'Fetch images & details (Amazon API)'}
+                  </button>
+                </div>
+              )}
 
               {/* Product Images - Show all if available */}
               {productInfo.images && productInfo.images.length > 0 ? (
