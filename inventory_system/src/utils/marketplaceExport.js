@@ -338,11 +338,16 @@ async function exportFacebookMarketplacePackage(canonicalRows, date) {
   zip.file(`marketplace_template_${date}.xlsx`, xlsxBytes);
 
   const imagesFolder = zip.folder('images');
-  const imageManifestHeaders = ['TITLE', 'SKU', 'IMAGE_FILE', 'SOURCE_URL', 'STATUS'];
+  const imageManifestHeaders = ['ROW', 'TITLE', 'SKU', 'IMAGE_FILE', 'SOURCE_URL', 'STATUS'];
   const imageManifestRows = [];
 
-  for (const row of canonicalRows) {
-    const baseName = `${safeFileSegment(row.sku || row.id)}-${safeFileSegment(toFacebookMarketplaceTitle(row.title, row.description))}`;
+  for (let pi = 0; pi < canonicalRows.length; pi += 1) {
+    const row = canonicalRows[pi];
+    // Prefix matches spreadsheet row order when the images folder is sorted by name; title before SKU in the stem for easy Facebook uploads.
+    const rowPrefix = String(pi + 1).padStart(3, '0');
+    const titlePart = safeFileSegment(toFacebookMarketplaceTitle(row.title, row.description));
+    const skuPart = safeFileSegment(row.sku || row.id);
+    const baseName = `${rowPrefix}-${titlePart}-${skuPart}`;
     const media = (
       Array.isArray(row.images) && row.images.length > 0
         ? row.images
@@ -355,6 +360,7 @@ async function exportFacebookMarketplacePackage(canonicalRows, date) {
 
     if (!media.length) {
       imageManifestRows.push({
+        ROW: String(pi + 1),
         TITLE: toFacebookMarketplaceTitle(row.title, row.description),
         SKU: row.sku || row.id,
         IMAGE_FILE: '',
@@ -370,6 +376,7 @@ async function exportFacebookMarketplacePackage(canonicalRows, date) {
       const fileIndex = i + 1;
       if (!fetched) {
         imageManifestRows.push({
+          ROW: String(pi + 1),
           TITLE: toFacebookMarketplaceTitle(row.title, row.description),
           SKU: row.sku || row.id,
           IMAGE_FILE: '',
@@ -379,9 +386,10 @@ async function exportFacebookMarketplacePackage(canonicalRows, date) {
         continue;
       }
       const ext = inferImageExtension(url, fetched.contentType);
-      const fileName = `${baseName}-${fileIndex}.${ext}`;
+      const fileName = `${baseName}-${String(fileIndex).padStart(2, '0')}.${ext}`;
       imagesFolder.file(fileName, fetched.blob);
       imageManifestRows.push({
+        ROW: String(pi + 1),
         TITLE: toFacebookMarketplaceTitle(row.title, row.description),
         SKU: row.sku || row.id,
         IMAGE_FILE: `images/${fileName}`,
@@ -400,9 +408,11 @@ async function exportFacebookMarketplacePackage(canonicalRows, date) {
       'Facebook Marketplace upload package',
       '',
       '1) Upload marketplace_template_*.xlsx in Facebook Marketplace bulk upload.',
-      '2) Open images/ folder from this zip.',
+      '2) Open images/ folder from this zip and sort by name (default in File Explorer).',
+      '   Files are named 001-title-sku-01.jpg, 002-..., so order matches the rows in marketplace_template_*.xlsx;',
+      '   all images for one listing are consecutive (01, 02, ...).',
       '3) On Facebook listing review/edit step, drag images from images/ onto each matching listing.',
-      '4) Use image_manifest.csv to match SKU/TITLE to image files quickly.',
+      '4) Use image_manifest.csv (ROW column = spreadsheet row) to match TITLE/SKU to image files quickly.',
       '',
       'Note: some source URLs block browser download via CORS; those rows appear as download_failed_or_blocked in image_manifest.csv.',
     ].join('\r\n')
