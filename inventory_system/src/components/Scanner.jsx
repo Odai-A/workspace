@@ -95,6 +95,8 @@ const Scanner = () => {
   const processingPollTimeoutRef = useRef(null);
   const productInfoSectionRef = useRef(null);
   const batchModeRef = useRef(batchMode);
+  const lastCameraDetectRef = useRef({ code: '', ts: 0 });
+  const cameraLookupInFlightRef = useRef(0);
   batchModeRef.current = batchMode;
 
   // State for scan count (free trial tracking)
@@ -336,14 +338,25 @@ const Scanner = () => {
 
   function handleCodeDetected(detectedData) {
     const code = detectedData.code;
+    const runId = `cam-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     if (!code) {
       console.warn("handleCodeDetected called with no code:", detectedData);
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId,hypothesisId:'H2',location:'Scanner.jsx:handleCodeDetected:empty',message:'Camera callback had empty code',data:{batchMode,isCameraActive,source:detectedData?.source||'',format:detectedData?.format||''},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return;
     }
     if (typeof navigator !== 'undefined' && navigator.vibrate) navigator.vibrate(100);
     // Clean the code by removing whitespace and tab characters, then convert to uppercase
     const cleanedCode = code.trim().replace(/\s+/g, '').toUpperCase();
+    const now = Date.now();
+    const previous = lastCameraDetectRef.current || { code: '', ts: 0 };
+    const duplicateMs = previous.code === cleanedCode ? (now - previous.ts) : -1;
+    lastCameraDetectRef.current = { code: cleanedCode, ts: now };
     console.log("Detected code via Camera:", cleanedCode);
+    // #region agent log
+    fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId,hypothesisId:'H1',location:'Scanner.jsx:handleCodeDetected:detected',message:'Camera code detected',data:{code:cleanedCode,codeLen:cleanedCode.length,batchMode,isCameraActive,source:detectedData?.source||'',format:detectedData?.format||'',duplicateMs,cameraLookupInFlight:cameraLookupInFlightRef.current},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     
     // Keep camera active for continuous scanning in batch mode
     if (!batchMode) {
@@ -358,7 +371,13 @@ const Scanner = () => {
       return newHistory;
     });
     
-    lookupProductByCode(cleanedCode);
+    cameraLookupInFlightRef.current += 1;
+    lookupProductByCode(cleanedCode).catch(() => {}).finally(() => {
+      cameraLookupInFlightRef.current = Math.max(0, cameraLookupInFlightRef.current - 1);
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId,hypothesisId:'H4',location:'Scanner.jsx:handleCodeDetected:lookupComplete',message:'Camera-triggered lookup completed',data:{code:cleanedCode,cameraLookupInFlight:cameraLookupInFlightRef.current},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+    });
   }
 
   // Helper function to automatically add product to inventory (used by auto-process feature)
@@ -678,7 +697,12 @@ const Scanner = () => {
     const suppressBatchItemToast = options.suppressBatchItemToast === true;
     // Ensure code is uppercase (safety measure)
     const upperCode = code.trim().toUpperCase();
+    const lookupRunId = `scan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const lookupStartMs = Date.now();
     console.log(`🔍 Looking up product by code: ${upperCode}, UserID: ${userId || 'N/A'}, Batch Mode: ${batchMode}, forceApiLookup: ${forceApiLookup}`);
+    // #region agent log
+    fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:lookupRunId,hypothesisId:'H4',location:'Scanner.jsx:lookupProductByCode:start',message:'Scan lookup started',data:{code:upperCode,batchMode,forceApiLookup,hasUserId:!!userId},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     if (forceApiLookup) {
       if (batchMode) {
         setBatchForceLookupCode(upperCode);
@@ -736,6 +760,9 @@ const Scanner = () => {
         
         const apiResult = response.data;
         console.log("🚀 Backend scan response:", apiResult);
+        // #region agent log
+        fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:lookupRunId,hypothesisId:'H4',location:'Scanner.jsx:lookupProductByCode:response',message:'Scan endpoint response received',data:{durationMs:Date.now()-lookupStartMs,success:!!apiResult?.success,processing:!!apiResult?.processing,source:apiResult?.source||'',statusCode:response.status},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         
         if (apiResult && apiResult.success) {
           if (apiResult.not_in_api_database) {
@@ -788,7 +815,7 @@ const Scanner = () => {
                 });
               }, 0);
             }
-            startProcessingPoll(code);
+            startProcessingPoll(code, lookupRunId);
             return;
           }
 
@@ -2311,13 +2338,20 @@ const Scanner = () => {
   };
 
   // Auto-poll when backend returned processing: true (first poll immediately, then every 2s; no manual "Check for Updates" needed)
-  const startProcessingPoll = (codeToPoll) => {
+  const startProcessingPoll = (codeToPoll, runId = null) => {
     if (processingPollTimeoutRef.current) clearTimeout(processingPollTimeoutRef.current);
     if (processingPollRef.current) clearInterval(processingPollRef.current);
     let attempts = 0;
     const maxAttempts = 30; // 30 * 2s ≈ 60s total; full data appears automatically when ready
+    const pollRunId = runId || `poll-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const pollStartedAt = Date.now();
     const poll = async () => {
       attempts++;
+      if (attempts === 1) {
+        // #region agent log
+        fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:pollRunId,hypothesisId:'H1',location:'Scanner.jsx:startProcessingPoll:start',message:'Processing poll started',data:{code:codeToPoll,maxAttempts,batchMode:batchModeRef.current},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+      }
       if (attempts > maxAttempts) {
         if (processingPollRef.current) {
           clearInterval(processingPollRef.current);
@@ -2328,6 +2362,9 @@ const Scanner = () => {
           setBatchQueue(prev => prev.map(item => item.code === codeToPoll ? { ...item, isProcessing: false, hasFailed: true } : item));
           toast.warning(`Could not retrieve data for ${codeToPoll} in time. You can retry from the queue.`, { autoClose: 4000 });
         }
+        // #region agent log
+        fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:pollRunId,hypothesisId:'H1',location:'Scanner.jsx:startProcessingPoll:timeout',message:'Processing poll timed out',data:{code:codeToPoll,attempts:maxAttempts,elapsedMs:Date.now()-pollStartedAt},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         return;
       }
       try {
@@ -2355,6 +2392,9 @@ const Scanner = () => {
             setBatchQueue(prev => prev.map(item => item.code === codeToPoll ? { ...item, isProcessing: false, hasFailed: true } : item));
           }
           toast.warning(data.message || "This product could not be found in our lookup database.", { autoClose: 8000 });
+          // #region agent log
+          fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:pollRunId,hypothesisId:'H1',location:'Scanner.jsx:startProcessingPoll:notInDatabase',message:'Processing poll ended as not in database',data:{code:codeToPoll,attempts,elapsedMs:Date.now()-pollStartedAt},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
           return;
         }
         if (data && data.success && !data.processing && data.asin) {
@@ -2388,6 +2428,9 @@ const Scanner = () => {
           };
           handleProductFound(displayableProduct, codeToPoll);
           if (!batchMode) toast.success('Product details ready.', { icon: '💚' });
+          // #region agent log
+          fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:pollRunId,hypothesisId:'H1',location:'Scanner.jsx:startProcessingPoll:success',message:'Processing poll completed with ASIN',data:{code:codeToPoll,attempts,elapsedMs:Date.now()-pollStartedAt,asin:data.asin,source:data.source||''},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
           if (data.scan_count) {
             const used = data.scan_count.used || 0;
             const limit = data.scan_count.limit || null;

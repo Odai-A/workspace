@@ -141,6 +141,7 @@ const BarcodeScanner = ({
 
       const stream = await getUserMediaWithFallback();
       streamRef.current = stream;
+      const cameraRunId = `camera-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -167,6 +168,9 @@ const BarcodeScanner = ({
         const videoTrack = stream.getVideoTracks()[0];
         if (videoTrack) {
           const capabilities = videoTrack.getCapabilities();
+          // #region agent log
+          fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:cameraRunId,hypothesisId:'H5',location:'BarcodeScanner.jsx:startScanning:capabilities',message:'Camera stream started',data:{settings:videoTrack.getSettings?.()||{},hasBarcodeDetector,roiFraction:ROI_FRACTION,scanIntervalMs:50},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
           try {
             if (capabilities?.focusMode?.includes('continuous')) {
               await videoTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' }] });
@@ -216,6 +220,9 @@ const BarcodeScanner = ({
                 const b = barcodes[0];
                 const code = (b.rawValue || '').trim();
                 if (code) {
+                  // #region agent log
+                  fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:cameraRunId,hypothesisId:'H2',location:'BarcodeScanner.jsx:detect:barcodeDetector',message:'BarcodeDetector decoded candidate',data:{codeLen:code.length,format:b.format||'unknown'},timestamp:Date.now()})}).catch(()=>{});
+                  // #endregion
                   reportSuccess(code, b.format || 'unknown', 'BarcodeDetector');
                   return;
                 }
@@ -227,6 +234,9 @@ const BarcodeScanner = ({
           if (result && result.getText()) {
             const code = result.getText().trim();
             const format = result.getBarcodeFormat().toString();
+            // #region agent log
+            fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:cameraRunId,hypothesisId:'H3',location:'BarcodeScanner.jsx:detect:zxing',message:'ZXing decoded candidate',data:{codeLen:code.length,format},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
             reportSuccess(code, format, 'zxing');
             return;
           }
@@ -237,6 +247,9 @@ const BarcodeScanner = ({
           failedDecodeCountRef.current = (failedDecodeCountRef.current || 0) + 1;
           if (enableOcrFallback && failedDecodeCountRef.current >= FAILED_THRESHOLD_BEFORE_OCR_HINT) {
             setShowOcrButton(true);
+            // #region agent log
+            fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:cameraRunId,hypothesisId:'H3',location:'BarcodeScanner.jsx:detect:decodeFailThreshold',message:'Decode failures reached OCR threshold',data:{failedDecodeCount:failedDecodeCountRef.current},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
           }
         } finally {
           decodeInFlightRef.current = false;

@@ -3156,6 +3156,27 @@ def scan_product():
     Frontend makes ONE request and gets complete product data back.
     """
     try:
+        import time as _time
+        import json as _json
+        debug_run_id = f"scan-{int(_time.time() * 1000)}"
+        debug_started_at = _time.time()
+
+        def _debug_emit(hypothesis_id, location, message, data):
+            payload = {
+                "sessionId": "bff232",
+                "runId": debug_run_id,
+                "hypothesisId": hypothesis_id,
+                "location": location,
+                "message": message,
+                "data": data,
+                "timestamp": int(_time.time() * 1000)
+            }
+            try:
+                with open("debug-bff232.log", "a", encoding="utf-8") as _debug_file:
+                    _debug_file.write(_json.dumps(payload) + "\n")
+            except Exception:
+                pass
+
         try:
             data = request.get_json(silent=True)
         except Exception:
@@ -3183,6 +3204,14 @@ def scan_product():
 
         # Detect code type
         code_type = detect_code_type(code)
+        # region agent log
+        _debug_emit("H5", "app.py:scan_product:start", "Scan request entered backend", {
+            "code": code,
+            "codeType": code_type,
+            "hasUserId": bool(user_id),
+            "forceApiLookup": bool(data.get('force_api_lookup') or data.get('forceApiLookup'))
+        })
+        # endregion
         
         # Use both print and logger to ensure visibility
         print("\n" + "=" * 60)
@@ -3295,6 +3324,13 @@ def scan_product():
                     "error": "trial_check_failed",
                     "message": "Unable to verify trial usage. Please contact support or try again later."
                 }), 500
+        # region agent log
+        _debug_emit("H2", "app.py:scan_product:afterTrialChecks", "Completed trial and role checks", {
+            "elapsedMs": int((_time.time() - debug_started_at) * 1000),
+            "isCeoAdmin": bool(is_ceo_admin),
+            "hasSupabaseAdmin": bool(supabase_admin)
+        })
+        # endregion
         
         # Handle ASIN codes directly with Rainforest API
         if code_type == 'ASIN':
@@ -4401,6 +4437,7 @@ def scan_product():
         payload = {"barCode": code, "callbackUrl": ""}
         scan_data = None
         asin = None
+        fnsku_api_phase_started = _time.time()
         
         # Call AddOrGet first: creates or returns task and often returns ASIN immediately (one round trip)
         try:
@@ -4443,6 +4480,14 @@ def scan_product():
                 "error": "Product not found",
                 "message": "Could not create or retrieve scan task. Please try again."
             }), 404
+        # region agent log
+        _debug_emit("H1", "app.py:scan_product:afterInitialFnskuCalls", "Finished AddOrGet/GetByBarCode phase", {
+            "elapsedMs": int((_time.time() - fnsku_api_phase_started) * 1000),
+            "hasScanData": bool(scan_data),
+            "taskId": scan_data.get('id') if scan_data else None,
+            "asinPresent": bool(asin and len(str(asin).strip()) >= 10)
+        })
+        # endregion
         
         # STEP 3: Poll for ASIN so first scan often succeeds in one go (target ≤10s)
         # Only overwrite asin if we don't already have it from existing scan task
@@ -4461,9 +4506,12 @@ def scan_product():
             logger.info(f"⏳ ASIN not immediately available. Polling for task {task_id} (max {max_polls} attempts, ~{max_polls}s)...")
             import time
             task_state = 0  # Initialize task_state before polling loop
+            poll_started_at = _time.time()
+            final_poll_attempt = 0
             # Brief initial wait so FNSKU API has time to start processing after AddOrGet
             time.sleep(0.5)
             for attempt in range(1, max_polls + 1):
+                final_poll_attempt = attempt
                 # Retry AddOrGet after 2 polls to trigger processing
                 if attempt == retry_add_or_get_after:
                     logger.info(f"🔄 Retrying AddOrGet to trigger processing (attempt {attempt})...")
@@ -4529,6 +4577,14 @@ def scan_product():
                 if asin and isinstance(asin, str) and len(asin.strip()) >= 10:
                     logger.info(f"✅ ASIN confirmed available: {asin} - exiting polling immediately")
                     break
+            # region agent log
+            _debug_emit("H1", "app.py:scan_product:afterFnskuPoll", "Finished short FNSKU polling loop", {
+                "elapsedMs": int((_time.time() - poll_started_at) * 1000),
+                "attempts": final_poll_attempt,
+                "asinPresent": bool(asin and isinstance(asin, str) and len(asin.strip()) >= 10),
+                "taskState": task_state
+            })
+            # endregion
             
             # After short polling loop, no final long lookup - return processing quickly for good UX
             if not asin or not isinstance(asin, str) or len(asin.strip()) < 10:
@@ -4590,6 +4646,12 @@ def scan_product():
                     logger.error(f"Error getting scan count for processing response: {count_error}")
                 if scan_count_data:
                     processing_response['scan_count'] = scan_count_data
+            # region agent log
+            _debug_emit("H1", "app.py:scan_product:returnProcessing", "Returning processing response", {
+                "elapsedMs": int((_time.time() - debug_started_at) * 1000),
+                "taskId": str(task_id) if task_id else None
+            })
+            # endregion
             return jsonify(processing_response), 200
         
         # STEP 4: If we have ASIN, fetch from Rainforest API
@@ -4601,6 +4663,7 @@ def scan_product():
                 logger.warning("⚠️ RAINFOREST_API_KEY not set - skipping Rainforest API call")
             else:
                 logger.info(f"📦 Fetching product data from Rainforest API for ASIN {asin}...")
+                rainforest_started_at = _time.time()
                 try:
                     # Request product data from Rainforest API
                     # The API returns all available images by default
@@ -4724,6 +4787,13 @@ def scan_product():
                     logger.error(f"❌ Rainforest API error: {type(rf_error).__name__}: {str(rf_error)}")
                     import traceback
                     logger.error(f"Traceback: {traceback.format_exc()}")
+                # region agent log
+                _debug_emit("H3", "app.py:scan_product:afterRainforest", "Finished Rainforest fetch attempt", {
+                    "elapsedMs": int((_time.time() - rainforest_started_at) * 1000),
+                    "hasRainforestData": bool(rainforest_data),
+                    "asin": asin
+                })
+                # endregion
         else:
             logger.warning(f"⚠️ Cannot call Rainforest API - ASIN invalid: '{asin}' (len={len(asin) if asin else 0})")
         
@@ -4839,6 +4909,15 @@ def scan_product():
             logger.error(error_msg)
             logger.error(f"   This means the save to api_lookup_cache FAILED or was SKIPPED")
             logger.error(f"   Check logs above for error messages")
+        # region agent log
+        _debug_emit("H5", "app.py:scan_product:returnFinal", "Returning final scan response", {
+            "elapsedMs": int((_time.time() - debug_started_at) * 1000),
+            "source": response_data.get('source'),
+            "cached": bool(response_data.get('cached')),
+            "hasAsin": bool(asin and len(str(asin).strip()) >= 10),
+            "hasRainforestData": bool(rainforest_data)
+        })
+        # endregion
         
         # Auto-post to Facebook if integration is set up (non-blocking)
         if response_data.get('success') and user_id and supabase_admin:
@@ -4941,8 +5020,35 @@ def scan_status():
     If ASIN now present, call Rainforest, save cache, return full data.
     If still no ASIN after many attempts (attempt>=5), return not_in_api_database so the app can show a clear "not in database" message.
     """
+    import time as _time
+    import json as _json
+    status_started_at = _time.time()
+    status_run_id = f"status-{int(_time.time() * 1000)}"
+
+    def _debug_emit_status(hypothesis_id, location, message, data):
+        payload = {
+            "sessionId": "bff232",
+            "runId": status_run_id,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": int(_time.time() * 1000)
+        }
+        try:
+            with open("debug-bff232.log", "a", encoding="utf-8") as _debug_file:
+                _debug_file.write(_json.dumps(payload) + "\n")
+        except Exception:
+            pass
+
     code = (request.args.get('code') or '').strip().upper()
     attempt = request.args.get('attempt', type=int) or 0
+    # region agent log
+    _debug_emit_status("H5", "app.py:scan_status:start", "scan/status request started", {
+        "code": code,
+        "attempt": attempt
+    })
+    # endregion
     user_id, tenant_id = get_ids_from_request()
     if not code:
         return jsonify({"success": False, "error": "Invalid code", "message": "Query param 'code' is required"}), 400
@@ -4997,6 +5103,13 @@ def scan_status():
                 scan_count_data = _scan_count_for_response(user_id, tenant_id)
                 if scan_count_data:
                     full_response['scan_count'] = scan_count_data
+                # region agent log
+                _debug_emit_status("H5", "app.py:scan_status:returnCached", "scan/status served from cache", {
+                    "elapsedMs": int((_time.time() - status_started_at) * 1000),
+                    "attempt": attempt,
+                    "hasAsin": True
+                })
+                # endregion
                 return jsonify(full_response)
         FNSKU_API_KEY = os.environ.get('FNSKU_API_KEY')
         RAINFOREST_API_KEY = os.environ.get('RAINFOREST_API_KEY')
@@ -5027,12 +5140,24 @@ def scan_status():
         asin = (scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or '').strip()
         if not asin or len(asin) < 10:
             if attempt >= 15:
+                # region agent log
+                _debug_emit_status("H1", "app.py:scan_status:returnNotInDb", "scan/status marked not in database", {
+                    "elapsedMs": int((_time.time() - status_started_at) * 1000),
+                    "attempt": attempt
+                })
+                # endregion
                 return jsonify({
                     "success": True, "processing": False, "not_in_api_database": True,
                     "fnsku": code, "asin": "", "title": scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}",
                     "message": FNSKU_NOT_IN_DATABASE_MESSAGE,
                     "scan_task_id": str(scan_data.get('id')) if scan_data.get('id') else None, "bar_code": code
                 }), 200
+            # region agent log
+            _debug_emit_status("H1", "app.py:scan_status:returnProcessing", "scan/status still processing", {
+                "elapsedMs": int((_time.time() - status_started_at) * 1000),
+                "attempt": attempt
+            })
+            # endregion
             return jsonify({
                 "success": True, "processing": True, "fnsku": code, "asin": "", "title": scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}",
                 "message": FNSKU_PROCESSING_MESSAGE,
@@ -5073,6 +5198,14 @@ def scan_status():
         scan_count_data = _scan_count_for_response(user_id, tenant_id)
         if scan_count_data:
             response_data['scan_count'] = scan_count_data
+        # region agent log
+        _debug_emit_status("H3", "app.py:scan_status:returnFinal", "scan/status returned full data", {
+            "elapsedMs": int((_time.time() - status_started_at) * 1000),
+            "attempt": attempt,
+            "hasRainforestData": bool(rainforest_data),
+            "asin": asin
+        })
+        # endregion
         return jsonify(response_data)
     except Exception as e:
         logger.error(f"Error in scan_status: {str(e)}")
