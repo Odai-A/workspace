@@ -100,6 +100,11 @@ export const inventoryService = {
       console.warn("No user ID found - cannot fetch inventory");
       return { data: [], totalCount: 0 };
     }
+    const tenantIdForDebug = await getCurrentTenantId();
+    const inventoryRunId = `inv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // #region agent log
+    fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:inventoryRunId,hypothesisId:'H3',location:'supabaseClient.js:getInventory:start',message:'Inventory fetch started',data:{userId,tenantId:tenantIdForDebug,page:options.page||1,limit:options.limit||25},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     
     const { 
       page = 1, 
@@ -114,6 +119,12 @@ export const inventoryService = {
 
     // Omit rows the user removed from the list (soft-hide; row still exists in DB)
     query = query.eq('hidden_from_inventory_list', false);
+    // Always scope inventory reads to the current user to prevent cross-account leakage
+    // even if RLS/policies are temporarily misconfigured.
+    query = query.eq('user_id', userId);
+    // #region agent log
+    fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:inventoryRunId,hypothesisId:'H8',location:'supabaseClient.js:getInventory:scope',message:'Inventory query scope before execution',data:{scopeMode:'explicit_user_id_filter',expectsRlsIsolation:true,userId},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
 
     // Add search functionality
     if (searchQuery && searchQuery.trim()) {
@@ -139,8 +150,16 @@ export const inventoryService = {
     
     if (error) {
       console.error('Error fetching inventory:', error);
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:inventoryRunId,hypothesisId:'H4',location:'supabaseClient.js:getInventory:error',message:'Inventory fetch failed',data:{message:(error?.message||'').slice(0,180),code:error?.code||''},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return { data: [], totalCount: 0 };
     }
+    const ownerSample = [...new Set((data || []).map((row) => row?.user_id || 'null'))].slice(0, 5);
+    const tenantSample = [...new Set((data || []).map((row) => row?.tenant_id || 'null'))].slice(0, 5);
+    // #region agent log
+    fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:inventoryRunId,hypothesisId:'H5',location:'supabaseClient.js:getInventory:result',message:'Inventory fetch completed',data:{returnedRows:(data||[]).length,totalCount:count||0,ownerSample,tenantSample},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     
     return { 
       data: data || [], 

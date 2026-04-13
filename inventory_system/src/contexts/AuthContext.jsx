@@ -146,6 +146,10 @@ export const AuthProvider = ({ children }) => {
   // Sign in with email and password
   const signIn = async (email, password) => {
     console.log('🔐 SignIn attempt with email:', email);
+    const signInRunId = `signin-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // #region agent log
+    fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:signInRunId,hypothesisId:'H1',location:'AuthContext.jsx:signIn:start',message:'Sign in started',data:{emailDomain:(email||'').split('@')[1]||''},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     
     // Check if Supabase is properly configured
     const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -189,6 +193,9 @@ export const AuthProvider = ({ children }) => {
       } else {
         toast.success('You have been signed in.');
       }
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:signInRunId,hypothesisId:'H1',location:'AuthContext.jsx:signIn:success',message:'Sign in succeeded',data:{hasTenant,userId:data?.user?.id||null},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return { success: true, user: data.user, session: data.session };
     } catch (error) {
       const msg = (error && error.message) ? String(error.message).toLowerCase() : '';
@@ -207,6 +214,9 @@ export const AuthProvider = ({ children }) => {
       if (import.meta.env.DEV) {
         console.warn('Sign-in error (shown to user):', userMessage);
       }
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:signInRunId,hypothesisId:'H2',location:'AuthContext.jsx:signIn:error',message:'Sign in failed',data:{code:String(code||''),message:(error?.message||'').slice(0,180),mappedMessage:userMessage},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       logAuthState('signin-exception', { error });
       return { success: false, error: userMessage };
     }
@@ -215,12 +225,23 @@ export const AuthProvider = ({ children }) => {
   // Sign up with email and password
   const signUp = async (email, password, additionalData = {}) => {
     console.log('SignUp attempt with email:', email);
+    const signupRunId = `signup-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    // #region agent log
+    fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:signupRunId,hypothesisId:'H3',location:'AuthContext.jsx:signUp:start',message:'Frontend signUp started',data:{hasAdditionalData:!!additionalData&&Object.keys(additionalData).length>0},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     try {
+      const normalizedAdditionalData = additionalData && typeof additionalData === 'object' ? additionalData : {};
+      // Self-registered accounts should be primary account owners, not employees.
+      // Employee accounts are created from the Users page via backend admin endpoint.
+      const signupMetadata = {
+        ...normalizedAdditionalData,
+        role: normalizedAdditionalData.role || 'admin',
+      };
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
-          data: additionalData, // e.g., { display_name: 'John Doe' }
+          data: signupMetadata, // e.g., { display_name: 'John Doe', role: 'admin' }
         },
       });
       if (error) throw error;
@@ -232,13 +253,19 @@ export const AuthProvider = ({ children }) => {
       } else if (data.user && data.session) {
         toast.success('Registration completed successfully. You have been signed in.');
       }
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:signupRunId,hypothesisId:'H3',location:'AuthContext.jsx:signUp:result',message:'Frontend signUp completed',data:{requestedRole:signupMetadata.role||null,hasUser:!!data?.user,hasSession:!!data?.session,tenantId:data?.user?.app_metadata?.tenant_id||null,appRole:data?.user?.app_metadata?.role||null,userRole:data?.user?.user_metadata?.role||null,identitiesCount:Array.isArray(data?.user?.identities)?data.user.identities.length:null,emailConfirmedAt:data?.user?.email_confirmed_at||null,confirmationSentAt:data?.user?.confirmation_sent_at||null},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       return { success: true, user: data.user, session: data.session };
     } catch (error) {
       console.error('Error signing up:', error.message);
       const msg = (error && error.message) ? String(error.message).toLowerCase() : '';
+      const code = error?.code || error?.status || '';
       let userMessage;
       if (msg.includes('user already registered') || msg.includes('already been registered') || msg.includes('already exists')) {
         userMessage = 'An account with this email already exists. Sign in instead, or use "Forgot password" if you don\'t remember it.';
+      } else if (msg.includes('rate limit') || msg.includes('over_email_send_rate_limit') || msg.includes('email rate limit')) {
+        userMessage = 'Too many email requests were sent recently. Please wait a few minutes, then try again. If the account already exists, use "Forgot password" instead of creating a new account.';
       } else if (msg.includes('email not confirmed') || msg.includes('confirm your email')) {
         userMessage = 'Please confirm your email using the link we sent you, then try signing in.';
       } else if (msg.includes('password') && (msg.includes('least') || msg.includes('6 character'))) {
@@ -249,6 +276,9 @@ export const AuthProvider = ({ children }) => {
         userMessage = error?.message || 'Registration failed. Please check your information and try again.';
       }
       toast.error(userMessage);
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:signupRunId,hypothesisId:'H4',location:'AuthContext.jsx:signUp:error',message:'Frontend signUp failed',data:{code:String(code||''),message:(error?.message||'').slice(0,180),mappedMessage:userMessage,isRateLimit:msg.includes('rate limit')||msg.includes('over_email_send_rate_limit')||msg.includes('email rate limit')},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       logAuthState('signup-exception', { error });
       return { success: false, error: userMessage };
     }

@@ -49,6 +49,9 @@ export const NavigationProvider = ({ children }) => {
           const role = appMetadata.role || userMetadata.role;
           
           if (role) {
+            // #region agent log
+            fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:`nav-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,hypothesisId:'H9',location:'NavigationContext.jsx:fetchUserRole:session',message:'Role resolved from session metadata',data:{role,userId:user?.id||null},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
             setUserRole(role);
             return;
           }
@@ -80,6 +83,9 @@ export const NavigationProvider = ({ children }) => {
           .maybeSingle();
         
         if (userProfile?.role) {
+          // #region agent log
+          fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:`nav-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,hypothesisId:'H9',location:'NavigationContext.jsx:fetchUserRole:usersTable',message:'Role resolved from users table',data:{role:userProfile.role,userId:user?.id||null},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
           setUserRole(userProfile.role);
           return;
         }

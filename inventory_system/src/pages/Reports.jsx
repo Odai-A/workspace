@@ -72,15 +72,31 @@ function Reports() {
   const fetchScanActivity = async () => {
     try {
       const { startDate, endDate } = getDateRange();
-      
-      const { data, error } = await supabase
+      const reportsRunId = `reports-activity-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      let query = supabase
         .from('scan_history')
         .select('scanned_at')
         .gte('scanned_at', startDate.toISOString())
         .lte('scanned_at', endDate.toISOString())
         .order('scanned_at', { ascending: true });
 
+      const scopeMode = tenantId ? 'tenant' : 'user';
+      if (tenantId) {
+        query = query.eq('tenant_id', tenantId);
+      } else {
+        query = query.eq('user_id', user?.id);
+      }
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:reportsRunId,hypothesisId:'H11',location:'Reports.jsx:fetchScanActivity:scope',message:'Scan activity query scope',data:{tenantId:tenantId||null,userId:user?.id||null,scopeMode,usesTenantFilter:scopeMode==='tenant',usesUserFilter:scopeMode==='user',dateRange},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+
+      const { data, error } = await query;
+
       if (error) throw error;
+      const sampleDates = [...new Set((data || []).map(scan => (scan?.scanned_at || '').slice(0, 10)).filter(Boolean))].slice(0, 5);
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:reportsRunId,hypothesisId:'H11',location:'Reports.jsx:fetchScanActivity:result',message:'Scan activity rows fetched',data:{rows:(data||[]).length,sampleDates},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
 
       // Group by day
       const dailyCounts = {};
@@ -114,6 +130,7 @@ function Reports() {
   const fetchUserPerformance = async () => {
     try {
       const { startDate, endDate } = getDateRange();
+      const reportsRunId = `reports-users-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       
       // Build query - filter by tenant_id if available (shared business account)
       // Otherwise fall back to user_id (for backward compatibility)
@@ -134,6 +151,9 @@ function Reports() {
         query = query.eq('user_id', user?.id);
         console.log('📊 Fetching scans for user:', user?.id);
       }
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:reportsRunId,hypothesisId:'H12',location:'Reports.jsx:fetchUserPerformance:scope',message:'User performance query scope',data:{tenantId:tenantId||null,userId:user?.id||null,scopeMode:tenantId?'tenant':'user',dateRange},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       
       const { data: scans, error: scansError } = await query.order('scanned_at', { ascending: false });
 
@@ -243,6 +263,10 @@ function Reports() {
   const fetchProductPopularity = async () => {
     try {
       const { startDate, endDate } = getDateRange();
+      const reportsRunId = `reports-products-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:reportsRunId,hypothesisId:'H13',location:'Reports.jsx:fetchProductPopularity:scope',message:'Product popularity query scope',data:{tenantId:tenantId||null,userId:user?.id||null,usesTenantFilter:false,usesUserFilter:false,dateRange},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
       
       // Get most scanned products
       const { data: scans, error: scansError } = await supabase
@@ -280,12 +304,24 @@ function Reports() {
   const fetchTimeAnalytics = async () => {
     try {
       const { startDate, endDate } = getDateRange();
-      
-      const { data: scans, error: scansError } = await supabase
+      const reportsRunId = `reports-time-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      let query = supabase
         .from('scan_history')
         .select('scanned_at')
         .gte('scanned_at', startDate.toISOString())
         .lte('scanned_at', endDate.toISOString());
+
+      const scopeMode = tenantId ? 'tenant' : 'user';
+      if (tenantId) {
+        query = query.eq('tenant_id', tenantId);
+      } else {
+        query = query.eq('user_id', user?.id);
+      }
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:reportsRunId,hypothesisId:'H14',location:'Reports.jsx:fetchTimeAnalytics:scope',message:'Time analytics query scope',data:{tenantId:tenantId||null,userId:user?.id||null,scopeMode,usesTenantFilter:scopeMode==='tenant',usesUserFilter:scopeMode==='user',dateRange},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+      
+      const { data: scans, error: scansError } = await query;
 
       if (scansError) throw scansError;
 

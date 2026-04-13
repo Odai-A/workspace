@@ -72,29 +72,44 @@ function Users() {
   const fetchUsers = async () => {
     setIsLoading(true);
     try {
-      console.log('Fetching users from Supabase...');
-      
-      // Fetch users directly from Supabase users table
-      // This will show all users that have profiles in the users table
-      // (including unconfirmed users if the trigger created their profile)
-      const { data: usersData, error: usersError } = await supabase
-        .from('users')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (usersError) {
-        console.error('Error fetching users:', usersError);
-        
-        // If RLS blocks access, provide helpful guidance
-        if (usersError.code === '42501') {
-          toast.error('Permission denied. Please ensure your account has administrator privileges. Verify Row Level Security policies in Supabase if the issue persists.', { autoClose: 10000 });
-        } else {
-          toast.error(`Failed to load user list: ${usersError.message}`);
-        }
-        throw usersError;
+      console.log('Fetching users from backend API...');
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) {
+        toast.error('Authentication required. Please log in again.');
+        setUsers([]);
+        setIsLoading(false);
+        return;
       }
+      const tenantIdFromSession = session?.user?.app_metadata?.tenant_id || null;
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:`users-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,hypothesisId:'H1',location:'Users.jsx:fetchUsers:start',message:'Users page fetch started',data:{currentUserId:currentUser?.id||null,tenantIdFromSession},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+      
+      const response = await fetch(getApiEndpoint('/users'), {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`
+        }
+      });
+
+      if (!response.ok) {
+        let errorMessage = `Failed to load user list (${response.status})`;
+        try {
+          const errPayload = await response.json();
+          errorMessage = errPayload?.error || errPayload?.message || errorMessage;
+        } catch (_) {
+          // Keep fallback
+        }
+        throw new Error(errorMessage);
+      }
+      const payload = await response.json();
+      const usersData = Array.isArray(payload?.users) ? payload.users : [];
 
       console.log('Users fetched:', usersData?.length || 0, 'users');
+      // #region agent log
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:`users-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,hypothesisId:'H2',location:'Users.jsx:fetchUsers:result',message:'Users page fetch completed',data:{usersCount:usersData?.length||0,rolesSummary:[...new Set((usersData||[]).map(u=>u?.role||'unknown'))].slice(0,10)},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
 
       if (!usersData || usersData.length === 0) {
         console.warn('No users found in users table');
@@ -104,13 +119,8 @@ function Users() {
         return;
       }
 
-      // Enrich each user with scan statistics
-      const enrichedUsers = await Promise.all(
-        usersData.map(async (user) => await enrichUserWithStats(user))
-      );
-
-      console.log('Enriched users:', enrichedUsers.length);
-      setUsers(enrichedUsers);
+      // Backend already returns enriched users.
+      setUsers(usersData);
     } catch (error) {
       console.error('Error fetching users:', error);
       console.error('Error details:', {
@@ -120,10 +130,7 @@ function Users() {
         hint: error.hint
       });
       
-      // Don't show duplicate error toast if we already showed one above
-      if (error.code !== '42501') {
-        toast.error(`Failed to load user list: ${error.message || 'An unknown error occurred'}`);
-      }
+      toast.error(`Failed to load user list: ${error.message || 'An unknown error occurred'}`);
     } finally {
       setIsLoading(false);
     }

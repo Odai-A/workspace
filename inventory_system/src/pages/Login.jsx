@@ -15,6 +15,13 @@ const Login = () => {
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
 
+  const handleForgotPasswordClick = (e) => {
+    e.preventDefault();
+    // #region agent log
+    fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:`forgot-${Date.now()}-${Math.random().toString(36).slice(2,8)}`,hypothesisId:'H5',location:'Login.jsx:handleForgotPasswordClick',message:'Forgot password clicked',data:{hasEmailInput:!!email,emailDomain:(email||'').split('@')[1]||''},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -145,7 +152,7 @@ const Login = () => {
               </div>
 
               <div className="text-sm">
-                <a href="#" className="font-medium text-blue-600 hover:text-blue-500">
+                <a href="#" onClick={handleForgotPasswordClick} className="font-medium text-blue-600 hover:text-blue-500">
                   Forgot your password?
                 </a>
               </div>
