@@ -15,6 +15,12 @@ import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, C
 import { mockService } from '../services/mockData';
 import { useAuth } from '../contexts/AuthContext';
 import { getApiUrl, getApiEndpoint } from '../utils/apiConfig';
+import {
+  getLocationOptions,
+  getNextItemNumber,
+  getWarehouseLayoutSettings,
+  isValidLocationCode,
+} from '../utils/warehouseSettings';
 
 /**
  * Scanner component for barcode scanning and product lookup
@@ -70,6 +76,11 @@ const Scanner = () => {
   const [inventoryCondition, setInventoryCondition] = useState('New');
   const [isAddingToInventory, setIsAddingToInventory] = useState(false);
   const [isBulkAddingBatchToInventory, setIsBulkAddingBatchToInventory] = useState(false);
+  const [locationOptions, setLocationOptions] = useState(() => getLocationOptions(getWarehouseLayoutSettings()));
+  const [batchInventoryLocation, setBatchInventoryLocation] = useState(() => {
+    const options = getLocationOptions(getWarehouseLayoutSettings());
+    return options[0] || '';
+  });
   
   // State for scanner: live camera (BarcodeScanner) primary, photo (BarcodeReader) fallback
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -101,6 +112,23 @@ const Scanner = () => {
   const [scanCount, setScanCount] = useState({ used: 0, limit: 50, remaining: 50, isPaid: false, is_ceo_admin: false });
   const [scanCountLoading, setScanCountLoading] = useState(true); // true until we know status — avoids showing trial banner to CEO/admin
   const [isCEOAdmin, setIsCEOAdmin] = useState(false);
+
+  useEffect(() => {
+    const syncLayout = () => {
+      const options = getLocationOptions(getWarehouseLayoutSettings());
+      setLocationOptions(options);
+      setBatchInventoryLocation((prev) => {
+        const normalizedPrev = String(prev || '').trim().toUpperCase();
+        if (normalizedPrev && options.some((loc) => loc.toUpperCase() === normalizedPrev)) {
+          return normalizedPrev;
+        }
+        return options[0] || '';
+      });
+    };
+    syncLayout();
+    window.addEventListener('storage', syncLayout);
+    return () => window.removeEventListener('storage', syncLayout);
+  }, []);
 
   const persistScanCount = (used, limit, remaining) => {
     if (!userId) return;
@@ -478,6 +506,18 @@ const Scanner = () => {
     return false;
   };
 
+  const updateFirstBatchQueueItem = (queue, predicate, updater) => {
+    let updated = false;
+    const nextQueue = queue.map((item) => {
+      if (!updated && predicate(item)) {
+        updated = true;
+        return updater(item);
+      }
+      return item;
+    });
+    return { nextQueue, updated };
+  };
+
   // Helper function to retry scanning a code (used for incomplete scans in batch mode)
   const retryScanInBatch = async (code, retryCount = 0) => {
     const maxRetries = 3;
@@ -487,11 +527,11 @@ const Scanner = () => {
     if (retryCount >= maxRetries) {
       console.log(`⚠️ Max retries reached for ${code}. Marking as failed.`);
       // Update queue item to show it failed
-      setBatchQueue(prev => prev.map(item => 
-        item.code === code 
-          ? { ...item, isProcessing: false, hasFailed: true, retryCount: retryCount }
-          : item
-      ));
+      setBatchQueue((prev) => updateFirstBatchQueueItem(
+        prev,
+        (item) => item.code === code && item.isProcessing,
+        (item) => ({ ...item, isProcessing: false, hasFailed: true, retryCount: retryCount })
+      ).nextQueue);
       setTimeout(() => {
         toast.warning(`Could not retrieve complete data for ${code} after ${maxRetries} retries. You can manually retry later.`, { autoClose: 5000 });
       }, 0);
@@ -543,21 +583,21 @@ const Scanner = () => {
         if (isProductIncomplete(displayableProduct, apiResult)) {
           // Still incomplete, retry again
           console.log(`⏳ Data still incomplete for ${code}, retrying...`);
-          setBatchQueue(prev => prev.map(item => 
-            item.code === code 
-              ? { ...item, isProcessing: true, retryCount: retryCount + 1 }
-              : item
-          ));
+          setBatchQueue((prev) => updateFirstBatchQueueItem(
+            prev,
+            (item) => item.code === code && item.isProcessing,
+            (item) => ({ ...item, isProcessing: true, retryCount: retryCount + 1 })
+          ).nextQueue);
           // Retry again
           await retryScanInBatch(code, retryCount + 1);
         } else {
           // Data is complete! Update the queue item
           console.log(`✅ Complete data retrieved for ${code} on retry ${retryCount + 1}`);
-          setBatchQueue(prev => prev.map(item => 
-            item.code === code 
-              ? { ...item, product: displayableProduct, isProcessing: false, hasFailed: false, retryCount: retryCount + 1 }
-              : item
-          ));
+          setBatchQueue((prev) => updateFirstBatchQueueItem(
+            prev,
+            (item) => item.code === code && item.isProcessing,
+            (item) => ({ ...item, product: displayableProduct, isProcessing: false, hasFailed: false, retryCount: retryCount + 1 })
+          ).nextQueue);
           setTimeout(() => {
             toast.success(`✅ Complete data retrieved for ${code}`, { autoClose: 2000 });
           }, 0);
@@ -565,11 +605,11 @@ const Scanner = () => {
       } else {
         // API returned error, retry
         console.log(`⚠️ API returned error for ${code}, retrying...`);
-        setBatchQueue(prev => prev.map(item => 
-          item.code === code 
-            ? { ...item, isProcessing: true, retryCount: retryCount + 1 }
-            : item
-        ));
+        setBatchQueue((prev) => updateFirstBatchQueueItem(
+          prev,
+          (item) => item.code === code && item.isProcessing,
+          (item) => ({ ...item, isProcessing: true, retryCount: retryCount + 1 })
+        ).nextQueue);
         await retryScanInBatch(code, retryCount + 1);
       }
     } catch (error) {
@@ -583,11 +623,11 @@ const Scanner = () => {
       } else if (isClientError && error.response?.status !== 402) {
         // Don't retry on 402 (payment required) or other client errors
         console.error(`❌ Client error (${error.response?.status}) for ${code}. Stopping retries.`);
-        setBatchQueue(prev => prev.map(item => 
-          item.code === code 
-            ? { ...item, isProcessing: false, hasFailed: true, retryCount: retryCount + 1 }
-            : item
-        ));
+        setBatchQueue((prev) => updateFirstBatchQueueItem(
+          prev,
+          (item) => item.code === code && item.isProcessing,
+          (item) => ({ ...item, isProcessing: false, hasFailed: true, retryCount: retryCount + 1 })
+        ).nextQueue);
         return;
       } else if (isTimeout) {
         console.warn(`⏱️ Timeout for ${code} on retry ${retryCount + 1}. Will retry...`);
@@ -597,19 +637,19 @@ const Scanner = () => {
       
       // Only retry on server errors, timeouts, or network errors (not client errors)
       if (isServerError || isTimeout || !error.response) {
-        setBatchQueue(prev => prev.map(item => 
-          item.code === code 
-            ? { ...item, isProcessing: true, retryCount: retryCount + 1 }
-            : item
-        ));
+        setBatchQueue((prev) => updateFirstBatchQueueItem(
+          prev,
+          (item) => item.code === code && item.isProcessing,
+          (item) => ({ ...item, isProcessing: true, retryCount: retryCount + 1 })
+        ).nextQueue);
         await retryScanInBatch(code, retryCount + 1);
       } else {
         // Client error - stop retrying
-        setBatchQueue(prev => prev.map(item => 
-          item.code === code 
-            ? { ...item, isProcessing: false, hasFailed: true, retryCount: retryCount + 1 }
-            : item
-        ));
+        setBatchQueue((prev) => updateFirstBatchQueueItem(
+          prev,
+          (item) => item.code === code && item.isProcessing,
+          (item) => ({ ...item, isProcessing: false, hasFailed: true, retryCount: retryCount + 1 })
+        ).nextQueue);
       }
     }
   };
@@ -633,14 +673,33 @@ const Scanner = () => {
       };
       
       setBatchQueue(prev => {
-        const idx = prev.findIndex(item => item.code === code);
-        if (idx >= 0) {
-          // Update existing item (e.g. when processing poll returns full data) – same fast path as single scan
-          const updated = [...prev];
-          updated[idx] = { ...updated[idx], product, timestamp: queueItem.timestamp, isProcessing: false, hasFailed: false };
-          toast.success(`Product updated.`, { autoClose: 1000 });
-          return updated;
+        if (!isIncomplete) {
+          // When enriching existing queue items, update first matching code without changing queue order.
+          if (skipAutoInventory) {
+            const byCodeUpdate = updateFirstBatchQueueItem(
+              prev,
+              (item) => item.code === code,
+              (item) => ({ ...item, product, isProcessing: false, hasFailed: false })
+            );
+            if (byCodeUpdate.updated) {
+              toast.success(`Product updated.`, { autoClose: 1000 });
+              return byCodeUpdate.nextQueue;
+            }
+          }
+
+          // For normal scan completion after an earlier "processing" placeholder, update that placeholder in place.
+          const processingUpdate = updateFirstBatchQueueItem(
+            prev,
+            (item) => item.code === code && item.isProcessing,
+            (item) => ({ ...item, product, isProcessing: false, hasFailed: false })
+          );
+          if (processingUpdate.updated) {
+            toast.success(`Product updated.`, { autoClose: 1000 });
+            return processingUpdate.nextQueue;
+          }
         }
+
+        // New scan events are always appended so queue keeps exact scan order, even for duplicate codes.
         const newQueue = [...prev, queueItem];
         if (isIncomplete) {
           // Rely on the same processing poll as single scan (startProcessingPoll) – no separate retry delay
@@ -2325,7 +2384,11 @@ const Scanner = () => {
         }
         setIsApiProcessing(false);
         if (batchModeRef.current) {
-          setBatchQueue(prev => prev.map(item => item.code === codeToPoll ? { ...item, isProcessing: false, hasFailed: true } : item));
+          setBatchQueue((prev) => updateFirstBatchQueueItem(
+            prev,
+            (item) => item.code === codeToPoll && item.isProcessing,
+            (item) => ({ ...item, isProcessing: false, hasFailed: true })
+          ).nextQueue);
           toast.warning(`Could not retrieve data for ${codeToPoll} in time. You can retry from the queue.`, { autoClose: 4000 });
         }
         return;
@@ -2352,7 +2415,11 @@ const Scanner = () => {
           setNotInDatabaseMessage(data.message || "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time.");
           setLastScannedCode(codeToPoll);
           if (batchModeRef.current) {
-            setBatchQueue(prev => prev.map(item => item.code === codeToPoll ? { ...item, isProcessing: false, hasFailed: true } : item));
+            setBatchQueue((prev) => updateFirstBatchQueueItem(
+              prev,
+              (item) => item.code === codeToPoll && item.isProcessing,
+              (item) => ({ ...item, isProcessing: false, hasFailed: true })
+            ).nextQueue);
           }
           toast.warning(data.message || "This product could not be found in our lookup database.", { autoClose: 8000 });
           return;
@@ -2692,7 +2759,7 @@ const Scanner = () => {
       return;
     }
     setInventoryQuantity(1);
-    setInventoryLocation('');
+    setInventoryLocation(locationOptions[0] || '');
     setInventoryCondition('New');
     setShowAddToInventoryModal(true);
   };
@@ -2708,6 +2775,10 @@ const Scanner = () => {
     const qty = parseInt(quantity, 10);
     if (!qty || qty < 1) {
       return { ok: false, message: 'Invalid quantity' };
+    }
+    const normalizedLocation = String(location || '').trim().toUpperCase();
+    if (!normalizedLocation || !isValidLocationCode(normalizedLocation, getWarehouseLayoutSettings())) {
+      return { ok: false, message: 'Select a valid shelf location from your Warehouse Layout settings.' };
     }
 
     let productId = null;
@@ -2757,11 +2828,12 @@ const Scanner = () => {
       sku: pi.fnsku || pi.sku || pi.asin,
       name: pi.name || 'Unknown Product',
       quantity: qty,
-      location: location || 'Default',
+      location: normalizedLocation,
       condition: condition || 'New',
       price: pi.price != null ? Number(pi.price) : 0,
       cost: pi.price != null ? (Number(pi.price) * ((100 - (parseFloat(localStorage.getItem('labelDiscountPercent')) || 50)) / 100)) : 0,
       image_url: imageUrlForInventory,
+      item_number: existingInventory?.item_number || getNextItemNumber(normalizedLocation),
     };
 
     if (productId) {
@@ -2788,6 +2860,10 @@ const Scanner = () => {
       toast.error("Please enter a valid quantity (at least 1)");
       return;
     }
+    if (!inventoryLocation || !isValidLocationCode(inventoryLocation, getWarehouseLayoutSettings())) {
+      toast.error("Please select a valid shelf location");
+      return;
+    }
 
     setIsAddingToInventory(true);
     try {
@@ -2800,7 +2876,7 @@ const Scanner = () => {
         toast.success(`Added to inventory: ${message}`);
         setShowAddToInventoryModal(false);
         setInventoryQuantity(1);
-        setInventoryLocation('');
+        setInventoryLocation(locationOptions[0] || '');
         setInventoryCondition('New');
       } else {
         toast.error(`Failed to add to inventory. ${message || ''}`);
@@ -2813,7 +2889,7 @@ const Scanner = () => {
     }
   };
 
-  /** Add every ready item in batch queue to inventory (qty 1 each, Default / New). */
+  /** Add every ready item in batch queue to inventory (qty 1 each, selected location / New). */
   const handleAddBatchQueueToInventory = async () => {
     const ready = batchQueue.filter(
       (q) => q.product && !q.isProcessing && !q.hasFailed && (q.product.fnsku || q.product.sku || q.product.asin)
@@ -2822,7 +2898,16 @@ const Scanner = () => {
       toast.warning('No completed products in the batch queue to add. Wait for lookups to finish or fix failed rows.');
       return;
     }
-    if (!window.confirm(`Add ${ready.length} product(s) to inventory with quantity 1 each (location: Default, condition: New)?`)) {
+    const targetLocation = String(batchInventoryLocation || '').trim().toUpperCase();
+    if (!targetLocation || !isValidLocationCode(targetLocation, getWarehouseLayoutSettings())) {
+      toast.error('Select a valid location before saving batch scans to inventory.');
+      return;
+    }
+    if (!locationOptions.length) {
+      toast.error('No shelf locations are configured. Set them in Settings > Warehouse Layout Settings.');
+      return;
+    }
+    if (!window.confirm(`Add ${ready.length} product(s) to inventory with quantity 1 each (location: ${targetLocation}, condition: New)?`)) {
       return;
     }
     setIsBulkAddingBatchToInventory(true);
@@ -2832,14 +2917,14 @@ const Scanner = () => {
       for (const q of ready) {
         const { ok } = await addProductInfoToInventory(q.product, {
           quantity: 1,
-          location: 'Default',
+          location: targetLocation,
           condition: 'New',
         });
         if (ok) okCount += 1;
         else failCount += 1;
       }
       if (okCount > 0) {
-        toast.success(`Added ${okCount} product(s) to inventory.${failCount ? ` ${failCount} failed.` : ''}`);
+        toast.success(`Added ${okCount} product(s) to inventory at ${targetLocation}.${failCount ? ` ${failCount} failed.` : ''}`);
       }
       if (failCount > 0 && okCount === 0) {
         toast.error(`Could not add batch to inventory (${failCount} failed). Check login and SKU data.`);
@@ -3012,7 +3097,7 @@ const Scanner = () => {
             <button
               type="button"
               onClick={handleAddBatchQueueToInventory}
-              disabled={isBulkAddingBatchToInventory || isPrintingBatch || batchEnrichAllRunning}
+              disabled={isBulkAddingBatchToInventory || isPrintingBatch || batchEnrichAllRunning || !batchInventoryLocation}
               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50"
             >
               <ShoppingBagIcon className="-ml-1 mr-2 h-5 w-5" />
@@ -3038,6 +3123,33 @@ const Scanner = () => {
           </div>
         )}
       </div>
+
+      {batchMode && (
+        <div className="mb-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
+          <div className="flex flex-col md:flex-row md:items-center gap-3">
+            <label htmlFor="batchInventoryLocation" className="text-sm font-medium text-gray-700 dark:text-gray-200 min-w-fit">
+              Batch save location
+            </label>
+            <select
+              id="batchInventoryLocation"
+              name="batchInventoryLocation"
+              value={batchInventoryLocation}
+              onChange={(e) => setBatchInventoryLocation(e.target.value)}
+              className="block w-full md:w-72 pl-3 pr-10 py-2 text-sm border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 rounded-md"
+            >
+              <option value="">Select shelf/row location</option>
+              {locationOptions.map((locationCode) => (
+                <option key={`batch-${locationCode}`} value={locationCode}>
+                  {locationCode}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-600 dark:text-gray-300">
+              Pick location first, then scan in batch mode. "Add all to inventory" saves every scanned item to this location.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Batch Queue Display */}
       {batchMode && batchQueue.length > 0 && (
@@ -3729,18 +3841,27 @@ const Scanner = () => {
 
             <div className="mb-4">
               <label htmlFor="inventoryLocation" className="block text-sm font-medium text-gray-700 mb-1">
-                Location
+                Location <span className="text-red-500">*</span>
               </label>
-              <input
-                type="text"
+              <select
                 id="inventoryLocation"
                 name="inventoryLocation"
                 value={inventoryLocation}
                 onChange={(e) => setInventoryLocation(e.target.value)}
-                placeholder="e.g., Warehouse A, Shelf 3"
                 className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
                 disabled={isAddingToInventory}
-              />
+                required
+              >
+                <option value="">Select shelf location</option>
+                {locationOptions.map((locationCode) => (
+                  <option key={locationCode} value={locationCode}>
+                    {locationCode}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-gray-500">
+                Manage shelves/rows in Settings {'>'} Warehouse Layout Settings.
+              </p>
             </div>
 
             <div className="mb-4">
@@ -3774,7 +3895,7 @@ const Scanner = () => {
                 onClick={() => {
                   setShowAddToInventoryModal(false);
                   setInventoryQuantity(1);
-                  setInventoryLocation('');
+                  setInventoryLocation(locationOptions[0] || '');
                   setInventoryCondition('New');
                 }}
                 disabled={isAddingToInventory}
@@ -3785,7 +3906,7 @@ const Scanner = () => {
                 type="button"
                 className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
                 onClick={handleAddToInventory}
-                disabled={isAddingToInventory || !inventoryQuantity || inventoryQuantity < 1}
+                disabled={isAddingToInventory || !inventoryQuantity || inventoryQuantity < 1 || !inventoryLocation}
               >
                 {isAddingToInventory ? 'Adding...' : 'Add to Inventory'}
               </button>

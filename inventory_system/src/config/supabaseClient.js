@@ -235,6 +235,9 @@ export const inventoryService = {
       user_id: userId,
       hidden_from_inventory_list: false,
     };
+    if (item.item_number) {
+      cleanItem.item_number = item.item_number;
+    }
     if (useTenantColumn && tenantId != null) cleanItem.tenant_id = tenantId;
     
     // Only add product_id if it exists and is valid
@@ -301,6 +304,9 @@ export const inventoryService = {
           // If both have quantity, add them together
           updateData.quantity = (existingData.quantity || 0) + (cleanItem.quantity || 0);
         }
+        if (!updateData.item_number && existingData.item_number) {
+          updateData.item_number = existingData.item_number;
+        }
         // Show again in inventory list if it was previously soft-removed
         updateData.hidden_from_inventory_list = false;
         
@@ -316,9 +322,20 @@ export const inventoryService = {
           updateQuery = updateQuery.eq('user_id', userId);
         }
         
-        const { data, error } = await updateQuery
+        let { data, error } = await updateQuery
           .select()
           .single();
+        if (error && updateData.item_number && /item_number/i.test(error.message || '')) {
+          const fallbackData = { ...updateData };
+          delete fallbackData.item_number;
+          let retryQuery = supabase
+            .from('inventory')
+            .update(fallbackData)
+            .eq('sku', skuValue);
+          if (useTenantColumn && tenantId) retryQuery = retryQuery.eq('tenant_id', tenantId);
+          else retryQuery = retryQuery.eq('user_id', userId);
+          ({ data, error } = await retryQuery.select().single());
+        }
         
         if (error) {
           this.lastInventoryError = error.message || 'Update failed';
@@ -330,11 +347,20 @@ export const inventoryService = {
         console.log('✅ Successfully updated inventory item:', result);
       } else {
         // Insert new item (user_id is already set in cleanItem)
-        const { data, error } = await supabase
+        let { data, error } = await supabase
           .from('inventory')
           .insert(cleanItem)
           .select()
           .single();
+        if (error && cleanItem.item_number && /item_number/i.test(error.message || '')) {
+          const fallbackItem = { ...cleanItem };
+          delete fallbackItem.item_number;
+          ({ data, error } = await supabase
+            .from('inventory')
+            .insert(fallbackItem)
+            .select()
+            .single());
+        }
         
         if (error) {
           this.lastInventoryError = error.message || 'Insert failed';

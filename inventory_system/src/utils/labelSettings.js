@@ -3,6 +3,8 @@
  */
 
 const DEFAULT_DISCOUNT_PERCENT = 50; // 50% off by default
+export const LABEL_PRINTER_PROFILES = ['4x6', '2inch'];
+const DEFAULT_LABEL_PRINTER_PROFILE = '4x6';
 
 /**
  * Get the discount percentage for label printing
@@ -41,6 +43,29 @@ export const calculateSellingPrice = (retailPrice, discountPercent = null) => {
   const discount = discountPercent !== null ? discountPercent : getLabelDiscountPercent();
   const discountMultiplier = (100 - discount) / 100;
   return retail * discountMultiplier;
+};
+
+/**
+ * Get the default printer profile for labels
+ * @returns {'4x6' | '2inch'}
+ */
+export const getLabelPrinterProfile = () => {
+  const saved = localStorage.getItem('labelPrinterProfile');
+  if (saved && LABEL_PRINTER_PROFILES.includes(saved)) {
+    return saved;
+  }
+  return DEFAULT_LABEL_PRINTER_PROFILE;
+};
+
+/**
+ * Save the default printer profile for labels
+ * @param {string} profile
+ * @returns {'4x6' | '2inch'}
+ */
+export const setLabelPrinterProfile = (profile) => {
+  const next = LABEL_PRINTER_PROFILES.includes(profile) ? profile : DEFAULT_LABEL_PRINTER_PROFILE;
+  localStorage.setItem('labelPrinterProfile', next);
+  return next;
 };
 
 

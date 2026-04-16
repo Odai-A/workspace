@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   XMarkIcon,
   ArrowDownTrayIcon,
@@ -9,17 +9,29 @@ import {
 import Modal from '../ui/Modal';
 import Button from '../ui/Button';
 import { toast } from 'react-toastify';
+import { getLabelPrinterProfile } from '../../utils/labelSettings';
+import { getLocationOptions, getWarehouseLayoutSettings } from '../../utils/warehouseSettings';
 
 const AddStockModal = ({ isOpen, onClose, onAddItems }) => {
   const [activeTab, setActiveTab] = useState('manual'); // 'manual' or 'import'
   const [items, setItems] = useState([{ sku: '', name: '', quantity: 1, location: '', category: '' }]);
   const [importedItems, setImportedItems] = useState([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [printLabels, setPrintLabels] = useState(true);
+  const [labelPrinterProfile, setLabelPrinterProfile] = useState(() => getLabelPrinterProfile());
+  const [labelCopyMode, setLabelCopyMode] = useState('one_per_item');
+  const [locationOptions, setLocationOptions] = useState(() => getLocationOptions(getWarehouseLayoutSettings()));
   const fileInputRef = useRef(null);
   
-  // Sample locations and categories - in a real app, these would be fetched from the API
-  const locations = ['Warehouse A', 'Warehouse B', 'Warehouse C', 'Warehouse D'];
+  // Categories can be customized later from settings.
   const categories = ['Smart Speakers', 'Streaming Devices', 'E-readers', 'Smart Home', 'Tablets'];
+
+  useEffect(() => {
+    const syncLocations = () => setLocationOptions(getLocationOptions(getWarehouseLayoutSettings()));
+    syncLocations();
+    window.addEventListener('storage', syncLocations);
+    return () => window.removeEventListener('storage', syncLocations);
+  }, []);
 
   // Handle adding a new item row in manual entry
   const handleAddItemRow = () => {
@@ -201,7 +213,7 @@ const AddStockModal = ({ isOpen, onClose, onAddItems }) => {
       }));
       
       // Pass the items to the parent component which will handle persistence
-      await onAddItems(processedItems);
+      await onAddItems(processedItems, { printLabels, labelPrinterProfile, labelCopyMode });
       
       // Reset form and close modal
       setItems([{ sku: '', name: '', quantity: 1, location: '', category: '' }]);
@@ -236,7 +248,7 @@ const AddStockModal = ({ isOpen, onClose, onAddItems }) => {
       }));
       
       // Pass the items to the parent component which will handle persistence
-      await onAddItems(processedItems);
+      await onAddItems(processedItems, { printLabels, labelPrinterProfile, labelCopyMode });
       
       // Reset form and close modal
       setImportedItems([]);
@@ -279,6 +291,9 @@ const AddStockModal = ({ isOpen, onClose, onAddItems }) => {
     setItems([{ sku: '', name: '', quantity: 1, location: '', category: '' }]);
     setImportedItems([]);
     setActiveTab('manual');
+    setPrintLabels(true);
+    setLabelPrinterProfile(getLabelPrinterProfile());
+    setLabelCopyMode('one_per_item');
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
@@ -378,7 +393,7 @@ const AddStockModal = ({ isOpen, onClose, onAddItems }) => {
                     required
                   >
                     <option value="">Select Location</option>
-                    {locations.map((location) => (
+                    {locationOptions.map((location) => (
                       <option key={location} value={location}>
                         {location}
                       </option>
@@ -560,6 +575,41 @@ const AddStockModal = ({ isOpen, onClose, onAddItems }) => {
           </div>
         </div>
       )}
+      <div className="mt-5 border-t border-gray-200 pt-4">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <label className="inline-flex items-center text-sm text-gray-700">
+            <input
+              type="checkbox"
+              className="mr-2 h-4 w-4"
+              checked={printLabels}
+              onChange={(e) => setPrintLabels(e.target.checked)}
+            />
+            Print labels immediately after adding inventory
+          </label>
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-gray-600">Printer profile:</span>
+            <select
+              value={labelPrinterProfile}
+              onChange={(e) => setLabelPrinterProfile(e.target.value)}
+              className="border border-gray-300 rounded-md px-2 py-1 text-sm"
+            >
+              <option value="4x6">4x6 Label Printer</option>
+              <option value="2inch">2-inch Zebra QLn220</option>
+            </select>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-gray-600">Copies:</span>
+            <select
+              value={labelCopyMode}
+              onChange={(e) => setLabelCopyMode(e.target.value)}
+              className="border border-gray-300 rounded-md px-2 py-1 text-sm"
+            >
+              <option value="one_per_item">1 label per item row</option>
+              <option value="per_quantity">Match quantity (1 label per unit)</option>
+            </select>
+          </div>
+        </div>
+      </div>
     </Modal>
   );
 };

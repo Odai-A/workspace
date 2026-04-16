@@ -8,6 +8,15 @@ import { supabase } from '../config/supabaseClient';
 import axios from 'axios';
 import { getApiEndpoint } from '../utils/apiConfig';
 import FacebookIntegration from '../components/FacebookIntegration';
+import {
+  getLabelPrinterProfile,
+  setLabelPrinterProfile,
+} from '../utils/labelSettings';
+import {
+  getWarehouseLayoutSettings,
+  sanitizeWarehouseLayout,
+  setWarehouseLayoutSettings,
+} from '../utils/warehouseSettings';
 
 // Toggle switch component
 const Toggle = ({ enabled, onChange, label, description }) => {
@@ -84,6 +93,8 @@ const Settings = () => {
     const saved = localStorage.getItem('labelDiscountPercent');
     return saved ? parseFloat(saved) : 50; // Default 50% off
   });
+  const [labelPrinterProfile, setLabelPrinterProfileState] = useState(() => getLabelPrinterProfile());
+  const [warehouseLayout, setWarehouseLayout] = useState(() => getWarehouseLayoutSettings());
   
   // Contact support state
   const [contactForm, setContactForm] = useState({
@@ -215,6 +226,12 @@ const Settings = () => {
       console.error('Error sending password reset:', error);
       toast.error('Failed to send password reset email. Please try again.');
     }
+  };
+
+  const handleSaveWarehouseLayout = () => {
+    const saved = setWarehouseLayoutSettings(warehouseLayout);
+    setWarehouseLayout(saved);
+    toast.success('Warehouse layout settings saved.');
   };
 
   return (
@@ -404,7 +421,9 @@ const Settings = () => {
                   <button
                     onClick={() => {
                       localStorage.setItem('labelDiscountPercent', labelDiscountPercent.toString());
-                      toast.success(`Label discount set to ${labelDiscountPercent}% off retail`);
+                      const profile = setLabelPrinterProfile(labelPrinterProfile);
+                      setLabelPrinterProfileState(profile);
+                      toast.success(`Label settings saved (${labelDiscountPercent}% off, ${profile === '2inch' ? '2-inch' : '4x6'} default profile).`);
                     }}
                     className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 flex items-center"
                   >
@@ -417,6 +436,126 @@ const Settings = () => {
                   Example: {labelDiscountPercent}% off means a $100 retail price will show as ${(100 * (100 - labelDiscountPercent) / 100).toFixed(2)} on the label.
                 </p>
               </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Default Label Printer Profile
+                </label>
+                <select
+                  value={labelPrinterProfile}
+                  onChange={(e) => setLabelPrinterProfileState(e.target.value)}
+                  className="w-56 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
+                >
+                  <option value="4x6">4x6 Label Printer</option>
+                  <option value="2inch">2-inch Zebra QLn220</option>
+                </select>
+                <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                  This is the default profile used when printing labels. You can still override it during add-to-inventory workflows.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Warehouse Layout Settings */}
+        <div className="bg-white dark:bg-gray-800 shadow rounded-lg overflow-hidden mb-6">
+          <div className="p-6">
+            <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4 flex items-center">
+              <FiSave className="mr-2" />
+              Warehouse Layout Settings
+            </h2>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+              Configure shelf/row/bin structure per customer without code changes. Inventory location dropdowns are generated from these values.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Shelves
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="999"
+                  value={warehouseLayout.shelves}
+                  onChange={(e) => setWarehouseLayout((prev) => sanitizeWarehouseLayout({ ...prev, shelves: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Rows Per Shelf
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="999"
+                  value={warehouseLayout.rowsPerShelf}
+                  onChange={(e) => setWarehouseLayout((prev) => sanitizeWarehouseLayout({ ...prev, rowsPerShelf: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Bins Per Row (optional)
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  max="999"
+                  value={warehouseLayout.binsPerRow}
+                  onChange={(e) => setWarehouseLayout((prev) => sanitizeWarehouseLayout({ ...prev, binsPerRow: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Shelf Prefix
+                </label>
+                <input
+                  type="text"
+                  maxLength="3"
+                  value={warehouseLayout.shelfPrefix}
+                  onChange={(e) => setWarehouseLayout((prev) => sanitizeWarehouseLayout({ ...prev, shelfPrefix: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white uppercase"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Row Prefix
+                </label>
+                <input
+                  type="text"
+                  maxLength="3"
+                  value={warehouseLayout.rowPrefix}
+                  onChange={(e) => setWarehouseLayout((prev) => sanitizeWarehouseLayout({ ...prev, rowPrefix: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white uppercase"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Bin Prefix
+                </label>
+                <input
+                  type="text"
+                  maxLength="3"
+                  value={warehouseLayout.binPrefix}
+                  onChange={(e) => setWarehouseLayout((prev) => sanitizeWarehouseLayout({ ...prev, binPrefix: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white uppercase"
+                />
+              </div>
+            </div>
+            <div className="mt-4 flex items-center justify-between gap-4">
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Example generated location: {warehouseLayout.shelfPrefix}1-{warehouseLayout.rowPrefix}1{warehouseLayout.binsPerRow > 0 ? `-${warehouseLayout.binPrefix}1` : ''}
+              </p>
+              <button
+                onClick={handleSaveWarehouseLayout}
+                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 flex items-center"
+              >
+                <FiSave className="mr-2" />
+                Save Layout
+              </button>
             </div>
           </div>
         </div>
