@@ -62,6 +62,8 @@ const Scanner = () => {
   const [batchMode, setBatchMode] = useState(false);
   const [batchQueue, setBatchQueue] = useState([]);
   const [isPrintingBatch, setIsPrintingBatch] = useState(false);
+  const [isPrintingBatchBarcode, setIsPrintingBatchBarcode] = useState(false);
+  const batchSequenceRef = useRef(1);
 
   // State for manual barcode input (from existing code)
   const [manualBarcode, setManualBarcode] = useState('');
@@ -73,6 +75,7 @@ const Scanner = () => {
   const [showAddToInventoryModal, setShowAddToInventoryModal] = useState(false);
   const [inventoryQuantity, setInventoryQuantity] = useState(1);
   const [inventoryLocation, setInventoryLocation] = useState('');
+  const [inventoryBucket, setInventoryBucket] = useState('');
   const [inventoryCondition, setInventoryCondition] = useState('New');
   const [isAddingToInventory, setIsAddingToInventory] = useState(false);
   const [isBulkAddingBatchToInventory, setIsBulkAddingBatchToInventory] = useState(false);
@@ -81,6 +84,7 @@ const Scanner = () => {
     const options = getLocationOptions(getWarehouseLayoutSettings());
     return options[0] || '';
   });
+  const [batchInventoryBucket, setBatchInventoryBucket] = useState('');
   
   // State for scanner: live camera (BarcodeScanner) primary, photo (BarcodeReader) fallback
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -113,6 +117,32 @@ const Scanner = () => {
   const [scanCountLoading, setScanCountLoading] = useState(true); // true until we know status — avoids showing trial banner to CEO/admin
   const [isCEOAdmin, setIsCEOAdmin] = useState(false);
 
+  const buildScanAxiosConfig = (extra = {}) => {
+    const token = session?.access_token;
+    const headers = { ...(extra.headers || {}) };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    return { ...extra, headers };
+  };
+
+  const formatScanHttpError = (error) => {
+    if (!error.response) {
+      return error.message || 'Network error';
+    }
+    const status = error.response.status;
+    const data = error.response.data;
+    if (typeof data === 'string') {
+      const trimmed = data.replace(/\s+/g, ' ').trim().slice(0, 280);
+      return trimmed ? `Server error (${status}): ${trimmed}` : `Server error (${status})`;
+    }
+    if (data && typeof data === 'object') {
+      const msg = data.message || data.error || data.msg || data.detail;
+      if (msg) return typeof msg === 'string' ? msg : JSON.stringify(msg);
+    }
+    return `Request failed (${status})`;
+  };
+
   useEffect(() => {
     const syncLayout = () => {
       const options = getLocationOptions(getWarehouseLayoutSettings());
@@ -129,6 +159,19 @@ const Scanner = () => {
     window.addEventListener('storage', syncLayout);
     return () => window.removeEventListener('storage', syncLayout);
   }, []);
+
+  const normalizeBucketCode = (value) =>
+    String(value || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9-]/g, '');
+
+  const composeStorageLocation = (baseLocation, bucketCode = '') => {
+    const normalizedBase = String(baseLocation || '').trim().toUpperCase();
+    const normalizedBucket = normalizeBucketCode(bucketCode);
+    if (!normalizedBucket) return normalizedBase;
+    return `${normalizedBase}-${normalizedBucket}`;
+  };
 
   const persistScanCount = (used, limit, remaining) => {
     if (!userId) return;
@@ -548,9 +591,9 @@ const Scanner = () => {
       const response = await axios.post(scanUrl, {
         code: code.toUpperCase(),
         user_id: userId
-      }, {
+      }, buildScanAxiosConfig({
         timeout: 60000
-      });
+      }));
       
       const apiResult = response.data;
       
@@ -667,36 +710,35 @@ const Scanner = () => {
         code: code,
         product: product,
         timestamp: new Date().toISOString(),
+        sequence: batchSequenceRef.current++,
         isProcessing: isIncomplete,
         hasFailed: false,
         retryCount: 0
       };
       
       setBatchQueue(prev => {
-        if (!isIncomplete) {
-          // When enriching existing queue items, update first matching code without changing queue order.
-          if (skipAutoInventory) {
-            const byCodeUpdate = updateFirstBatchQueueItem(
-              prev,
-              (item) => item.code === code,
-              (item) => ({ ...item, product, isProcessing: false, hasFailed: false })
-            );
-            if (byCodeUpdate.updated) {
-              toast.success(`Product updated.`, { autoClose: 1000 });
-              return byCodeUpdate.nextQueue;
-            }
-          }
-
-          // For normal scan completion after an earlier "processing" placeholder, update that placeholder in place.
-          const processingUpdate = updateFirstBatchQueueItem(
+        // When enriching existing queue items, update first matching code without changing queue order.
+        if (skipAutoInventory) {
+          const byCodeUpdate = updateFirstBatchQueueItem(
             prev,
-            (item) => item.code === code && item.isProcessing,
-            (item) => ({ ...item, product, isProcessing: false, hasFailed: false })
+            (item) => item.code === code,
+            (item) => ({ ...item, product, isProcessing: isIncomplete, hasFailed: false })
           );
-          if (processingUpdate.updated) {
+          if (byCodeUpdate.updated) {
             toast.success(`Product updated.`, { autoClose: 1000 });
-            return processingUpdate.nextQueue;
+            return byCodeUpdate.nextQueue;
           }
+        }
+
+        // For normal scan completion after an earlier placeholder, update that placeholder in place.
+        const processingUpdate = updateFirstBatchQueueItem(
+          prev,
+          (item) => item.code === code && item.isProcessing,
+          (item) => ({ ...item, product, isProcessing: isIncomplete, hasFailed: false })
+        );
+        if (processingUpdate.updated) {
+          toast.success(`Product updated.`, { autoClose: 1000 });
+          return processingUpdate.nextQueue;
         }
 
         // New scan events are always appended so queue keeps exact scan order, even for duplicate codes.
@@ -732,12 +774,72 @@ const Scanner = () => {
     }
   };
 
+  const tryLocalFallbackLookup = async (code, options = {}) => {
+    const { skipAutoInventory = false, silent = false } = options;
+    const normalizedCode = String(code || '').trim().toUpperCase();
+    if (!normalizedCode) return false;
+
+    // 1) Fast path: api_lookup_cache (same user-visible shape as scanner product card)
+    const cachedRow = await apiCacheService.getCachedLookup(normalizedCode);
+    if (cachedRow) {
+      const cachedProduct = apiCacheService.mapCacheRowToProductInfo(cachedRow);
+      if (cachedProduct) {
+        await handleProductFound(cachedProduct, normalizedCode, { cached: true, source: 'api_lookup_cache' }, { skipAutoInventory });
+        if (!silent) {
+          toast.info(`Loaded ${normalizedCode} from cache while backend is unavailable.`, { autoClose: 2500 });
+        }
+        return true;
+      }
+    }
+
+    // 2) Fallback: current user's manifest_data rows
+    const manifestProduct = await dbProductLookupService.getProductByFnsku(normalizedCode);
+    if (manifestProduct) {
+      const displayableProduct = {
+        fnsku: manifestProduct.fnsku || normalizedCode,
+        asin: manifestProduct.asin || '',
+        name: manifestProduct.name || manifestProduct.description || normalizedCode,
+        image_url: manifestProduct.image_url || '',
+        images: manifestProduct.image_url ? [manifestProduct.image_url] : [],
+        videos: [],
+        price: manifestProduct.price || '',
+        category: manifestProduct.category || '',
+        description: manifestProduct.description || manifestProduct.name || '',
+        upc: manifestProduct.upc || '',
+        source: manifestProduct.source || 'local_database',
+        cost_status: 'no_charge',
+      };
+      await handleProductFound(displayableProduct, normalizedCode, { source: 'manifest_data' }, { skipAutoInventory });
+      if (!silent) {
+        toast.info(`Loaded ${normalizedCode} from local database while backend is unavailable.`, { autoClose: 2500 });
+      }
+      return true;
+    }
+
+    return false;
+  };
+
   async function lookupProductByCode(code, options = {}) {
     const forceApiLookup = options.forceApiLookup === true;
     const suppressBatchItemToast = options.suppressBatchItemToast === true;
     // Ensure code is uppercase (safety measure)
     const upperCode = code.trim().toUpperCase();
     console.log(`🔍 Looking up product by code: ${upperCode}, UserID: ${userId || 'N/A'}, Batch Mode: ${batchMode}, forceApiLookup: ${forceApiLookup}`);
+
+    if (!userId || !session?.access_token) {
+      toast.error(
+        'You must be signed in to scan. Wait until the app finishes loading, then try again.',
+        { autoClose: 6000 }
+      );
+      if (forceApiLookup) {
+        setApiEnrichLoading(false);
+        setBatchForceLookupCode(null);
+      } else {
+        setLoading(false);
+      }
+      return;
+    }
+
     if (forceApiLookup) {
       if (batchMode) {
         setBatchForceLookupCode(upperCode);
@@ -749,6 +851,22 @@ const Scanner = () => {
     }
     if (!batchMode && !forceApiLookup) {
       setProductInfo(null); // Clear previous product info only in normal mode
+    }
+    if (batchMode && !forceApiLookup) {
+      // Reserve queue position immediately so print order matches scan order.
+      setBatchQueue((prev) => ([
+        ...prev,
+        {
+          id: Date.now() + Math.random(),
+          code: upperCode,
+          product: null,
+          timestamp: new Date().toISOString(),
+          sequence: batchSequenceRef.current++,
+          isProcessing: true,
+          hasFailed: false,
+          retryCount: 0,
+        },
+      ]));
     }
     setIsApiProcessing(false); // Reset processing state
     setNotInDatabaseMessage(null); // Clear "not in database" message when starting a new lookup
@@ -789,9 +907,9 @@ const Scanner = () => {
           code: upperCode,
           user_id: userId,
           ...(forceApiLookup ? { force_api_lookup: true } : {})
-        }, {
+        }, buildScanAxiosConfig({
           timeout: 60000 // 60 seconds timeout
-        });
+        }));
         
         const apiResult = response.data;
         console.log("🚀 Backend scan response:", apiResult);
@@ -931,6 +1049,13 @@ const Scanner = () => {
         }
       } catch (error) {
         console.error("Error calling backend scan endpoint:", error);
+        const recoveredLocally = await tryLocalFallbackLookup(upperCode, {
+          skipAutoInventory: forceApiLookup,
+          silent: suppressBatchItemToast,
+        });
+        if (recoveredLocally) {
+          return;
+        }
         if (error.response) {
           const status = error.response.status;
           const data = error.response.data || {};
@@ -991,8 +1116,8 @@ const Scanner = () => {
               }
             });
           } else {
-            const errorMsg = data.message || data.error || "Backend error";
-            toast.error(`${errorMsg}`, { autoClose: 5000 });
+            const errorMsg = formatScanHttpError(error);
+            toast.error(errorMsg, { autoClose: 5000 });
           }
         } else if (error.code === 'ECONNABORTED') {
           toast.error("Request timeout: The scan operation is taking longer than expected. Please try again.", { autoClose: 5000 });
@@ -1249,6 +1374,184 @@ const Scanner = () => {
     }, 800);
     
     toast.success("🖨️ Opening print dialog for 4x6 label");
+  };
+
+  const BASIC_INVENTORY_LABEL_WIDTH = '1.59in';
+  const BASIC_INVENTORY_LABEL_HEIGHT = '1in';
+
+  const stripLocationPrefixFromItemNumber = (itemNumber, location) => {
+    const rawItem = String(itemNumber || '').trim();
+    const rawLocation = String(location || '').trim();
+    if (!rawItem || !rawLocation) return rawItem;
+
+    const normalizedItem = rawItem.toUpperCase();
+    const normalizedLocation = rawLocation.toUpperCase();
+    const locationPrefix = `${normalizedLocation}-`;
+
+    if (normalizedItem.startsWith(locationPrefix)) {
+      return rawItem.slice(rawLocation.length + 1).trim();
+    }
+    return rawItem;
+  };
+
+  const truncateToWordCount = (value, maxWords = 5) => {
+    const words = String(value || '').trim().split(/\s+/).filter(Boolean);
+    if (words.length === 0) return '';
+    return words.slice(0, maxWords).join(' ');
+  };
+
+  const getProductCodeForLabel = (product) =>
+    product?.asin || product?.upc || product?.fnsku || product?.code || '';
+
+  const createBarcodeLabelHTML = (product) => {
+    const productCode = getProductCodeForLabel(product);
+    const productName = escapeHtml(product?.name || 'Product');
+    const codeLabel = escapeHtml(productCode || 'N/A');
+    const barcodeValue = JSON.stringify(String(productCode || ''));
+    return `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Barcode Label - ${codeLabel}</title>
+          <style>
+            @page {
+              size: 2in 1in;
+              margin: 0;
+            }
+            * {
+              box-sizing: border-box;
+              font-family: Arial, sans-serif;
+            }
+            html, body {
+              margin: 0;
+              padding: 0;
+              width: 2in;
+              height: 1in;
+            }
+            body {
+              display: flex;
+              align-items: stretch;
+              justify-content: stretch;
+              background: #fff;
+            }
+            .label {
+              width: 2in;
+              height: 1in;
+              padding: 0.04in;
+              display: flex;
+              flex-direction: column;
+              justify-content: space-between;
+              border: 1px solid #111827;
+              overflow: hidden;
+            }
+            .title {
+              font-size: 7pt;
+              line-height: 1.1;
+              font-weight: 700;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+            }
+            .barcode-wrap {
+              height: 0.42in;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              overflow: hidden;
+            }
+            #barcode {
+              width: 100%;
+              height: 100%;
+            }
+            .code {
+              font-size: 8pt;
+              font-weight: 700;
+              text-align: center;
+              line-height: 1;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+            }
+            .print-button {
+              position: fixed;
+              top: 12px;
+              right: 12px;
+              padding: 8px 12px;
+              border: none;
+              border-radius: 6px;
+              background: #2563eb;
+              color: #fff;
+              cursor: pointer;
+              z-index: 1000;
+            }
+            @media print {
+              .no-print { display: none; }
+              html, body {
+                width: 2in !important;
+                height: 1in !important;
+              }
+            }
+          </style>
+          <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+        </head>
+        <body>
+          <div class="no-print">
+            <button class="print-button" onclick="window.print()">Print Label</button>
+          </div>
+          <div class="label">
+            <div class="title">${productName}</div>
+            <div class="barcode-wrap">
+              <svg id="barcode"></svg>
+            </div>
+            <div class="code">${codeLabel}</div>
+          </div>
+          <script>
+            (function () {
+              const value = ${barcodeValue};
+              if (!value) return;
+              try {
+                JsBarcode("#barcode", value, {
+                  format: "CODE128",
+                  displayValue: false,
+                  margin: 0,
+                  height: 34,
+                  width: 1.2
+                });
+              } catch (e) {
+                const el = document.getElementById("barcode");
+                if (el) {
+                  el.outerHTML = '<div style="font-size:8pt;color:#b91c1c;text-align:center;">Invalid barcode value</div>';
+                }
+              }
+            })();
+          </script>
+        </body>
+      </html>
+    `;
+  };
+
+  const handlePrintBarcodeLabel = (product = productInfo) => {
+    if (!product) {
+      toast.error("No product information available to print barcode label");
+      return;
+    }
+    const productCode = getProductCodeForLabel(product);
+    if (!productCode) {
+      toast.error("No product code available for barcode label");
+      return;
+    }
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      toast.error("Could not open print window. Check popup blocker settings.");
+      return;
+    }
+    printWindow.document.write(createBarcodeLabelHTML(product));
+    printWindow.document.close();
+    setTimeout(() => {
+      printWindow.focus();
+      printWindow.print();
+    }, 700);
+    toast.success("🖨️ Opening print dialog for barcode label");
   };
 
   // Helper function to create label HTML
@@ -1839,6 +2142,145 @@ const Scanner = () => {
     `;
   };
 
+  const createBatchBarcodeLabelHTML = (batchItems) => {
+    const fallbackLocation = composeStorageLocation(batchInventoryLocation, batchInventoryBucket) || 'UNASSIGNED';
+    const normalizedItems = (batchItems || []).map((item) => ({
+      name: item?.product?.name || 'Unknown Product',
+      fnsku: item?.product?.fnsku || item?.product?.code || item?.code || '',
+      location: item?.product?.location || fallbackLocation,
+      item_number: item?.product?.item_number || item?.product?.itemNumber || '',
+    }));
+    const labels = normalizedItems.map((item) => ({
+      name: escapeHtml(truncateToWordCount(item?.name || item?.Description || 'Unknown Product', 5)),
+      fnsku: escapeHtml(item?.fnsku || item?.['Fn Sku'] || item?.FNSKU || item?._rawData?.fnsku || 'N/A'),
+      location: escapeHtml(item?.location || item?.Location || item?._rawData?.location || 'UNASSIGNED'),
+      itemNumber: escapeHtml(
+        stripLocationPrefixFromItemNumber(
+          item?.item_number || item?.itemNumber || item?.['Item Number'] || item?._rawData?.item_number || 'N/A',
+          item?.location || item?.Location || item?._rawData?.location || ''
+        ) || 'N/A'
+      ),
+    }));
+
+    if (labels.length === 0) {
+      return '<html><body><p>No labels to print.</p></body></html>';
+    }
+
+    const pages = labels.map((label) => `
+      <div class="label-root">
+        <div class="label-frame">
+          <div class="label-title">${label.name}</div>
+          <div class="label-meta">FNSKU: ${label.fnsku}</div>
+          <div class="label-meta label-meta-strong">LOC: ${label.location}</div>
+          <div class="label-meta label-meta-strong">ITEM: ${label.itemNumber}</div>
+        </div>
+      </div>
+    `).join('');
+
+    return `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Inventory Labels</title>
+          <style>
+            @page {
+              size: ${BASIC_INVENTORY_LABEL_WIDTH} ${BASIC_INVENTORY_LABEL_HEIGHT};
+              margin: 0;
+            }
+
+            * { box-sizing: border-box; font-family: Arial, sans-serif; }
+            html, body {
+              margin: 0;
+              padding: 0;
+              background: #fff;
+            }
+
+            .label-root {
+              width: ${BASIC_INVENTORY_LABEL_WIDTH};
+              height: ${BASIC_INVENTORY_LABEL_HEIGHT};
+              margin: 0;
+              padding: 0;
+              overflow: hidden;
+              page-break-after: always;
+              break-after: page;
+              position: relative;
+            }
+
+            .label-root:last-child {
+              page-break-after: auto;
+              break-after: auto;
+            }
+
+            .label-frame {
+              position: absolute;
+              inset: 0;
+              padding: 0.05in 0.04in 0.04in 0.025in;
+              display: flex;
+              flex-direction: column;
+              justify-content: flex-start;
+              align-items: stretch;
+              text-align: left;
+              gap: 0.02in;
+              overflow: hidden;
+            }
+
+            .label-title {
+              font-size: 8pt;
+              line-height: 1.12;
+              font-weight: 600;
+              margin: 0;
+              display: -webkit-box;
+              -webkit-line-clamp: 2;
+              -webkit-box-orient: vertical;
+              overflow: hidden;
+              word-break: break-word;
+            }
+
+            .label-meta {
+              font-size: 8.8pt;
+              line-height: 1.15;
+              margin: 0;
+              white-space: nowrap;
+              overflow: hidden;
+              text-overflow: ellipsis;
+              font-weight: 500;
+            }
+
+            .label-meta-strong {
+              font-size: 10.4pt;
+              line-height: 1.16;
+              font-weight: 600;
+            }
+
+            @media print {
+              html, body {
+                width: ${BASIC_INVENTORY_LABEL_WIDTH} !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                overflow: visible !important;
+              }
+
+              body {
+                width: auto !important;
+                height: auto !important;
+              }
+
+              .label-root {
+                transform: none !important;
+                zoom: 1 !important;
+                page-break-inside: avoid !important;
+                break-inside: avoid !important;
+              }
+            }
+          </style>
+        </head>
+        <body>
+          ${pages}
+        </body>
+      </html>
+    `;
+  };
+
   // Handle marketplace listing creation
   const handleCreateListing = () => {
     if (productInfo) {
@@ -2318,7 +2760,7 @@ const Scanner = () => {
         const response = await axios.post(getApiEndpoint('/scan'), {
           code: code.toUpperCase(),
           user_id: userId
-        }, { timeout: 120000 });
+        }, buildScanAxiosConfig({ timeout: 120000 }));
         const result = response.data;
         
         if (result && result.asin && result.asin.trim() !== '') {
@@ -2622,7 +3064,7 @@ const Scanner = () => {
       if (item.isProcessing || item.hasFailed) return false;
       // Allow items with ASIN, UPC, FNSKU, or code
       return item.product.asin || item.product.upc || item.product.fnsku || item.product.code || item.code;
-    });
+    }).sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
     
     if (validItems.length === 0) {
       toast.error("No valid items with product code to print. Some items may still be processing - please wait or retry failed items.");
@@ -2667,6 +3109,53 @@ const Scanner = () => {
     }
   };
 
+  const handlePrintAllBatchBarcode = async () => {
+    if (batchQueue.length === 0) {
+      toast.error("Batch queue is empty");
+      return;
+    }
+
+    const validItems = batchQueue.filter(item => {
+      if (!item.product) return false;
+      if (item.isProcessing || item.hasFailed) return false;
+      return getProductCodeForLabel(item.product) || item.code;
+    }).sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
+
+    if (validItems.length === 0) {
+      toast.error("No valid items with barcode data to print.");
+      return;
+    }
+
+    if (validItems.length < batchQueue.length) {
+      toast.info(`Printing ${validItems.length} of ${batchQueue.length} items (excluding processing/failed items)`, { autoClose: 3000 });
+    }
+
+    setIsPrintingBatchBarcode(true);
+    toast.info(`🖨️ Preparing ${validItems.length} barcode labels for printing...`, { autoClose: 2000 });
+    try {
+      const combinedBarcodeLabelHTML = createBatchBarcodeLabelHTML(validItems);
+      const printWindow = window.open('', '_blank');
+      if (printWindow) {
+        printWindow.document.write(combinedBarcodeLabelHTML);
+        printWindow.document.close();
+        await new Promise(resolve => setTimeout(resolve, 900));
+        printWindow.focus();
+        printWindow.print();
+        toast.success(`✅ Barcode print dialog opened for ${validItems.length} labels.`, { autoClose: 3500 });
+        setTimeout(() => {
+          printWindow.close();
+        }, 5000);
+      } else {
+        toast.error("❌ Could not open print window. Please check popup blocker settings.");
+      }
+    } catch (error) {
+      console.error("Error printing batch barcode labels:", error);
+      toast.error("❌ Error printing batch barcode labels", { autoClose: 3000 });
+    } finally {
+      setIsPrintingBatchBarcode(false);
+    }
+  };
+
   // Remove item from batch queue
   const handleRemoveFromBatch = (itemId) => {
     setBatchQueue(prev => prev.filter(item => item.id !== itemId));
@@ -2690,6 +3179,7 @@ const Scanner = () => {
   // Clear entire batch queue
   const handleClearBatchQueue = () => {
     setBatchQueue([]);
+    batchSequenceRef.current = 1;
     toast.success("Batch queue cleared", { autoClose: 1500 });
   };
 
@@ -2760,6 +3250,7 @@ const Scanner = () => {
     }
     setInventoryQuantity(1);
     setInventoryLocation(locationOptions[0] || '');
+    setInventoryBucket('');
     setInventoryCondition('New');
     setShowAddToInventoryModal(true);
   };
@@ -2768,7 +3259,7 @@ const Scanner = () => {
    * Core path used by single-item modal and batch queue "add all to inventory".
    * @returns {{ ok: boolean, message?: string }}
    */
-  const addProductInfoToInventory = async (pi, { quantity, location, condition }) => {
+  const addProductInfoToInventory = async (pi, { quantity, location, bucket, condition, forcedItemNumber = null, preserveExistingItemNumber = true }) => {
     if (!pi) {
       return { ok: false, message: 'No product information' };
     }
@@ -2780,6 +3271,7 @@ const Scanner = () => {
     if (!normalizedLocation || !isValidLocationCode(normalizedLocation, getWarehouseLayoutSettings())) {
       return { ok: false, message: 'Select a valid shelf location from your Warehouse Layout settings.' };
     }
+    const finalLocation = composeStorageLocation(normalizedLocation, bucket);
 
     let productId = null;
     const existingProduct = await dbProductLookupService.getProductByFnsku(pi.fnsku || pi.sku);
@@ -2824,16 +3316,20 @@ const Scanner = () => {
       ? JSON.stringify({ images: allImages, videos: allVideos })
       : (pi.image_url || '');
 
+    const nextItemNumber = forcedItemNumber
+      || ((preserveExistingItemNumber && existingInventory?.item_number) ? existingInventory.item_number : null)
+      || getNextItemNumber(finalLocation);
+
     const inventoryItem = {
       sku: pi.fnsku || pi.sku || pi.asin,
       name: pi.name || 'Unknown Product',
       quantity: qty,
-      location: normalizedLocation,
+      location: finalLocation,
       condition: condition || 'New',
       price: pi.price != null ? Number(pi.price) : 0,
       cost: pi.price != null ? (Number(pi.price) * ((100 - (parseFloat(localStorage.getItem('labelDiscountPercent')) || 50)) / 100)) : 0,
       image_url: imageUrlForInventory,
-      item_number: existingInventory?.item_number || getNextItemNumber(normalizedLocation),
+      item_number: nextItemNumber,
     };
 
     if (productId) {
@@ -2870,6 +3366,7 @@ const Scanner = () => {
       const { ok, message } = await addProductInfoToInventory(productInfo, {
         quantity: inventoryQuantity,
         location: inventoryLocation,
+        bucket: inventoryBucket,
         condition: inventoryCondition,
       });
       if (ok) {
@@ -2877,6 +3374,7 @@ const Scanner = () => {
         setShowAddToInventoryModal(false);
         setInventoryQuantity(1);
         setInventoryLocation(locationOptions[0] || '');
+        setInventoryBucket('');
         setInventoryCondition('New');
       } else {
         toast.error(`Failed to add to inventory. ${message || ''}`);
@@ -2893,7 +3391,7 @@ const Scanner = () => {
   const handleAddBatchQueueToInventory = async () => {
     const ready = batchQueue.filter(
       (q) => q.product && !q.isProcessing && !q.hasFailed && (q.product.fnsku || q.product.sku || q.product.asin)
-    );
+    ).sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
     if (ready.length === 0) {
       toast.warning('No completed products in the batch queue to add. Wait for lookups to finish or fix failed rows.');
       return;
@@ -2907,24 +3405,36 @@ const Scanner = () => {
       toast.error('No shelf locations are configured. Set them in Settings > Warehouse Layout Settings.');
       return;
     }
-    if (!window.confirm(`Add ${ready.length} product(s) to inventory with quantity 1 each (location: ${targetLocation}, condition: New)?`)) {
+    const finalBatchLocation = composeStorageLocation(targetLocation, batchInventoryBucket);
+    if (!window.confirm(`Add ${ready.length} product(s) to inventory with quantity 1 each (location: ${finalBatchLocation}, condition: New)?`)) {
       return;
     }
     setIsBulkAddingBatchToInventory(true);
     let okCount = 0;
     let failCount = 0;
     try {
+      // Assign item numbers in true scan order first so numbering remains stable.
+      const assignedItemNumbers = new Map();
       for (const q of ready) {
+        assignedItemNumbers.set(q.id, getNextItemNumber(finalBatchLocation));
+      }
+
+      // Inventory page is ordered newest-first; insert in reverse so UI order matches scan order.
+      const addSequence = [...ready].reverse();
+      for (const q of addSequence) {
         const { ok } = await addProductInfoToInventory(q.product, {
           quantity: 1,
           location: targetLocation,
+          bucket: batchInventoryBucket,
           condition: 'New',
+          forcedItemNumber: assignedItemNumbers.get(q.id),
+          preserveExistingItemNumber: false,
         });
         if (ok) okCount += 1;
         else failCount += 1;
       }
       if (okCount > 0) {
-        toast.success(`Added ${okCount} product(s) to inventory at ${targetLocation}.${failCount ? ` ${failCount} failed.` : ''}`);
+        toast.success(`Added ${okCount} product(s) to inventory at ${finalBatchLocation}.${failCount ? ` ${failCount} failed.` : ''}`);
       }
       if (failCount > 0 && okCount === 0) {
         toast.error(`Could not add batch to inventory (${failCount} failed). Check login and SKU data.`);
@@ -3087,7 +3597,7 @@ const Scanner = () => {
             <button
               type="button"
               onClick={handleEnrichAllBatchFromAmazon}
-              disabled={isBulkAddingBatchToInventory || isPrintingBatch || batchEnrichAllRunning || batchForceLookupCode !== null}
+              disabled={isBulkAddingBatchToInventory || isPrintingBatch || isPrintingBatchBarcode || batchEnrichAllRunning || batchForceLookupCode !== null}
               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
               title="Fetches images and listing details from Amazon for every queue item that still needs them, and saves to the database"
             >
@@ -3097,7 +3607,7 @@ const Scanner = () => {
             <button
               type="button"
               onClick={handleAddBatchQueueToInventory}
-              disabled={isBulkAddingBatchToInventory || isPrintingBatch || batchEnrichAllRunning || !batchInventoryLocation}
+              disabled={isBulkAddingBatchToInventory || isPrintingBatch || isPrintingBatchBarcode || batchEnrichAllRunning || !batchInventoryLocation}
               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50"
             >
               <ShoppingBagIcon className="-ml-1 mr-2 h-5 w-5" />
@@ -3106,7 +3616,7 @@ const Scanner = () => {
             <button
               type="button"
               onClick={handlePrintAllBatch}
-              disabled={isPrintingBatch || isBulkAddingBatchToInventory || batchEnrichAllRunning}
+              disabled={isPrintingBatch || isPrintingBatchBarcode || isBulkAddingBatchToInventory || batchEnrichAllRunning}
               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-purple-600 hover:bg-purple-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-purple-500 disabled:opacity-50"
             >
               <PrinterIcon className="-ml-1 mr-2 h-5 w-5" />
@@ -3114,8 +3624,17 @@ const Scanner = () => {
             </button>
             <button
               type="button"
+              onClick={handlePrintAllBatchBarcode}
+              disabled={isPrintingBatchBarcode || isPrintingBatch || isBulkAddingBatchToInventory || batchEnrichAllRunning}
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+            >
+              <PrinterIcon className="-ml-1 mr-2 h-5 w-5" />
+              {isPrintingBatchBarcode ? 'Printing barcodes...' : `Print Barcode Labels (${batchQueue.length})`}
+            </button>
+            <button
+              type="button"
               onClick={handleClearBatchQueue}
-              disabled={isBulkAddingBatchToInventory || batchEnrichAllRunning}
+              disabled={isBulkAddingBatchToInventory || isPrintingBatch || isPrintingBatchBarcode || batchEnrichAllRunning}
               className="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 text-sm font-medium rounded-md shadow-sm text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
             >
               Clear Queue
@@ -3126,7 +3645,7 @@ const Scanner = () => {
 
       {batchMode && (
         <div className="mb-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
-          <div className="flex flex-col md:flex-row md:items-center gap-3">
+          <div className="flex flex-col md:flex-row md:items-end gap-3">
             <label htmlFor="batchInventoryLocation" className="text-sm font-medium text-gray-700 dark:text-gray-200 min-w-fit">
               Batch save location
             </label>
@@ -3144,8 +3663,30 @@ const Scanner = () => {
                 </option>
               ))}
             </select>
+            <div className="flex flex-col">
+              <label htmlFor="batchInventoryBucket" className="text-sm font-medium text-gray-700 dark:text-gray-200">
+                Bucket (optional)
+              </label>
+              <select
+                id="batchInventoryBucket"
+                name="batchInventoryBucket"
+                value={batchInventoryBucket}
+                onChange={(e) => setBatchInventoryBucket(e.target.value)}
+                className="block w-full md:w-44 pl-3 pr-10 py-2 text-sm border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 rounded-md"
+              >
+                <option value="">No bucket</option>
+                {Array.from({ length: 10 }, (_, index) => {
+                  const bucketCode = `B${index + 1}`;
+                  return (
+                    <option key={bucketCode} value={bucketCode}>
+                      {bucketCode}
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
             <p className="text-xs text-gray-600 dark:text-gray-300">
-              Pick location first, then scan in batch mode. "Add all to inventory" saves every scanned item to this location.
+              Pick location first, then scan in batch mode. "Add all to inventory" saves every scanned item to this location (and bucket, if provided).
             </p>
           </div>
         </div>
@@ -3646,6 +4187,15 @@ const Scanner = () => {
                     <PrinterIcon className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
                     Print Label
                   </button>
+                  <button
+                    type="button"
+                    className="flex-1 inline-flex items-center justify-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                    onClick={() => handlePrintBarcodeLabel(productInfo)}
+                    disabled={loading || !productInfo || !getProductCodeForLabel(productInfo)}
+                  >
+                    <PrinterIcon className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
+                    Print Barcode Label
+                  </button>
                 </div>
                 <button
                   type="button"
@@ -3744,7 +4294,7 @@ const Scanner = () => {
                         <ArrowPathIcon className="h-3 w-3 mr-1" />
                         Rescan
                       </button>
-                      {item.productInfo.asin && (
+                      {(item.productInfo.asin || item.productInfo.upc || item.productInfo.fnsku || item.productInfo.code) && (
                         <>
                           <button
                             onClick={() => handleViewOnAmazonFromScan(item)}
@@ -3759,6 +4309,13 @@ const Scanner = () => {
                           >
                             <PrinterIcon className="h-3 w-3 mr-1" />
                             Print Label
+                          </button>
+                          <button
+                            onClick={() => handlePrintBarcodeLabel(item.productInfo)}
+                            className="inline-flex items-center justify-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500"
+                          >
+                            <PrinterIcon className="h-3 w-3 mr-1" />
+                            Barcode Label
                           </button>
                         </>
                       )}
@@ -3865,6 +4422,22 @@ const Scanner = () => {
             </div>
 
             <div className="mb-4">
+              <label htmlFor="inventoryBucket" className="block text-sm font-medium text-gray-700 mb-1">
+                Bucket (optional)
+              </label>
+              <input
+                type="text"
+                id="inventoryBucket"
+                name="inventoryBucket"
+                value={inventoryBucket}
+                onChange={(e) => setInventoryBucket(normalizeBucketCode(e.target.value))}
+                placeholder="e.g. BK1"
+                className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md"
+                disabled={isAddingToInventory}
+              />
+            </div>
+
+            <div className="mb-4">
               <label htmlFor="inventoryCondition" className="block text-sm font-medium text-gray-700 mb-1">
                 Condition
               </label>
@@ -3896,6 +4469,7 @@ const Scanner = () => {
                   setShowAddToInventoryModal(false);
                   setInventoryQuantity(1);
                   setInventoryLocation(locationOptions[0] || '');
+                  setInventoryBucket('');
                   setInventoryCondition('New');
                 }}
                 disabled={isAddingToInventory}

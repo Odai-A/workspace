@@ -7052,21 +7052,35 @@ def debug_config():
 if __name__ == '__main__':
     # Render uses PORT environment variable, fallback to FLASK_RUN_PORT for local dev
     port = int(os.environ.get("PORT", os.environ.get("FLASK_RUN_PORT", 5000)))
-    debug_mode = os.environ.get("FLASK_DEBUG", "True").lower() == "true"
-    
+    # Electron sets INVENTORY_DESKTOP_BACKEND=1 — never use debug/reloader there (reloader spawns
+    # a second Python process and often opens a Windows Terminal window).
+    desktop_child = os.environ.get("INVENTORY_DESKTOP_BACKEND") == "1"
+    if desktop_child:
+        debug_mode = False
+    else:
+        debug_mode = os.environ.get("FLASK_DEBUG", "True").lower() == "true"
+
     # Optional: Add CORS if your React app is on a different origin (e.g., localhost:5173 vs localhost:5000)
     # from flask_cors import CORS
     # CORS(app, resources={r"/api/*": {"origins": "http://localhost:5173"}}) # Example for specific API routes
 
-    print("=" * 60)
-    print(f"STARTING FLASK BACKEND SERVER")
-    print(f"Port: {port}")
-    print(f"Debug Mode: {debug_mode}")
-    print(f"Host: 0.0.0.0 (accessible from all interfaces)")
-    print(f"FRONTEND_BASE_URL: {os.environ.get('FRONTEND_BASE_URL', 'NOT SET')}")
-    print("=" * 60)
-    logger.info(f"Starting Flask app on port {port} with debug mode: {debug_mode}")
-    print("\nBackend server is RUNNING - waiting for requests...")
-    print(f"API Endpoint: http://localhost:{port}/api/scan")
-    print("All API requests will be logged below:\n")
-    app.run(debug=debug_mode, port=port, host='0.0.0.0') 
+    if desktop_child:
+        logger.info(
+            "Starting Flask (desktop child): port=%s debug=%s use_reloader=False",
+            port,
+            debug_mode,
+        )
+    else:
+        print("=" * 60)
+        print(f"STARTING FLASK BACKEND SERVER")
+        print(f"Port: {port}")
+        print(f"Debug Mode: {debug_mode}")
+        print(f"Host: 0.0.0.0 (accessible from all interfaces)")
+        print(f"FRONTEND_BASE_URL: {os.environ.get('FRONTEND_BASE_URL', 'NOT SET')}")
+        print("=" * 60)
+        logger.info(f"Starting Flask app on port {port} with debug mode: {debug_mode}")
+        print("\nBackend server is RUNNING - waiting for requests...")
+        print(f"API Endpoint: http://localhost:{port}/api/scan")
+        print("All API requests will be logged below:\n")
+
+    app.run(debug=debug_mode, port=port, host="0.0.0.0", use_reloader=debug_mode)

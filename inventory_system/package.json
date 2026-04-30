@@ -1,13 +1,21 @@
 {
   "name": "react-template",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint ./src --quiet",
     "preview": "vite preview",
+    "desktop:dev": "node -e \"const net=require('net');const s=net.createConnection({host:'127.0.0.1',port:5174});s.on('connect',()=>{s.end();process.exit(0)});s.on('error',()=>process.exit(1));\" && npm run desktop:attach || concurrently -k \"npm run dev\" \"wait-on tcp:5174 && electron electron/main.cjs --dev-server\"",
+    "desktop:attach": "wait-on tcp:5174 && electron electron/main.cjs --dev-server",
+    "desktop:start": "npm run build && electron electron/main.cjs",
+    "desktop:icons": "node electron/build-icon.mjs",
+    "desktop:pack": "npm run build && npm run desktop:icons && electron-builder --win --x64",
+    "desktop:pack:folder": "npm run build && npm run desktop:icons && node electron/desktop-pack.cjs",
+    "desktop:shortcut": "node electron/create-shortcut.cjs",
+    "desktop:dist": "npm run desktop:pack",
     "predeploy": "npm run build",
     "deploy": "gh-pages -d dist"
   },
@@ -25,6 +33,9 @@
     "@zxing/library": "^0.21.0",
     "axios": "^1.8.4",
     "chart.js": "^4.4.9",
+    "electron-updater": "^6.8.3",
+    "express": "^4.21.2",
+    "http-proxy-middleware": "^3.0.5",
     "jsbarcode": "^3.11.6",
     "jszip": "^3.10.1",
     "jwt-decode": "^4.0.0",
@@ -47,14 +58,66 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.4.1",
     "autoprefixer": "^10.4.20",
+    "concurrently": "^9.2.1",
+    "electron": "^37.2.3",
+    "electron-builder": "^26.0.12",
+    "electron-packager": "^17.1.2",
     "eslint": "^9.9.0",
     "eslint-plugin-react": "^7.35.0",
     "eslint-plugin-react-hooks": "^5.1.0-rc.0",
     "eslint-plugin-react-refresh": "^0.4.9",
     "gh-pages": "^6.3.0",
     "globals": "^15.9.0",
+    "png-to-ico": "^3.0.1",
     "postcss": "^8.4.45",
     "tailwindcss": "^3.4.10",
-    "vite": "^6.3.5"
+    "vite": "^6.3.5",
+    "wait-on": "^9.0.1"
+  },
+  "main": "electron/main.cjs",
+  "build": {
+    "appId": "com.inventorysystem.desktop",
+    "productName": "Inventory System",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "**/*",
+      "!src/**/*",
+      "!public/**/*",
+      "!release/**/*",
+      "!.git/**/*",
+      "!.github/**/*",
+      "!eslint.config.js",
+      "!vite.config.js",
+      "!tailwind.config.js",
+      "!postcss.config.js",
+      "!index.html",
+      "!electron/build-icon.mjs",
+      "!electron/desktop-pack.cjs"
+    ],
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://REPLACE-WITH-YOUR-HTTPS-HOST/inventory-desktop/"
+      }
+    ],
+    "win": {
+      "icon": "electron/app-icon.ico",
+      "signAndEditExecutable": false,
+      "verifyUpdateCodeSignature": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   MagnifyingGlassIcon,
@@ -34,6 +34,7 @@ import {
 const INVENTORY_PAGE_SIZE_OPTIONS = [25, 50, 75, 100];
 const EXPORT_ALL_LIMIT = 10000;
 const ITEMS_PER_PAGE_STORAGE_KEY = 'inventoryItemsPerPage';
+const BUCKET_CODE_OPTIONS = Array.from({ length: 10 }, (_, index) => `B${index + 1}`);
 
 function readStoredItemsPerPage() {
   try {
@@ -64,6 +65,47 @@ function normalizeRemoveError(err) {
   if (typeof err === 'string') return err;
   return formatSupabaseError(err);
 }
+
+const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const parseStorageLocation = (location, layout) => {
+  const rawLocation = String(location || '').trim();
+  if (!rawLocation) return null;
+  const shelfPrefix = String(layout?.shelfPrefix || 'S').trim().toUpperCase();
+  const rowPrefix = String(layout?.rowPrefix || 'R').trim().toUpperCase();
+  const binPrefix = String(layout?.binPrefix || 'B').trim().toUpperCase();
+  const hasWarehouseBins = Number.parseInt(layout?.binsPerRow, 10) > 0;
+  const matcher = new RegExp(
+    `^${escapeRegex(shelfPrefix)}(\\d+)-${escapeRegex(rowPrefix)}(\\d+)(?:-${escapeRegex(binPrefix)}(\\d+))?(?:-${escapeRegex(binPrefix)}(\\d+))?$`,
+    'i'
+  );
+  const match = rawLocation.match(matcher);
+  if (!match) return null;
+  const firstSegmentValue = match[3] ? Number.parseInt(match[3], 10) : null;
+  const secondSegmentValue = match[4] ? Number.parseInt(match[4], 10) : null;
+  const firstSegmentCode = Number.isFinite(firstSegmentValue) ? `${binPrefix}${firstSegmentValue}` : '';
+  const secondSegmentCode = Number.isFinite(secondSegmentValue) ? `${binPrefix}${secondSegmentValue}` : '';
+  return {
+    shelf: Number.parseInt(match[1], 10),
+    row: Number.parseInt(match[2], 10),
+    bucket: hasWarehouseBins ? secondSegmentCode : firstSegmentCode,
+  };
+};
+
+const extractItemSequence = (item) => {
+  const rawItemNumber = String(
+    item?.['Item Number'] ||
+    item?.item_number ||
+    item?.itemNumber ||
+    item?._rawData?.item_number ||
+    ''
+  ).trim();
+  if (!rawItemNumber) return null;
+  const match = rawItemNumber.match(/I(\d+)/i);
+  if (!match) return null;
+  const value = Number.parseInt(match[1], 10);
+  return Number.isFinite(value) ? value : null;
+};
 
 /**
  * Combine inventory and manifest results into a single list (used by Inventory load and export-all).
@@ -215,6 +257,9 @@ const Inventory = () => {
   const [isExportingMarketplace, setIsExportingMarketplace] = useState(false);
   const [warehouseLayout, setWarehouseLayout] = useState(() => getWarehouseLayoutSettings());
   const [locationOptions, setLocationOptions] = useState(() => getLocationOptions(getWarehouseLayoutSettings()));
+  const [shelfFilter, setShelfFilter] = useState('all');
+  const [rowFilter, setRowFilter] = useState('all');
+  const [bucketFilter, setBucketFilter] = useState('all');
   
   useEffect(() => {
     const syncWarehouseSettings = () => {
@@ -227,19 +272,6 @@ const Inventory = () => {
     return () => window.removeEventListener('storage', syncWarehouseSettings);
   }, []);
 
-  // Location/category/status options.
-  const locations = ['All Locations', ...locationOptions];
-  const categories = ['All Categories', 'Smart Speakers', 'Streaming Devices', 'E-readers', 'Smart Home', 'Tablets'];
-  const statuses = ['All', 'In Stock', 'Low Stock', 'Out of Stock'];
-  
-  // Current filter defaults. (The UI for changing filters may be implemented later; we keep this
-  // definition so helper functions like `getFilteredInventory()` have a stable shape.)
-  const filters = {
-    location: locations[0],
-    category: categories[0],
-    status: statuses[0]
-  };
-  
   // Debounce search term
   useEffect(() => {
     const timerId = setTimeout(() => {
@@ -249,8 +281,64 @@ const Inventory = () => {
     return () => clearTimeout(timerId);
   }, [searchTerm]);
 
+  const shelfOptions = useMemo(
+    () => Array.from({ length: Number(warehouseLayout?.shelves || 0) }, (_, idx) => String(idx + 1)),
+    [warehouseLayout?.shelves]
+  );
+  const rowOptions = useMemo(
+    () => Array.from({ length: Number(warehouseLayout?.rowsPerShelf || 0) }, (_, idx) => String(idx + 1)),
+    [warehouseLayout?.rowsPerShelf]
+  );
+
+  const applyShelfRowFilters = useCallback((items = []) => {
+    if (shelfFilter === 'all' && rowFilter === 'all') return items;
+    const shelfTarget = shelfFilter === 'all' ? null : Number.parseInt(shelfFilter, 10);
+    const rowTarget = rowFilter === 'all' ? null : Number.parseInt(rowFilter, 10);
+    return items.filter((item) => {
+      const locationValue = item?.Location || item?._rawData?.location || item?.location || '';
+      const parsed = parseStorageLocation(locationValue, warehouseLayout);
+      if (!parsed) return false;
+      if (shelfTarget != null && parsed.shelf !== shelfTarget) return false;
+      if (rowTarget != null && parsed.row !== rowTarget) return false;
+      return true;
+    });
+  }, [shelfFilter, rowFilter, warehouseLayout]);
+
+  const applyBucketFilter = useCallback((items = []) => {
+    if (bucketFilter === 'all') return items;
+    return items.filter((item) => {
+      const locationValue = item?.Location || item?._rawData?.location || item?.location || '';
+      const parsed = parseStorageLocation(locationValue, warehouseLayout);
+      const bucketCode = parsed?.bucket || '';
+      if (bucketFilter === 'bucketed') return Boolean(bucketCode);
+      if (bucketFilter === 'unbucketed') return !bucketCode;
+      return bucketCode === bucketFilter;
+    });
+  }, [bucketFilter, warehouseLayout]);
+
   /** Full merged list for current search; UI shows one page via slice (see effect below). */
   const [fullCombinedList, setFullCombinedList] = useState([]);
+  const filteredInventoryList = useMemo(() => {
+    const filtered = applyBucketFilter(applyShelfRowFilters(fullCombinedList));
+    return [...filtered].sort((a, b) => {
+      const seqA = extractItemSequence(a);
+      const seqB = extractItemSequence(b);
+      if (seqA != null || seqB != null) {
+        if (seqA == null) return 1;
+        if (seqB == null) return -1;
+        return seqA - seqB;
+      }
+      // Keep relative order stable for rows without item numbers.
+      return 0;
+    });
+  }, [applyShelfRowFilters, applyBucketFilter, fullCombinedList]);
+  const filteredOrderIndexMap = useMemo(() => {
+    const map = new Map();
+    filteredInventoryList.forEach((item, idx) => {
+      map.set(getInventoryRowKey(item), idx);
+    });
+    return map;
+  }, [filteredInventoryList]);
 
   const loadInventoryData = useCallback(async () => {
     setLoading(true);
@@ -305,16 +393,16 @@ const Inventory = () => {
   }, [loadInventoryData]);
 
   useEffect(() => {
-    const total = fullCombinedList.length;
+    const total = filteredInventoryList.length;
     const totalPages = Math.max(1, Math.ceil(total / itemsPerPage) || 1);
     if (total > 0 && currentPage > totalPages) {
       setCurrentPage(totalPages);
       return;
     }
     const start = (currentPage - 1) * itemsPerPage;
-    setProducts(fullCombinedList.slice(start, start + itemsPerPage));
+    setProducts(filteredInventoryList.slice(start, start + itemsPerPage));
     setTotalItems(total);
-  }, [fullCombinedList, currentPage, itemsPerPage]);
+  }, [filteredInventoryList, currentPage, itemsPerPage]);
 
   const handleItemsPerPageChange = (e) => {
     const next = Number(e.target.value);
@@ -330,7 +418,7 @@ const Inventory = () => {
 
   useEffect(() => {
     setSelectedItems(new Set());
-  }, [currentPage, debouncedSearchTerm, itemsPerPage]);
+  }, [currentPage, debouncedSearchTerm, itemsPerPage, shelfFilter, rowFilter, bucketFilter]);
 
   useEffect(() => {
     if (marketplaceExportScope === 'selected' && selectedItems.size === 0) {
@@ -947,16 +1035,61 @@ const Inventory = () => {
   // Reset filters
   const handleResetFilters = () => {
     setSearchTerm('');
+    setShelfFilter('all');
+    setRowFilter('all');
+    setBucketFilter('all');
+    setCurrentPage(1);
     toast.info('Filters have been reset to default values.');
   };
 
   const getSelectedProductRows = () =>
-    products.filter((p) => selectedItems.has(getInventoryRowKey(p)));
+    products
+      .filter((p) => selectedItems.has(getInventoryRowKey(p)))
+      .sort((a, b) => {
+        const seqA = extractItemSequence(a);
+        const seqB = extractItemSequence(b);
+        if (seqA != null || seqB != null) {
+          if (seqA == null) return 1;
+          if (seqB == null) return -1;
+        return seqA - seqB; // Lower sequence = earlier scanned item.
+        }
+        const idxA = filteredOrderIndexMap.get(getInventoryRowKey(a)) ?? Number.MAX_SAFE_INTEGER;
+        const idxB = filteredOrderIndexMap.get(getInventoryRowKey(b)) ?? Number.MAX_SAFE_INTEGER;
+        return idxA - idxB;
+      });
+
+  const getFilteredInventoryRows = () =>
+    [...filteredInventoryList].sort((a, b) => {
+      const seqA = extractItemSequence(a);
+      const seqB = extractItemSequence(b);
+      if (seqA != null || seqB != null) {
+        if (seqA == null) return 1;
+        if (seqB == null) return -1;
+        return seqA - seqB;
+      }
+      const idxA = filteredOrderIndexMap.get(getInventoryRowKey(a)) ?? Number.MAX_SAFE_INTEGER;
+      const idxB = filteredOrderIndexMap.get(getInventoryRowKey(b)) ?? Number.MAX_SAFE_INTEGER;
+      return idxA - idxB;
+    });
 
   const handlePrintSelectedBasicLabels = () => {
     const rows = getSelectedProductRows();
     if (rows.length === 0) {
       toast.warning('Select at least one row to print labels.');
+      return;
+    }
+    const printWindow = openPrintWindow(createBasicInventoryLabelHTML(rows));
+    if (printWindow) {
+      printWindow.onload = () => {
+        printWindow.print();
+      };
+    }
+  };
+
+  const handlePrintFilteredBasicLabels = () => {
+    const rows = getFilteredInventoryRows();
+    if (rows.length === 0) {
+      toast.warning('No items match the selected shelf/row filters.');
       return;
     }
     const printWindow = openPrintWindow(createBasicInventoryLabelHTML(rows));
@@ -1065,13 +1198,14 @@ const Inventory = () => {
       searchQuery: debouncedSearchTerm,
     });
     const hiddenManifestList = await inventoryService.getHiddenManifestIds();
-    return combineInventoryAndManifest(
+    const combined = await combineInventoryAndManifest(
       inventoryResult,
       manifestResult,
       debouncedSearchTerm,
       new Set(hiddenManifestList)
     );
-  }, [debouncedSearchTerm]);
+    return applyBucketFilter(applyShelfRowFilters(combined));
+  }, [debouncedSearchTerm, applyShelfRowFilters, applyBucketFilter]);
 
   const handleMarketplaceExportDownload = async () => {
     setIsExportingMarketplace(true);
@@ -1531,7 +1665,14 @@ const Inventory = () => {
               <div className="text-xs text-gray-500 dark:text-gray-400">FNSKU: {rowData['Fn Sku'] || 'N/A'}</div>
               <div className="text-xs text-gray-500 dark:text-gray-400">ASIN: {rowData['B00 Asin'] || 'N/A'}</div>
               <div className="text-xs text-gray-500 dark:text-gray-400">Location: {rowData['Location'] || rowData._rawData?.location || 'N/A'}</div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">Item #: {rowData['Item Number'] || rowData._rawData?.item_number || 'N/A'}</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                Item #: {
+                  stripLocationPrefixFromItemNumber(
+                    rowData['Item Number'] || rowData._rawData?.item_number || '',
+                    rowData['Location'] || rowData._rawData?.location || ''
+                  ) || 'N/A'
+                }
+              </div>
             </div>
           </div>
         );
@@ -1759,6 +1900,65 @@ const Inventory = () => {
               onChange={handleSearchChange}
             />
             <MagnifyingGlassIcon className="h-5 w-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-2">
+            <select
+              value={shelfFilter}
+              onChange={(e) => {
+                setShelfFilter(e.target.value);
+                setCurrentPage(1);
+              }}
+              className="px-3 py-2 border border-gray-300 rounded-md bg-white dark:bg-gray-800 dark:border-gray-600"
+            >
+              <option value="all">All shelves</option>
+              {shelfOptions.map((shelf) => (
+                <option key={shelf} value={shelf}>
+                  {warehouseLayout.shelfPrefix}{shelf}
+                </option>
+              ))}
+            </select>
+            <select
+              value={rowFilter}
+              onChange={(e) => {
+                setRowFilter(e.target.value);
+                setCurrentPage(1);
+              }}
+              className="px-3 py-2 border border-gray-300 rounded-md bg-white dark:bg-gray-800 dark:border-gray-600"
+            >
+              <option value="all">All rows</option>
+              {rowOptions.map((row) => (
+                <option key={row} value={row}>
+                  {warehouseLayout.rowPrefix}{row}
+                </option>
+              ))}
+            </select>
+            <select
+              value={bucketFilter}
+              onChange={(e) => {
+                setBucketFilter(e.target.value);
+                setCurrentPage(1);
+              }}
+              className="px-3 py-2 border border-gray-300 rounded-md bg-white dark:bg-gray-800 dark:border-gray-600"
+            >
+              <option value="all">All buckets</option>
+              <option value="bucketed">In bucket only</option>
+              <option value="unbucketed">No bucket</option>
+              {BUCKET_CODE_OPTIONS.map((bucketCode) => (
+                <option key={bucketCode} value={bucketCode}>
+                  {bucketCode}
+                </option>
+              ))}
+            </select>
+            <Button variant="outline" onClick={handleResetFilters}>
+              Reset filters
+            </Button>
+            <Button
+              variant="outline"
+              onClick={handlePrintFilteredBasicLabels}
+              disabled={filteredInventoryList.length === 0}
+            >
+              Print filtered labels ({filteredInventoryList.length})
+            </Button>
           </div>
         </div>
         

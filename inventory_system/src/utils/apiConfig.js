@@ -15,6 +15,16 @@
  * @returns {string} The base URL of the backend API (without trailing slash)
  */
 export const getApiUrl = () => {
+  // Desktop runtime should prefer same-origin local edge server.
+  // Electron hosts the app on localhost and proxies /api with keep-alive.
+  if (
+    typeof window !== 'undefined' &&
+    window?.desktopRuntime?.isDesktop &&
+    window?.location?.origin
+  ) {
+    return window.location.origin;
+  }
+
   // Priority 1: VITE_API_URL (preferred)
   if (import.meta.env.VITE_API_URL) {
     const url = import.meta.env.VITE_API_URL.trim();

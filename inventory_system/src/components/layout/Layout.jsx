@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Outlet, useLocation, Link } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { useNavigation } from '../../contexts/NavigationContext';
@@ -16,6 +16,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { FiUser, FiLogOut } from 'react-icons/fi';
 import { BRAND_NAME } from '../../config/brand';
+import { getApiEndpoint } from '../../utils/apiConfig';
 
 // Map for icon components
 const iconMap = {
@@ -34,6 +35,10 @@ const Layout = () => {
   const { user, signOut } = useAuth();
   const location = useLocation();
   const { navigationItems, activeRoute, sidebarCollapsed, toggleSidebar } = useNavigation();
+  const [backendStatus, setBackendStatus] = useState('checking');
+  const [backendStatusMessage, setBackendStatusMessage] = useState('Checking backend connection...');
+  const [checkingBackend, setCheckingBackend] = useState(false);
+  const backendHealthCheckRef = useRef(null);
 
   // Use a separate state for mobile menu visibility for clarity
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -54,6 +59,70 @@ const Layout = () => {
       await signOut();
     } catch (error) {
       console.error('Logout error:', error);
+    }
+  };
+
+  useEffect(() => {
+    let isMounted = true;
+    let intervalId = null;
+    let activeController = null;
+
+    const checkBackendHealth = async () => {
+      if (activeController) {
+        activeController.abort();
+      }
+
+      const controller = new AbortController();
+      activeController = controller;
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+      if (isMounted) setCheckingBackend(true);
+
+      try {
+        const response = await fetch(getApiEndpoint('/health'), {
+          method: 'GET',
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+
+        if (!isMounted) return;
+
+        if (response.ok) {
+          setBackendStatus('online');
+          setBackendStatusMessage('Backend online');
+        } else {
+          setBackendStatus('offline');
+          setBackendStatusMessage(`Backend error (${response.status})`);
+        }
+      } catch (error) {
+        if (!isMounted) return;
+        setBackendStatus('offline');
+        setBackendStatusMessage('Backend unreachable');
+      } finally {
+        clearTimeout(timeoutId);
+        if (isMounted) setCheckingBackend(false);
+      }
+    };
+
+    const triggerHealthCheck = () => {
+      void checkBackendHealth();
+    };
+
+    triggerHealthCheck();
+    intervalId = setInterval(triggerHealthCheck, 30000);
+
+    backendHealthCheckRef.current = triggerHealthCheck;
+
+    return () => {
+      isMounted = false;
+      if (intervalId) clearInterval(intervalId);
+      if (activeController) activeController.abort();
+      backendHealthCheckRef.current = null;
+    };
+  }, []);
+
+  const handleReconnectNow = () => {
+    if (typeof backendHealthCheckRef.current === 'function') {
+      backendHealthCheckRef.current();
     }
   };
 
@@ -223,7 +292,41 @@ const Layout = () => {
               {navigationItems.find(item => location.pathname === item.path)?.name || 'Dashboard'}
             </h1>
           </div>
-          <div className="flex items-center">
+          <div className="flex items-center gap-3">
+            <span
+              title={backendStatusMessage}
+              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
+                backendStatus === 'online'
+                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300'
+                  : backendStatus === 'offline'
+                  ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                  : 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300'
+              }`}
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  backendStatus === 'online'
+                    ? 'bg-emerald-500'
+                    : backendStatus === 'offline'
+                    ? 'bg-red-500'
+                    : 'bg-gray-400'
+                }`}
+              />
+              {backendStatus === 'online'
+                ? 'Backend Online'
+                : backendStatus === 'offline'
+                ? 'Backend Offline'
+                : 'Backend Checking'}
+            </span>
+            <button
+              type="button"
+              onClick={handleReconnectNow}
+              disabled={checkingBackend}
+              className="rounded-md border border-gray-300 dark:border-gray-600 px-2 py-1 text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-60 disabled:cursor-not-allowed"
+              title="Check backend connection now"
+            >
+              {checkingBackend ? 'Checking...' : 'Reconnect now'}
+            </button>
             <span className="text-sm text-gray-600 dark:text-gray-400 mr-2">
               {user?.email || 'Not signed in'}
             </span>

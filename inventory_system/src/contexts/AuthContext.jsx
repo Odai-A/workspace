@@ -5,6 +5,7 @@ import { getApiEndpoint } from '../utils/apiConfig';
 
 // Create the context
 const AuthContext = createContext(null);
+const AUTH_INIT_TIMEOUT_MS = 12000;
 
 // Export the hook for using the context
 export const useAuth = () => {
@@ -54,8 +55,15 @@ export const AuthProvider = ({ children }) => {
     console.log('✅ Supabase configured. Authentication enabled.');
     setLoading(true);
     const fetchSession = async () => {
+      let timeoutId = null;
       try {
-        const { data: { session: currentSession }, error } = await supabase.auth.getSession();
+        const sessionResult = await Promise.race([
+          supabase.auth.getSession(),
+          new Promise((_, reject) => {
+            timeoutId = setTimeout(() => reject(new Error('Auth session request timed out')), AUTH_INIT_TIMEOUT_MS);
+          }),
+        ]);
+        const { data: { session: currentSession }, error } = sessionResult;
         
         // Handle refresh token errors gracefully - these are common when tokens are expired/invalid
         if (error) {
@@ -90,6 +98,7 @@ export const AuthProvider = ({ children }) => {
         setUser(null);
         logAuthState('init-no-session', { error: error.message });
       } finally {
+        if (timeoutId) clearTimeout(timeoutId);
         setLoading(false);
       }
     };
@@ -207,6 +216,8 @@ export const AuthProvider = ({ children }) => {
         userMessage = 'Invalid email or password. Please check your credentials and try again.';
       } else if (msg.includes('user not found') || msg.includes('invalid credentials')) {
         userMessage = 'Invalid email or password. Please check your credentials and try again.';
+      } else if (msg.includes('failed to fetch') || msg.includes('networkerror') || msg.includes('load failed') || msg.includes('name_not_resolved')) {
+        userMessage = 'Cannot reach authentication server. Check internet/DNS and verify VITE_SUPABASE_URL is correct for your Supabase project.';
       } else {
         userMessage = error?.message || 'Sign-in failed. Please check your email and password and try again.';
         console.error('Sign-in error:', error);
