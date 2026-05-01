@@ -934,6 +934,80 @@ const Scanner = () => {
     return hasIdentity || hasDetails || hasMedia;
   };
 
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const buildDisplayableApiProduct = (apiResult, fallbackCode = '') => {
+    const allImages = apiResult?.images || (apiResult?.image ? [apiResult.image] : []);
+    const allVideos = apiResult?.videos || [];
+    return {
+      fnsku: apiResult?.fnsku || fallbackCode,
+      asin: apiResult?.asin || '',
+      name: apiResult?.title || '',
+      image_url: allImages[0] || '',
+      images: allImages,
+      images_count: allImages.length,
+      videos: allVideos,
+      videos_count: apiResult?.videos_count || allVideos.length,
+      price: apiResult?.price || '',
+      brand: apiResult?.brand || '',
+      category: apiResult?.category || '',
+      description: apiResult?.description || '',
+      upc: apiResult?.upc || '',
+      amazon_url: apiResult?.amazon_url || '',
+      source: apiResult?.source || 'api',
+      cost_status: apiResult?.cost_status || (apiResult?.cached ? 'no_charge' : 'charged'),
+    };
+  };
+
+  const tryRecoverPendingLookup = async (code, options = {}) => {
+    const {
+      maxChecks = 4,
+      delayMs = 900,
+      skipAutoInventory = false,
+      suppressToast = false,
+    } = options;
+    const normalizedCode = String(code || '').trim().toUpperCase();
+    if (!normalizedCode) return false;
+
+    for (let attempt = 1; attempt <= maxChecks; attempt += 1) {
+      const localMatch = await findProductInLocalSources(normalizedCode);
+      if (localMatch?.product) {
+        await handleProductFound(
+          localMatch.product,
+          normalizedCode,
+          { source: localMatch.source, recovered: true },
+          { skipAutoInventory }
+        );
+        return true;
+      }
+
+      try {
+        const statusUrl = getApiEndpoint('/scan/status')
+          + '?code=' + encodeURIComponent(normalizedCode)
+          + `&attempt=${attempt}`
+          + '&include_scan_count=0'
+          + '&include_enrichment=1';
+
+        const { data } = await axios.get(statusUrl, buildScanAxiosConfig({ timeout: 10000 }));
+        if (isReadyScanStatusPayload(data)) {
+          const product = buildDisplayableApiProduct(data, normalizedCode);
+          await handleProductFound(product, normalizedCode, data, { skipAutoInventory });
+          if (!suppressToast && !batchModeRef.current) {
+            toast.success('Product found and loaded.', { autoClose: 1600 });
+          }
+          return true;
+        }
+      } catch (error) {
+        console.warn(`Recovery check ${attempt} failed for ${normalizedCode}:`, error);
+      }
+
+      if (attempt < maxChecks) {
+        await sleep(delayMs);
+      }
+    }
+    return false;
+  };
+
   const findProductInLocalSources = async (code) => {
     const normalizedCode = String(code || '').trim().toUpperCase();
     if (!normalizedCode) return null;
@@ -1093,6 +1167,18 @@ const Scanner = () => {
         
         if (apiResult && apiResult.success) {
           if (apiResult.not_in_api_database) {
+            const recovered = await tryRecoverPendingLookup(upperCode, {
+              maxChecks: 5,
+              delayMs: 900,
+              skipAutoInventory: forceApiLookup,
+              suppressToast: true,
+            });
+            if (recovered) {
+              setNotInDatabaseMessage(null);
+              setIsApiProcessing(false);
+              completeScanTimer('POLL_RECOVERY', upperCode);
+              return;
+            }
             setNotInDatabaseMessage(apiResult.message || "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time.");
             setLastScannedCode(code);
             setIsApiProcessing(false);
@@ -1149,28 +1235,7 @@ const Scanner = () => {
 
           // Full data – use images from backend only (no duplicate Rainforest call; use Check for Updates or re-scan for more images)
           const allImages = apiResult.images || (apiResult.image ? [apiResult.image] : []);
-          
-          const allVideos = apiResult.videos || [];
-          const videosCount = apiResult.videos_count || allVideos.length;
-          
-          const displayableProduct = {
-            fnsku: apiResult.fnsku || code,
-            asin: apiResult.asin || '',
-            name: apiResult.title || '',
-            image_url: allImages[0] || '',
-            images: allImages,
-            images_count: allImages.length,
-            videos: allVideos,
-            videos_count: videosCount,
-            price: apiResult.price || '',
-            brand: apiResult.brand || '',
-            category: apiResult.category || '',
-            description: apiResult.description || '',
-            upc: apiResult.upc || '',
-            amazon_url: apiResult.amazon_url || '',
-            source: apiResult.source || 'api',
-            cost_status: apiResult.cost_status || (apiResult.cached ? 'no_charge' : 'charged')
-          };
+          const displayableProduct = buildDisplayableApiProduct(apiResult, code);
           
           if (!batchMode) {
             if (forceApiLookup) {
@@ -3053,6 +3118,17 @@ const Scanner = () => {
         const data = res.data;
         consecutiveErrors = 0;
         if (data && data.not_in_api_database) {
+          const recovered = await tryRecoverPendingLookup(normalizedCode, {
+            maxChecks: 3,
+            delayMs: 800,
+            suppressToast: true,
+          });
+          if (recovered) {
+            stopProcessingPoll(normalizedCode);
+            setIsApiProcessing(false);
+            completeScanTimer('POLL_RECOVERY', normalizedCode);
+            return;
+          }
           stopProcessingPoll(normalizedCode);
           setIsApiProcessing(false);
           setNotInDatabaseMessage(data.message || "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time.");
@@ -3071,25 +3147,7 @@ const Scanner = () => {
         if (isReadyScanStatusPayload(data)) {
           stopProcessingPoll(normalizedCode);
           setIsApiProcessing(false);
-          const allImages = data.images || (data.image ? [data.image] : []);
-          const displayableProduct = {
-            fnsku: data.fnsku || normalizedCode,
-            asin: data.asin || '',
-            name: data.title || '',
-            image_url: allImages[0] || '',
-            images: allImages,
-            images_count: allImages.length,
-            videos: data.videos || [],
-            videos_count: data.videos_count || 0,
-            price: data.price || '',
-            brand: data.brand || '',
-            category: data.category || '',
-            description: data.description || '',
-            upc: data.upc || '',
-            amazon_url: data.amazon_url || '',
-            source: data.source || 'api',
-            cost_status: data.cost_status || (data.cached ? 'no_charge' : 'charged')
-          };
+          const displayableProduct = buildDisplayableApiProduct(data, normalizedCode);
           handleProductFound(displayableProduct, normalizedCode);
           completeScanTimer('POLL', normalizedCode);
           if (!batchMode) toast.success('Product details ready.', { icon: '💚' });
