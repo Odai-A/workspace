@@ -1035,41 +1035,90 @@ const Scanner = () => {
     const normalizedCode = String(code || '').trim().toUpperCase();
     if (!normalizedCode || !userId) return false;
 
-    try {
-      const scanUrl = getApiEndpoint('/scan');
-      const response = await axios.post(scanUrl, {
-        code: normalizedCode,
-        user_id: userId,
-        force_api_lookup: true,
-      }, buildScanAxiosConfig({ timeout: 35000 }));
+    // After first scan triggers external ASIN lookup, retry with force_api_lookup
+    // using a tiered backoff: 3s → 5s → 8s → 12s waits before each re-scan attempt.
+    // This gives the external API (Rainforest/etc.) time to return before we give up.
+    const retryDelays = [3000, 5000, 8000, 12000];
 
-      const data = response?.data;
-      if (!data?.success) return false;
+    for (let attempt = 0; attempt < retryDelays.length; attempt++) {
+      // Show progress only on first attempt so UI feedback is clean
+      if (attempt === 0 && !batchModeRef.current) {
+        toast.info('Looking up product... please wait.', { autoClose: retryDelays[0] + 1000 });
+      }
 
-      applyScanCountFromPayload(data.scan_count);
+      await sleep(retryDelays[attempt]);
 
-      if (!data.processing && !data.not_in_api_database && isReadyScanStatusPayload(data, { requireImages })) {
-        const product = buildDisplayableApiProduct(data, normalizedCode);
-        await handleProductFound(product, normalizedCode, data, { skipAutoInventory });
-        completeScanTimer('API_RECOVERY', normalizedCode);
+      // Check local cache/DB first — backend may have cached it by now
+      const localMatch = await findProductInLocalSources(normalizedCode);
+      if (localMatch?.product && (!requireImages || hasProductImages(localMatch.product))) {
+        await handleProductFound(localMatch.product, normalizedCode, { source: localMatch.source }, { skipAutoInventory });
+        completeScanTimer('DB_RECOVERY', normalizedCode);
         return true;
       }
 
-      const recovered = await tryRecoverPendingLookup(normalizedCode, {
-        maxChecks: 8,
-        delayMs: 1000,
-        skipAutoInventory,
-        suppressToast: true,
-        requireImages,
-      });
-      if (recovered) {
-        completeScanTimer('POLL_RECOVERY', normalizedCode);
+      try {
+        const scanUrl = getApiEndpoint('/scan');
+        const response = await axios.post(scanUrl, {
+          code: normalizedCode,
+          user_id: userId,
+          force_api_lookup: true,
+        }, buildScanAxiosConfig({ timeout: 40000 }));
+
+        const data = response?.data;
+        if (!data?.success) continue;
+
+        applyScanCountFromPayload(data.scan_count);
+
+        if (data.not_in_api_database) {
+          // External API hasn't returned yet — loop and try next delay tier
+          console.log(`⏳ Recovery attempt ${attempt + 1}: still not in database, waiting...`);
+          continue;
+        }
+
+        if (data.processing) {
+          // Backend is processing — poll status until ready
+          const statusRecovered = await tryRecoverPendingLookup(normalizedCode, {
+            maxChecks: 10,
+            delayMs: 1500,
+            skipAutoInventory,
+            suppressToast: true,
+            requireImages,
+          });
+          if (statusRecovered) {
+            completeScanTimer('POLL_RECOVERY', normalizedCode);
+            return true;
+          }
+          continue;
+        }
+
+        if (isReadyScanStatusPayload(data, { requireImages })) {
+          const product = buildDisplayableApiProduct(data, normalizedCode);
+          await handleProductFound(product, normalizedCode, data, { skipAutoInventory });
+          completeScanTimer('API_RECOVERY', normalizedCode);
+          return true;
+        }
+
+        // Has some data but missing images — show it and keep trying for images
+        if (isReadyScanStatusPayload(data) && requireImages) {
+          const partialProduct = buildDisplayableApiProduct(data, normalizedCode);
+          await handleProductFound(partialProduct, normalizedCode, data, { skipAutoInventory });
+          // Continue loop trying to get images
+        }
+
+      } catch (error) {
+        console.warn(`Recovery attempt ${attempt + 1} failed for ${normalizedCode}:`, error?.message);
       }
-      return recovered;
-    } catch (error) {
-      console.warn(`Forced one-go recovery failed for ${normalizedCode}:`, error);
-      return false;
     }
+
+    // Final check — show whatever we have locally
+    const finalLocalMatch = await findProductInLocalSources(normalizedCode);
+    if (finalLocalMatch?.product) {
+      await handleProductFound(finalLocalMatch.product, normalizedCode, { source: finalLocalMatch.source }, { skipAutoInventory });
+      completeScanTimer('DB_RECOVERY', normalizedCode);
+      return true;
+    }
+
+    return false;
   };
 
   const findProductInLocalSources = async (code) => {
@@ -1238,29 +1287,18 @@ const Scanner = () => {
         
         if (apiResult && apiResult.success) {
           if (apiResult.not_in_api_database) {
-            const recovered = await tryRecoverPendingLookup(upperCode, {
-              maxChecks: 5,
-              delayMs: 900,
+            // Backend triggered async external ASIN lookup — wait and retry automatically
+            // so the user never needs to press Fetch again
+            const recovered = await attemptOneGoApiRecovery(upperCode, {
               skipAutoInventory: forceApiLookup,
-              suppressToast: true,
+              requireImages: true,
             });
             if (recovered) {
               setNotInDatabaseMessage(null);
               setIsApiProcessing(false);
-              completeScanTimer('POLL_RECOVERY', upperCode);
               return;
             }
-            if (!forceApiLookup) {
-              const forceRecovered = await attemptOneGoApiRecovery(upperCode, {
-                skipAutoInventory: forceApiLookup,
-                requireImages: true,
-              });
-              if (forceRecovered) {
-                setNotInDatabaseMessage(null);
-                setIsApiProcessing(false);
-                return;
-              }
-            }
+            // Truly not found after all retry tiers exhausted
             setNotInDatabaseMessage(apiResult.message || "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time.");
             setLastScannedCode(code);
             setIsApiProcessing(false);
@@ -1387,6 +1425,7 @@ const Scanner = () => {
           if (forceRecovered) {
             setNotInDatabaseMessage(null);
             setIsApiProcessing(false);
+            completeScanTimer('API_RECOVERY', upperCode);
             return;
           }
         }
@@ -3214,20 +3253,15 @@ const Scanner = () => {
         const data = res.data;
         consecutiveErrors = 0;
         if (data && data.not_in_api_database) {
-          const recovered = await tryRecoverPendingLookup(normalizedCode, {
-            maxChecks: 3,
-            delayMs: 800,
-            suppressToast: true,
+          stopProcessingPoll(normalizedCode);
+          setIsApiProcessing(false);
+          const recovered = await attemptOneGoApiRecovery(normalizedCode, {
             requireImages: true,
           });
           if (recovered) {
-            stopProcessingPoll(normalizedCode);
-            setIsApiProcessing(false);
             completeScanTimer('POLL_RECOVERY', normalizedCode);
             return;
           }
-          stopProcessingPoll(normalizedCode);
-          setIsApiProcessing(false);
           setNotInDatabaseMessage(data.message || "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time.");
           setLastScannedCode(normalizedCode);
           if (batchModeRef.current) {
