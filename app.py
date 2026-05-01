@@ -138,14 +138,17 @@ FREE_TRIAL_SCAN_LIMIT = int(os.environ.get('FREE_TRIAL_SCAN_LIMIT', '50'))
 FNSKU_PROCESSING_MESSAGE = "We're looking up this product. Please try again in a moment or use 'Check for Updates'."
 FNSKU_NOT_IN_DATABASE_MESSAGE = "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time. You may try again later or add the product manually."
 
-# Keep scan endpoints responsive for mobile/desktop clients.
-FNSKU_ADD_OR_GET_TIMEOUT = float(os.environ.get('FNSKU_ADD_OR_GET_TIMEOUT', '8'))
-FNSKU_GET_BY_BARCODE_TIMEOUT = float(os.environ.get('FNSKU_GET_BY_BARCODE_TIMEOUT', '4'))
-FNSKU_STATUS_LOOKUP_TIMEOUT = float(os.environ.get('FNSKU_STATUS_LOOKUP_TIMEOUT', '4'))
-RAINFOREST_REQUEST_TIMEOUT = float(os.environ.get('RAINFOREST_REQUEST_TIMEOUT', '7'))
-FNSKU_SCAN_INITIAL_MAX_POLLS = int(os.environ.get('FNSKU_SCAN_INITIAL_MAX_POLLS', '3'))
-FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS = int(os.environ.get('FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS', '700'))
-FNSKU_SCAN_RETRY_ADD_AFTER = int(os.environ.get('FNSKU_SCAN_RETRY_ADD_AFTER', '2'))
+# FNSKU/Rainforest timeouts — raised from earlier defaults since Gunicorn timeout is now 120s
+FNSKU_ADD_OR_GET_TIMEOUT = float(os.environ.get('FNSKU_ADD_OR_GET_TIMEOUT', '15'))
+FNSKU_GET_BY_BARCODE_TIMEOUT = float(os.environ.get('FNSKU_GET_BY_BARCODE_TIMEOUT', '8'))
+FNSKU_STATUS_LOOKUP_TIMEOUT = float(os.environ.get('FNSKU_STATUS_LOOKUP_TIMEOUT', '8'))
+RAINFOREST_REQUEST_TIMEOUT = float(os.environ.get('RAINFOREST_REQUEST_TIMEOUT', '15'))
+# Patient initial polling: FNSKU service typically needs 15-25s for new codes to resolve to ASIN.
+# Raised from 3 polls (2s) to 20 polls (~16s) so first scan resolves ASIN inline most of the time.
+# Safe under Gunicorn timeout 120s. AddOrGet retry happens halfway through.
+FNSKU_SCAN_INITIAL_MAX_POLLS = int(os.environ.get('FNSKU_SCAN_INITIAL_MAX_POLLS', '20'))
+FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS = int(os.environ.get('FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS', '800'))
+FNSKU_SCAN_RETRY_ADD_AFTER = int(os.environ.get('FNSKU_SCAN_RETRY_ADD_AFTER', '8'))
 FNSKU_NOT_IN_DATABASE_ATTEMPTS = int(os.environ.get('FNSKU_NOT_IN_DATABASE_ATTEMPTS', '15'))
 SKIP_RAINFOREST_ON_STANDARD_SCAN = str(os.environ.get('SKIP_RAINFOREST_ON_STANDARD_SCAN', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 
