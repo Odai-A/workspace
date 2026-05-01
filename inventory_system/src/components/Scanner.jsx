@@ -1008,6 +1008,66 @@ const Scanner = () => {
     return false;
   };
 
+  const applyScanCountFromPayload = (scanCountPayload) => {
+    if (!scanCountPayload) return;
+    const used = scanCountPayload.used || 0;
+    const limit = scanCountPayload.limit || null;
+    const remaining = scanCountPayload.remaining !== null && scanCountPayload.remaining !== undefined
+      ? scanCountPayload.remaining
+      : (scanCountPayload.limit ? Math.max(0, scanCountPayload.limit - (scanCountPayload.used || 0)) : null);
+    persistScanCount(used, limit, remaining);
+    const isCEO = scanCountPayload.is_ceo_admin || false;
+    setIsCEOAdmin(isCEO);
+    setScanCount({
+      used,
+      limit,
+      remaining,
+      isPaid: scanCountPayload.is_paid || false,
+      is_ceo_admin: isCEO
+    });
+  };
+
+  const attemptOneGoApiRecovery = async (code, options = {}) => {
+    const { skipAutoInventory = false } = options;
+    const normalizedCode = String(code || '').trim().toUpperCase();
+    if (!normalizedCode || !userId) return false;
+
+    try {
+      const scanUrl = getApiEndpoint('/scan');
+      const response = await axios.post(scanUrl, {
+        code: normalizedCode,
+        user_id: userId,
+        force_api_lookup: true,
+      }, buildScanAxiosConfig({ timeout: 35000 }));
+
+      const data = response?.data;
+      if (!data?.success) return false;
+
+      applyScanCountFromPayload(data.scan_count);
+
+      if (!data.processing && !data.not_in_api_database && isReadyScanStatusPayload(data)) {
+        const product = buildDisplayableApiProduct(data, normalizedCode);
+        await handleProductFound(product, normalizedCode, data, { skipAutoInventory });
+        completeScanTimer('API_RECOVERY', normalizedCode);
+        return true;
+      }
+
+      const recovered = await tryRecoverPendingLookup(normalizedCode, {
+        maxChecks: 8,
+        delayMs: 1000,
+        skipAutoInventory,
+        suppressToast: true,
+      });
+      if (recovered) {
+        completeScanTimer('POLL_RECOVERY', normalizedCode);
+      }
+      return recovered;
+    } catch (error) {
+      console.warn(`Forced one-go recovery failed for ${normalizedCode}:`, error);
+      return false;
+    }
+  };
+
   const findProductInLocalSources = async (code) => {
     const normalizedCode = String(code || '').trim().toUpperCase();
     if (!normalizedCode) return null;
@@ -1179,6 +1239,16 @@ const Scanner = () => {
               completeScanTimer('POLL_RECOVERY', upperCode);
               return;
             }
+            if (!forceApiLookup) {
+              const forceRecovered = await attemptOneGoApiRecovery(upperCode, {
+                skipAutoInventory: forceApiLookup,
+              });
+              if (forceRecovered) {
+                setNotInDatabaseMessage(null);
+                setIsApiProcessing(false);
+                return;
+              }
+            }
             setNotInDatabaseMessage(apiResult.message || "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time.");
             setLastScannedCode(code);
             setIsApiProcessing(false);
@@ -1264,21 +1334,7 @@ const Scanner = () => {
               console.log("📊 Scan response scan_count:", apiResult.scan_count);
               if (apiResult.scan_count) {
                 console.log("✅ Updating scan count from response:", apiResult.scan_count);
-                const used = apiResult.scan_count.used || 0;
-                const limit = apiResult.scan_count.limit || null;
-                const remaining = apiResult.scan_count.remaining !== null && apiResult.scan_count.remaining !== undefined
-                  ? apiResult.scan_count.remaining
-                  : (apiResult.scan_count.limit ? Math.max(0, apiResult.scan_count.limit - (apiResult.scan_count.used || 0)) : null);
-                persistScanCount(used, limit, remaining);
-                const isCEO = apiResult.scan_count.is_ceo_admin || false;
-                setIsCEOAdmin(isCEO);
-                setScanCount({
-                  used,
-                  limit,
-                  remaining,
-                  isPaid: apiResult.scan_count.is_paid || false,
-                  is_ceo_admin: isCEO
-                });
+                applyScanCountFromPayload(apiResult.scan_count);
               } else {
                 console.log("⚠️ No scan_count in response, fetching...");
                 fetchScanCount(); // Fallback when backend omits scan_count
@@ -1301,6 +1357,16 @@ const Scanner = () => {
         if (recoveredLocally) {
           completeScanTimer('DB_FALLBACK', upperCode);
           return;
+        }
+        if (!forceApiLookup) {
+          const forceRecovered = await attemptOneGoApiRecovery(upperCode, {
+            skipAutoInventory: forceApiLookup,
+          });
+          if (forceRecovered) {
+            setNotInDatabaseMessage(null);
+            setIsApiProcessing(false);
+            return;
+          }
         }
         if (error.response) {
           const status = error.response.status;
