@@ -922,7 +922,8 @@ const Scanner = () => {
     return Boolean(String(product?.image_url || '').trim());
   };
 
-  const isReadyScanStatusPayload = (payload) => {
+  const isReadyScanStatusPayload = (payload, options = {}) => {
+    const { requireImages = false } = options;
     if (!payload?.success || payload?.processing) return false;
     const hasIdentity = Boolean(String(payload?.asin || payload?.fnsku || '').trim());
     const hasDetails = Boolean(
@@ -931,6 +932,7 @@ const Scanner = () => {
     const hasMedia = Array.isArray(payload?.images)
       ? payload.images.filter(Boolean).length > 0
       : Boolean(String(payload?.image || '').trim());
+    if (requireImages) return hasMedia && (hasIdentity || hasDetails);
     return hasIdentity || hasDetails || hasMedia;
   };
 
@@ -965,13 +967,14 @@ const Scanner = () => {
       delayMs = 900,
       skipAutoInventory = false,
       suppressToast = false,
+      requireImages = false,
     } = options;
     const normalizedCode = String(code || '').trim().toUpperCase();
     if (!normalizedCode) return false;
 
     for (let attempt = 1; attempt <= maxChecks; attempt += 1) {
       const localMatch = await findProductInLocalSources(normalizedCode);
-      if (localMatch?.product) {
+      if (localMatch?.product && (!requireImages || hasProductImages(localMatch.product))) {
         await handleProductFound(
           localMatch.product,
           normalizedCode,
@@ -989,7 +992,7 @@ const Scanner = () => {
           + '&include_enrichment=1';
 
         const { data } = await axios.get(statusUrl, buildScanAxiosConfig({ timeout: 10000 }));
-        if (isReadyScanStatusPayload(data)) {
+        if (isReadyScanStatusPayload(data, { requireImages })) {
           const product = buildDisplayableApiProduct(data, normalizedCode);
           await handleProductFound(product, normalizedCode, data, { skipAutoInventory });
           if (!suppressToast && !batchModeRef.current) {
@@ -1028,7 +1031,7 @@ const Scanner = () => {
   };
 
   const attemptOneGoApiRecovery = async (code, options = {}) => {
-    const { skipAutoInventory = false } = options;
+    const { skipAutoInventory = false, requireImages = false } = options;
     const normalizedCode = String(code || '').trim().toUpperCase();
     if (!normalizedCode || !userId) return false;
 
@@ -1045,7 +1048,7 @@ const Scanner = () => {
 
       applyScanCountFromPayload(data.scan_count);
 
-      if (!data.processing && !data.not_in_api_database && isReadyScanStatusPayload(data)) {
+      if (!data.processing && !data.not_in_api_database && isReadyScanStatusPayload(data, { requireImages })) {
         const product = buildDisplayableApiProduct(data, normalizedCode);
         await handleProductFound(product, normalizedCode, data, { skipAutoInventory });
         completeScanTimer('API_RECOVERY', normalizedCode);
@@ -1057,6 +1060,7 @@ const Scanner = () => {
         delayMs: 1000,
         skipAutoInventory,
         suppressToast: true,
+        requireImages,
       });
       if (recovered) {
         completeScanTimer('POLL_RECOVERY', normalizedCode);
@@ -1149,7 +1153,14 @@ const Scanner = () => {
         if (!batchMode) {
           toast.info('Found in database. Fetching missing images...');
         }
+        setLoading(true);
+        const recoveredWithImages = await attemptOneGoApiRecovery(upperCode, {
+          requireImages: true,
+        });
         setLoading(false);
+        if (recoveredWithImages) {
+          return;
+        }
         await lookupProductByCode(upperCode, { forceApiLookup: true, suppressBatchItemToast: true });
         return;
       }
@@ -1242,6 +1253,7 @@ const Scanner = () => {
             if (!forceApiLookup) {
               const forceRecovered = await attemptOneGoApiRecovery(upperCode, {
                 skipAutoInventory: forceApiLookup,
+                requireImages: true,
               });
               if (forceRecovered) {
                 setNotInDatabaseMessage(null);
@@ -1325,8 +1337,17 @@ const Scanner = () => {
             toast.success(`${upperCode}: saved to catalog (${allImages.length} image${allImages.length !== 1 ? 's' : ''}).`, { autoClose: 2000 });
           }
           // Set product info - pass apiResult to detect incomplete data
-          handleProductFound(displayableProduct, code, apiResult, { skipAutoInventory: forceApiLookup });
-          completeScanTimer('API', upperCode);
+          await handleProductFound(displayableProduct, code, apiResult, { skipAutoInventory: forceApiLookup });
+          const missingImagesAfterApi = !hasProductImages(displayableProduct);
+          if (missingImagesAfterApi) {
+            const recoveredWithImages = await attemptOneGoApiRecovery(upperCode, {
+              skipAutoInventory: forceApiLookup,
+              requireImages: true,
+            });
+            completeScanTimer(recoveredWithImages ? 'API_RECOVERY' : 'API', upperCode);
+          } else {
+            completeScanTimer('API', upperCode);
+          }
           
           // Prefer scan_count from response to avoid extra /api/scan-count refetch; backend includes it in all scan responses
           requestAnimationFrame(() => {
@@ -1361,6 +1382,7 @@ const Scanner = () => {
         if (!forceApiLookup) {
           const forceRecovered = await attemptOneGoApiRecovery(upperCode, {
             skipAutoInventory: forceApiLookup,
+            requireImages: true,
           });
           if (forceRecovered) {
             setNotInDatabaseMessage(null);
@@ -1479,14 +1501,22 @@ const Scanner = () => {
     return raw ? raw.toUpperCase() : '';
   };
 
-  const handleFetchImagesFromApi = () => {
+  const handleFetchImagesFromApi = async () => {
     if (!productInfo || batchMode) return;
     const code = (lastScannedCode && String(lastScannedCode).trim()) || enrichCodeFromProduct(productInfo);
     if (!code) {
       toast.error('No barcode or ASIN available to look up.');
       return;
     }
-    lookupProductByCode(code, { forceApiLookup: true });
+    setApiEnrichLoading(true);
+    try {
+      const recovered = await attemptOneGoApiRecovery(code, { requireImages: true });
+      if (!recovered) {
+        await lookupProductByCode(code, { forceApiLookup: true });
+      }
+    } finally {
+      setApiEnrichLoading(false);
+    }
   };
 
   const handleManualScan = async (barcodeToScan) => {
@@ -3188,6 +3218,7 @@ const Scanner = () => {
             maxChecks: 3,
             delayMs: 800,
             suppressToast: true,
+            requireImages: true,
           });
           if (recovered) {
             stopProcessingPoll(normalizedCode);
@@ -3215,7 +3246,17 @@ const Scanner = () => {
           setIsApiProcessing(false);
           const displayableProduct = buildDisplayableApiProduct(data, normalizedCode);
           handleProductFound(displayableProduct, normalizedCode);
-          completeScanTimer('POLL', normalizedCode);
+          const missingImagesAfterPoll = !hasProductImages(displayableProduct);
+          if (missingImagesAfterPoll) {
+            const recoveredWithImages = await attemptOneGoApiRecovery(normalizedCode, { requireImages: true });
+            if (recoveredWithImages) {
+              completeScanTimer('POLL_RECOVERY', normalizedCode);
+            } else {
+              completeScanTimer('POLL', normalizedCode);
+            }
+          } else {
+            completeScanTimer('POLL', normalizedCode);
+          }
           if (!batchMode) toast.success('Product details ready.', { icon: '💚' });
           if (data.scan_count) {
             const used = data.scan_count.used || 0;
