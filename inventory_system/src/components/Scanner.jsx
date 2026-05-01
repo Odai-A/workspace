@@ -16,10 +16,12 @@ import { mockService } from '../services/mockData';
 import { useAuth } from '../contexts/AuthContext';
 import { getApiUrl, getApiEndpoint } from '../utils/apiConfig';
 import {
+  addShelvesToArea,
   getLocationOptions,
   getNextItemNumber,
   getWarehouseLayoutSettings,
   isValidLocationCode,
+  setWarehouseLayoutSettings,
 } from '../utils/warehouseSettings';
 
 /**
@@ -85,6 +87,9 @@ const Scanner = () => {
     return options[0] || '';
   });
   const [batchInventoryBucket, setBatchInventoryBucket] = useState('');
+  const [isAddingShelfInline, setIsAddingShelfInline] = useState(false);
+  const [newShelfArea, setNewShelfArea] = useState(() => getWarehouseLayoutSettings().areas?.[0] || 'STORAGE');
+  const [newShelvesCount, setNewShelvesCount] = useState(1);
   
   // State for scanner: live camera (BarcodeScanner) primary, photo (BarcodeReader) fallback
   const [isCameraActive, setIsCameraActive] = useState(false);
@@ -99,6 +104,7 @@ const Scanner = () => {
   const [isApiProcessing, setIsApiProcessing] = useState(false);
   const [notInDatabaseMessage, setNotInDatabaseMessage] = useState(null);
   const [processingStartTime, setProcessingStartTime] = useState(null);
+  const [scanLatency, setScanLatency] = useState(null);
 
   // State for auto-refresh when API is processing
   const [isAutoRefreshing, setIsAutoRefreshing] = useState(false);
@@ -108,6 +114,8 @@ const Scanner = () => {
   const countdownIntervalRef = useRef(null);
   const processingPollersRef = useRef(new Map());
   const productInfoSectionRef = useRef(null);
+  const scanTimingStartRef = useRef(0);
+  const scanTimingCodeRef = useRef('');
   const batchModeRef = useRef(batchMode);
   batchModeRef.current = batchMode;
 
@@ -161,18 +169,93 @@ const Scanner = () => {
     return `Request failed (${status})`;
   };
 
+  const startScanTimer = (code) => {
+    scanTimingStartRef.current = performance.now();
+    scanTimingCodeRef.current = String(code || '').trim().toUpperCase();
+  };
+
+  const completeScanTimer = (source, code = '') => {
+    const now = performance.now();
+    const startedAt = scanTimingStartRef.current || now;
+    const elapsedMs = Math.max(0, Math.round(now - startedAt));
+    const normalizedCode = String(code || scanTimingCodeRef.current || '').trim().toUpperCase();
+    setScanLatency({
+      source,
+      elapsedMs,
+      code: normalizedCode,
+      at: Date.now(),
+    });
+  };
+
+  const formatScanLatencySource = (source) => {
+    const key = String(source || '').toUpperCase();
+    if (key.startsWith('DB')) return 'DB';
+    if (key.startsWith('POLL')) return 'POLL';
+    if (key === 'API') return 'API';
+    if (key === 'NOT_FOUND') return 'NOT FOUND';
+    if (key.includes('TIMEOUT')) return 'TIMEOUT';
+    if (key.includes('ERROR')) return 'ERROR';
+    return key || 'UNKNOWN';
+  };
+
+  const formatAreaLabel = (areaCode) => String(areaCode || '').replace(/-/g, ' ');
+  const getQuickAreaOptions = () => {
+    const configuredAreas = getWarehouseLayoutSettings().areas || [];
+    return [...new Set([...configuredAreas, 'STORAGE', 'SHOWROOM'])];
+  };
+
+  const syncLocationOptions = (layout = getWarehouseLayoutSettings()) => {
+    const options = getLocationOptions(layout);
+    setLocationOptions(options);
+    setInventoryLocation((prev) => {
+      const normalizedPrev = String(prev || '').trim().toUpperCase();
+      if (normalizedPrev && options.some((loc) => loc.toUpperCase() === normalizedPrev)) {
+        return normalizedPrev;
+      }
+      return options[0] || '';
+    });
+    setBatchInventoryLocation((prev) => {
+      const normalizedPrev = String(prev || '').trim().toUpperCase();
+      if (normalizedPrev && options.some((loc) => loc.toUpperCase() === normalizedPrev)) {
+        return normalizedPrev;
+      }
+      return options[0] || '';
+    });
+    setNewShelfArea((prev) => {
+      const normalizedPrev = String(prev || '').trim().toUpperCase();
+      if (normalizedPrev && (layout.areas || []).some((area) => area.toUpperCase() === normalizedPrev)) {
+        return normalizedPrev;
+      }
+      return layout.areas?.[0] || 'STORAGE';
+    });
+  };
+
+  const handleQuickAddShelf = () => {
+    const selectedArea = String(newShelfArea || '').trim().toUpperCase();
+    if (!selectedArea) {
+      toast.error('Select an area first.');
+      return;
+    }
+    const count = Math.max(1, Math.min(25, parseInt(newShelvesCount, 10) || 1));
+    const currentLayout = getWarehouseLayoutSettings();
+    const { layout: nextLayout, addedLocations } = addShelvesToArea(
+      { area: selectedArea, count },
+      currentLayout
+    );
+    const savedLayout = setWarehouseLayoutSettings(nextLayout);
+    syncLocationOptions(savedLayout);
+    if (addedLocations.length > 0) {
+      const firstAdded = addedLocations[0];
+      setInventoryLocation(firstAdded);
+      setBatchInventoryLocation(firstAdded);
+    }
+    setIsAddingShelfInline(false);
+    setNewShelvesCount(1);
+    toast.success(`${count} shelf ${count > 1 ? 'groups' : 'group'} added to ${formatAreaLabel(selectedArea)}.`);
+  };
+
   useEffect(() => {
-    const syncLayout = () => {
-      const options = getLocationOptions(getWarehouseLayoutSettings());
-      setLocationOptions(options);
-      setBatchInventoryLocation((prev) => {
-        const normalizedPrev = String(prev || '').trim().toUpperCase();
-        if (normalizedPrev && options.some((loc) => loc.toUpperCase() === normalizedPrev)) {
-          return normalizedPrev;
-        }
-        return options[0] || '';
-      });
-    };
+    const syncLayout = () => syncLocationOptions(getWarehouseLayoutSettings());
     syncLayout();
     window.addEventListener('storage', syncLayout);
     return () => window.removeEventListener('storage', syncLayout);
@@ -785,42 +868,103 @@ const Scanner = () => {
     }
   };
 
+  const buildDisplayableManifestProduct = (manifestProduct, fallbackCode = '') => {
+    const rawImageValue =
+      manifestProduct?.image_url
+      || manifestProduct?.rawSupabase?.image_url
+      || manifestProduct?.rawSupabase?.ImageURL
+      || '';
+
+    let imageUrl = '';
+    let images = [];
+    if (rawImageValue) {
+      if (typeof rawImageValue === 'string') {
+        try {
+          const parsed = JSON.parse(rawImageValue);
+          if (Array.isArray(parsed)) {
+            images = parsed.filter(Boolean);
+          } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.images)) {
+            images = parsed.images.filter(Boolean);
+          } else if (parsed && typeof parsed === 'string') {
+            images = [parsed];
+          } else {
+            images = [rawImageValue];
+          }
+        } catch {
+          images = [rawImageValue];
+        }
+      } else if (Array.isArray(rawImageValue)) {
+        images = rawImageValue.filter(Boolean);
+      }
+    }
+
+    imageUrl = images[0] || '';
+
+    return {
+      fnsku: manifestProduct?.fnsku || fallbackCode,
+      asin: manifestProduct?.asin || '',
+      name: manifestProduct?.name || manifestProduct?.description || fallbackCode,
+      image_url: imageUrl,
+      images,
+      videos: [],
+      price: manifestProduct?.price || '',
+      category: manifestProduct?.category || '',
+      description: manifestProduct?.description || manifestProduct?.name || '',
+      upc: manifestProduct?.upc || '',
+      source: manifestProduct?.source || 'local_database',
+      cost_status: 'no_charge',
+    };
+  };
+
+  const hasProductImages = (product) => {
+    const imageList = Array.isArray(product?.images) ? product.images.filter(Boolean) : [];
+    if (imageList.length > 0) return true;
+    return Boolean(String(product?.image_url || '').trim());
+  };
+
+  const isReadyScanStatusPayload = (payload) => {
+    if (!payload?.success || payload?.processing) return false;
+    const hasIdentity = Boolean(String(payload?.asin || payload?.fnsku || '').trim());
+    const hasDetails = Boolean(
+      String(payload?.title || payload?.description || payload?.upc || '').trim()
+    );
+    const hasMedia = Array.isArray(payload?.images)
+      ? payload.images.filter(Boolean).length > 0
+      : Boolean(String(payload?.image || '').trim());
+    return hasIdentity || hasDetails || hasMedia;
+  };
+
+  const findProductInLocalSources = async (code) => {
+    const normalizedCode = String(code || '').trim().toUpperCase();
+    if (!normalizedCode) return null;
+
+    const cachedRow = await apiCacheService.getCachedLookup(normalizedCode);
+    if (cachedRow) {
+      const cachedProduct = apiCacheService.mapCacheRowToProductInfo(cachedRow);
+      if (cachedProduct) {
+        return { product: cachedProduct, source: 'api_lookup_cache' };
+      }
+    }
+
+    const manifestProduct = await dbProductLookupService.getProductByFnsku(normalizedCode);
+    if (manifestProduct) {
+      return {
+        product: buildDisplayableManifestProduct(manifestProduct, normalizedCode),
+        source: 'manifest_data',
+      };
+    }
+
+    return null;
+  };
+
   const tryLocalFallbackLookup = async (code, options = {}) => {
     const { skipAutoInventory = false, silent = false } = options;
     const normalizedCode = String(code || '').trim().toUpperCase();
     if (!normalizedCode) return false;
 
-    // 1) Fast path: api_lookup_cache (same user-visible shape as scanner product card)
-    const cachedRow = await apiCacheService.getCachedLookup(normalizedCode);
-    if (cachedRow) {
-      const cachedProduct = apiCacheService.mapCacheRowToProductInfo(cachedRow);
-      if (cachedProduct) {
-        await handleProductFound(cachedProduct, normalizedCode, { cached: true, source: 'api_lookup_cache' }, { skipAutoInventory });
-        if (!silent) {
-          toast.info(`Loaded ${normalizedCode} from cache while backend is unavailable.`, { autoClose: 2500 });
-        }
-        return true;
-      }
-    }
-
-    // 2) Fallback: current user's manifest_data rows
-    const manifestProduct = await dbProductLookupService.getProductByFnsku(normalizedCode);
-    if (manifestProduct) {
-      const displayableProduct = {
-        fnsku: manifestProduct.fnsku || normalizedCode,
-        asin: manifestProduct.asin || '',
-        name: manifestProduct.name || manifestProduct.description || normalizedCode,
-        image_url: manifestProduct.image_url || '',
-        images: manifestProduct.image_url ? [manifestProduct.image_url] : [],
-        videos: [],
-        price: manifestProduct.price || '',
-        category: manifestProduct.category || '',
-        description: manifestProduct.description || manifestProduct.name || '',
-        upc: manifestProduct.upc || '',
-        source: manifestProduct.source || 'local_database',
-        cost_status: 'no_charge',
-      };
-      await handleProductFound(displayableProduct, normalizedCode, { source: 'manifest_data' }, { skipAutoInventory });
+    const localMatch = await findProductInLocalSources(normalizedCode);
+    if (localMatch?.product) {
+      await handleProductFound(localMatch.product, normalizedCode, { source: localMatch.source }, { skipAutoInventory });
       if (!silent) {
         toast.info(`Loaded ${normalizedCode} from local database while backend is unavailable.`, { autoClose: 2500 });
       }
@@ -836,6 +980,9 @@ const Scanner = () => {
     // Ensure code is uppercase (safety measure)
     const upperCode = code.trim().toUpperCase();
     console.log(`🔍 Looking up product by code: ${upperCode}, UserID: ${userId || 'N/A'}, Batch Mode: ${batchMode}, forceApiLookup: ${forceApiLookup}`);
+    if (!forceApiLookup || !scanTimingStartRef.current) {
+      startScanTimer(upperCode);
+    }
 
     if (!userId || !session?.access_token) {
       toast.error(
@@ -849,6 +996,29 @@ const Scanner = () => {
         setLoading(false);
       }
       return;
+    }
+
+    if (!forceApiLookup) {
+      const localMatch = await findProductInLocalSources(upperCode);
+      if (localMatch?.product) {
+        await handleProductFound(localMatch.product, upperCode, { cached: true, source: localMatch.source });
+        const missingImages = !hasProductImages(localMatch.product);
+        if (!missingImages) {
+          completeScanTimer('DB', upperCode);
+          if (!batchMode) {
+            toast.success('Found in your database.');
+          }
+          setLoading(false);
+          return;
+        }
+
+        if (!batchMode) {
+          toast.info('Found in database. Fetching missing images...');
+        }
+        setLoading(false);
+        await lookupProductByCode(upperCode, { forceApiLookup: true, suppressBatchItemToast: true });
+        return;
+      }
     }
 
     if (forceApiLookup) {
@@ -927,6 +1097,7 @@ const Scanner = () => {
             setLastScannedCode(code);
             setIsApiProcessing(false);
             toast.warning(apiResult.message || "This product could not be found in our lookup database.", { autoClose: 8000 });
+            completeScanTimer('NOT_FOUND', upperCode);
             return;
           }
           // Backend returned "processing: true" – we're still looking up; show partial data and Check for Updates
@@ -1020,6 +1191,7 @@ const Scanner = () => {
           }
           // Set product info - pass apiResult to detect incomplete data
           handleProductFound(displayableProduct, code, apiResult, { skipAutoInventory: forceApiLookup });
+          completeScanTimer('API', upperCode);
           
           // Prefer scan_count from response to avoid extra /api/scan-count refetch; backend includes it in all scan responses
           requestAnimationFrame(() => {
@@ -1053,6 +1225,7 @@ const Scanner = () => {
           const errorMsg = apiResult?.message || apiResult?.error || "Failed to scan product";
           toast.error(`❌ ${errorMsg}`, { autoClose: 5000 });
           console.error("Backend scan error:", apiResult);
+          completeScanTimer('ERROR', upperCode);
         }
       } catch (error) {
         console.error("Error calling backend scan endpoint:", error);
@@ -1061,6 +1234,7 @@ const Scanner = () => {
           silent: suppressBatchItemToast,
         });
         if (recoveredLocally) {
+          completeScanTimer('DB_FALLBACK', upperCode);
           return;
         }
         if (error.response) {
@@ -1128,8 +1302,10 @@ const Scanner = () => {
           }
         } else if (error.code === 'ECONNABORTED') {
           toast.error("Request timeout: The scan operation is taking longer than expected. Please try again.", { autoClose: 5000 });
+          completeScanTimer('TIMEOUT', upperCode);
         } else {
           toast.error("Failed to connect to the backend server. Please ensure the backend server is running.", { autoClose: 5000 });
+          completeScanTimer('NETWORK_ERROR', upperCode);
         }
       } finally {
         setLoading(false);
@@ -2828,6 +3004,7 @@ const Scanner = () => {
       stopProcessingPoll(normalizedCode);
     }
     let attempts = 0;
+    let consecutiveErrors = 0;
     const maxAttempts = 20; // cap processing wait and fail faster when API cannot resolve code
     const poll = async () => {
       const poller = processingPollersRef.current.get(normalizedCode);
@@ -2840,6 +3017,11 @@ const Scanner = () => {
       if (attempts > maxAttempts) {
         stopProcessingPoll(normalizedCode);
         setIsApiProcessing(false);
+        const fallbackLocalMatch = await findProductInLocalSources(normalizedCode);
+        if (fallbackLocalMatch?.product) {
+          await handleProductFound(fallbackLocalMatch.product, normalizedCode, { source: fallbackLocalMatch.source });
+          completeScanTimer('DB_FALLBACK', normalizedCode);
+        }
         if (batchModeRef.current) {
           setBatchQueue((prev) => prev.map((item) => (
             item.code === normalizedCode && item.isProcessing
@@ -2847,15 +3029,21 @@ const Scanner = () => {
               : item
           )));
           toast.warning(`Could not retrieve data for ${normalizedCode} in time. You can retry from the queue.`, { autoClose: 4000 });
+        } else {
+          toast.warning(`Lookup for ${normalizedCode} is taking too long. Showing best available local data.`, { autoClose: 3500 });
+        }
+        if (!fallbackLocalMatch?.product) {
+          completeScanTimer('POLL_TIMEOUT', normalizedCode);
         }
         return;
       }
       try {
+        const includeEnrichment = attempts % 4 === 0 ? '1' : '0';
         const url = getApiEndpoint('/scan/status')
           + '?code=' + encodeURIComponent(normalizedCode)
           + '&attempt=' + attempts
           + '&include_scan_count=0'
-          + '&include_enrichment=0';
+          + `&include_enrichment=${includeEnrichment}`;
         const { data: { session } } = await supabase.auth.getSession();
         const token = session?.access_token || '';
         const res = await axios.get(url, {
@@ -2863,6 +3051,7 @@ const Scanner = () => {
           headers: token ? { 'Authorization': `Bearer ${token}` } : {}
         });
         const data = res.data;
+        consecutiveErrors = 0;
         if (data && data.not_in_api_database) {
           stopProcessingPoll(normalizedCode);
           setIsApiProcessing(false);
@@ -2876,9 +3065,10 @@ const Scanner = () => {
             )));
           }
           toast.warning(data.message || "This product could not be found in our lookup database.", { autoClose: 8000 });
+          completeScanTimer('NOT_FOUND', normalizedCode);
           return;
         }
-        if (data && data.success && !data.processing && data.asin) {
+        if (isReadyScanStatusPayload(data)) {
           stopProcessingPoll(normalizedCode);
           setIsApiProcessing(false);
           const allImages = data.images || (data.image ? [data.image] : []);
@@ -2901,6 +3091,7 @@ const Scanner = () => {
             cost_status: data.cost_status || (data.cached ? 'no_charge' : 'charged')
           };
           handleProductFound(displayableProduct, normalizedCode);
+          completeScanTimer('POLL', normalizedCode);
           if (!batchMode) toast.success('Product details ready.', { icon: '💚' });
           if (data.scan_count) {
             const used = data.scan_count.used || 0;
@@ -2921,7 +3112,17 @@ const Scanner = () => {
           }
         }
       } catch (e) {
+        consecutiveErrors += 1;
         console.warn('Processing poll error:', e);
+        if (consecutiveErrors >= 3) {
+          stopProcessingPoll(normalizedCode);
+          setIsApiProcessing(false);
+          void tryLocalFallbackLookup(normalizedCode, { silent: true });
+          completeScanTimer('POLL_RECOVERY', normalizedCode);
+          if (!batchModeRef.current) {
+            toast.warning('Connection was unstable while checking status. Showing cached/local data when available.', { autoClose: 3000 });
+          }
+        }
       } finally {
         const activePoller = processingPollersRef.current.get(normalizedCode);
         if (activePoller) {
@@ -3668,13 +3869,20 @@ const Scanner = () => {
               onChange={(e) => setBatchInventoryLocation(e.target.value)}
               className="block w-full md:w-72 pl-3 pr-10 py-2 text-sm border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 rounded-md"
             >
-              <option value="">Select shelf/row location</option>
+              <option value="">Select area/shelf location</option>
               {locationOptions.map((locationCode) => (
                 <option key={`batch-${locationCode}`} value={locationCode}>
                   {locationCode}
                 </option>
               ))}
             </select>
+            <button
+              type="button"
+              onClick={() => setIsAddingShelfInline((prev) => !prev)}
+              className="inline-flex items-center justify-center px-3 py-2 text-sm font-semibold rounded-md border border-indigo-300 text-indigo-700 bg-white hover:bg-indigo-50"
+            >
+              + Shelf
+            </button>
             <div className="flex flex-col">
               <label htmlFor="batchInventoryBucket" className="text-sm font-medium text-gray-700 dark:text-gray-200">
                 Bucket (optional)
@@ -3701,6 +3909,51 @@ const Scanner = () => {
               Pick location first, then scan in batch mode. "Add all to inventory" saves every scanned item to this location (and bucket, if provided).
             </p>
           </div>
+          {isAddingShelfInline && (
+            <div className="mt-3 grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200">Area</label>
+                <select
+                  value={newShelfArea}
+                  onChange={(e) => setNewShelfArea(e.target.value)}
+                  className="mt-1 block w-full pl-3 pr-10 py-2 text-sm border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 rounded-md"
+                >
+                  {getQuickAreaOptions().map((areaCode) => (
+                    <option key={`quick-area-${areaCode}`} value={areaCode}>
+                      {formatAreaLabel(areaCode)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-200">How many shelves</label>
+                <input
+                  type="number"
+                  min="1"
+                  max="25"
+                  value={newShelvesCount}
+                  onChange={(e) => setNewShelvesCount(parseInt(e.target.value, 10) || 1)}
+                  className="mt-1 block w-full px-3 py-2 text-sm border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 rounded-md"
+                />
+              </div>
+              <div className="md:col-span-2 flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleQuickAddShelf}
+                  className="inline-flex items-center px-3 py-2 text-sm font-semibold rounded-md bg-indigo-600 text-white hover:bg-indigo-700"
+                >
+                  Add shelf
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsAddingShelfInline(false)}
+                  className="inline-flex items-center px-3 py-2 text-sm font-medium rounded-md border border-gray-300 text-gray-700 bg-white hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -4022,6 +4275,14 @@ const Scanner = () => {
               <div className="mb-2 p-2 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-md">
                   <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Code Type: {productInfo.code_type || 'N/A'} ({productInfo.code_type === 'FNSKU' ? 'Fulfillment Network Stock Keeping Unit' : productInfo.code_type})</span>
               </div>
+              {scanLatency && (
+                <div className="mb-3 p-2 bg-slate-50 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-600 rounded-md">
+                  <span className="text-xs font-medium text-slate-700 dark:text-slate-200">
+                    Scan latency: {formatScanLatencySource(scanLatency.source)} - {scanLatency.elapsedMs}ms
+                    {scanLatency.code ? ` - ${scanLatency.code}` : ''}
+                  </span>
+                </div>
+              )}
 
               {apiEnrichLoading && (
                 <div className="mb-3 p-3 bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded-md flex items-center gap-2">
@@ -4421,15 +4682,52 @@ const Scanner = () => {
                 disabled={isAddingToInventory}
                 required
               >
-                <option value="">Select shelf location</option>
+                <option value="">Select area/shelf location</option>
                 {locationOptions.map((locationCode) => (
                   <option key={locationCode} value={locationCode}>
                     {locationCode}
                   </option>
                 ))}
               </select>
+              <button
+                type="button"
+                onClick={() => setIsAddingShelfInline((prev) => !prev)}
+                className="mt-2 inline-flex items-center px-3 py-1.5 text-xs font-semibold rounded-md border border-indigo-300 text-indigo-700 bg-white hover:bg-indigo-50"
+              >
+                + Add shelf
+              </button>
+              {isAddingShelfInline && (
+                <div className="mt-2 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <select
+                    value={newShelfArea}
+                    onChange={(e) => setNewShelfArea(e.target.value)}
+                    className="block w-full pl-3 pr-10 py-2 text-sm border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 rounded-md"
+                  >
+                    {getQuickAreaOptions().map((areaCode) => (
+                      <option key={`modal-area-${areaCode}`} value={areaCode}>
+                        {formatAreaLabel(areaCode)}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    min="1"
+                    max="25"
+                    value={newShelvesCount}
+                    onChange={(e) => setNewShelvesCount(parseInt(e.target.value, 10) || 1)}
+                    className="block w-full px-3 py-2 text-sm border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 rounded-md"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleQuickAddShelf}
+                    className="inline-flex items-center justify-center px-3 py-2 text-sm font-semibold rounded-md bg-indigo-600 text-white hover:bg-indigo-700"
+                  >
+                    Save shelf
+                  </button>
+                </div>
+              )}
               <p className="mt-1 text-xs text-gray-500">
-                Manage shelves/rows in Settings {'>'} Warehouse Layout Settings.
+                Manage areas/shelves in Settings {'>'} Warehouse Layout Settings.
               </p>
             </div>
 

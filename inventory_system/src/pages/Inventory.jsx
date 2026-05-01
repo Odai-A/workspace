@@ -242,7 +242,7 @@ const Inventory = () => {
   const [loading, setLoading] = useState(true);
   const [products, setProducts] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
-  const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+  const [appliedSearchTerm, setAppliedSearchTerm] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(readStoredItemsPerPage);
   const [totalItems, setTotalItems] = useState(0);
@@ -271,15 +271,6 @@ const Inventory = () => {
     window.addEventListener('storage', syncWarehouseSettings);
     return () => window.removeEventListener('storage', syncWarehouseSettings);
   }, []);
-
-  // Debounce search term
-  useEffect(() => {
-    const timerId = setTimeout(() => {
-      setDebouncedSearchTerm(searchTerm);
-      setCurrentPage(1); // Reset to first page on new search
-    }, 500);
-    return () => clearTimeout(timerId);
-  }, [searchTerm]);
 
   const shelfOptions = useMemo(
     () => Array.from({ length: Number(warehouseLayout?.shelves || 0) }, (_, idx) => String(idx + 1)),
@@ -347,13 +338,13 @@ const Inventory = () => {
       const inventoryResult = await inventoryService.getInventory({
         page: 1,
         limit: INVENTORY_FETCH_LIMIT,
-        searchQuery: debouncedSearchTerm,
+        searchQuery: appliedSearchTerm,
       });
 
       const manifestResult = await productLookupService.getProducts({
         page: 1,
         limit: INVENTORY_FETCH_LIMIT,
-        searchQuery: debouncedSearchTerm,
+        searchQuery: appliedSearchTerm,
       });
 
       const hiddenManifestList = await inventoryService.getHiddenManifestIds();
@@ -362,7 +353,7 @@ const Inventory = () => {
       const combined = await combineInventoryAndManifest(
         inventoryResult,
         manifestResult,
-        debouncedSearchTerm,
+        appliedSearchTerm,
         hiddenManifestIds
       );
 
@@ -386,7 +377,7 @@ const Inventory = () => {
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearchTerm]);
+  }, [appliedSearchTerm]);
 
   useEffect(() => {
     void loadInventoryData();
@@ -418,7 +409,7 @@ const Inventory = () => {
 
   useEffect(() => {
     setSelectedItems(new Set());
-  }, [currentPage, debouncedSearchTerm, itemsPerPage, shelfFilter, rowFilter, bucketFilter]);
+  }, [currentPage, appliedSearchTerm, itemsPerPage, shelfFilter, rowFilter, bucketFilter]);
 
   useEffect(() => {
     if (marketplaceExportScope === 'selected' && selectedItems.size === 0) {
@@ -1028,6 +1019,18 @@ const Inventory = () => {
     setSearchTerm(event.target.value);
   };
 
+  const handleSearchSubmit = () => {
+    setAppliedSearchTerm(searchTerm.trim());
+    setCurrentPage(1);
+  };
+
+  const handleSearchKeyDown = (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      handleSearchSubmit();
+    }
+  };
+
   const handlePageChange = (newPage) => {
     setCurrentPage(newPage);
   };
@@ -1035,6 +1038,7 @@ const Inventory = () => {
   // Reset filters
   const handleResetFilters = () => {
     setSearchTerm('');
+    setAppliedSearchTerm('');
     setShelfFilter('all');
     setRowFilter('all');
     setBucketFilter('all');
@@ -1190,22 +1194,22 @@ const Inventory = () => {
     const inventoryResult = await inventoryService.getInventory({
       page: 1,
       limit: EXPORT_ALL_LIMIT,
-      searchQuery: debouncedSearchTerm,
+      searchQuery: appliedSearchTerm,
     });
     const manifestResult = await productLookupService.getProducts({
       page: 1,
       limit: EXPORT_ALL_LIMIT,
-      searchQuery: debouncedSearchTerm,
+      searchQuery: appliedSearchTerm,
     });
     const hiddenManifestList = await inventoryService.getHiddenManifestIds();
     const combined = await combineInventoryAndManifest(
       inventoryResult,
       manifestResult,
-      debouncedSearchTerm,
+      appliedSearchTerm,
       new Set(hiddenManifestList)
     );
     return applyBucketFilter(applyShelfRowFilters(combined));
-  }, [debouncedSearchTerm, applyShelfRowFilters, applyBucketFilter]);
+  }, [appliedSearchTerm, applyShelfRowFilters, applyBucketFilter]);
 
   const handleMarketplaceExportDownload = async () => {
     setIsExportingMarketplace(true);
@@ -1898,6 +1902,7 @@ const Inventory = () => {
               className="pl-10 pr-4 py-2 w-full border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
               value={searchTerm}
               onChange={handleSearchChange}
+              onKeyDown={handleSearchKeyDown}
             />
             <MagnifyingGlassIcon className="h-5 w-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
           </div>

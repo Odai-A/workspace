@@ -48,6 +48,7 @@ const Toggle = ({ enabled, onChange, label, description }) => {
 const Settings = () => {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
+  const initialWarehouseLayout = getWarehouseLayoutSettings();
   
   // Subscription state
   const [subscriptionInfo, setSubscriptionInfo] = useState(null);
@@ -94,7 +95,8 @@ const Settings = () => {
     return saved ? parseFloat(saved) : 50; // Default 50% off
   });
   const [labelPrinterProfile, setLabelPrinterProfileState] = useState(() => getLabelPrinterProfile());
-  const [warehouseLayout, setWarehouseLayout] = useState(() => getWarehouseLayoutSettings());
+  const [warehouseLayout, setWarehouseLayout] = useState(initialWarehouseLayout);
+  const [warehouseAreasInput, setWarehouseAreasInput] = useState(() => initialWarehouseLayout.areas.join('\n'));
   
   // Contact support state
   const [contactForm, setContactForm] = useState({
@@ -231,6 +233,7 @@ const Settings = () => {
   const handleSaveWarehouseLayout = () => {
     const saved = setWarehouseLayoutSettings(warehouseLayout);
     setWarehouseLayout(saved);
+    setWarehouseAreasInput(saved.areas.join('\n'));
     toast.success('Warehouse layout settings saved.');
   };
 
@@ -464,12 +467,31 @@ const Settings = () => {
               Warehouse Layout Settings
             </h2>
             <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-              Configure shelf/row/bin structure per customer without code changes. Inventory location dropdowns are generated from these values.
+              Add more shelves any time and organize them by area (front-of-store, storage room, showcases, etc.). Inventory location dropdowns are generated from these values.
             </p>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Areas (one per line)
+              </label>
+              <textarea
+                rows={4}
+                value={warehouseAreasInput}
+                onChange={(e) => {
+                  const rawValue = e.target.value;
+                  setWarehouseAreasInput(rawValue);
+                  setWarehouseLayout((prev) => sanitizeWarehouseLayout({ ...prev, areas: rawValue }));
+                }}
+                placeholder={'Storage Room\nFront of Store\nShow Cases'}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md dark:bg-gray-700 dark:text-white"
+              />
+              <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                Use names you recognize. They are normalized into location codes automatically.
+              </p>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Shelves
+                  Shelves Per Area
                 </label>
                 <input
                   type="number"
@@ -547,7 +569,7 @@ const Settings = () => {
             </div>
             <div className="mt-4 flex items-center justify-between gap-4">
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                Example generated location: {warehouseLayout.shelfPrefix}1-{warehouseLayout.rowPrefix}1{warehouseLayout.binsPerRow > 0 ? `-${warehouseLayout.binPrefix}1` : ''}
+                Example generated location: {(warehouseLayout.areas?.[0] || 'STORAGE')}-{warehouseLayout.shelfPrefix}1-{warehouseLayout.rowPrefix}1{warehouseLayout.binsPerRow > 0 ? `-${warehouseLayout.binPrefix}1` : ''}
               </p>
               <button
                 onClick={handleSaveWarehouseLayout}
