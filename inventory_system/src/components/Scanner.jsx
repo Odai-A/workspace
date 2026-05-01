@@ -925,9 +925,16 @@ const Scanner = () => {
   const isReadyScanStatusPayload = (payload, options = {}) => {
     const { requireImages = false } = options;
     if (!payload?.success || payload?.processing) return false;
-    const hasIdentity = Boolean(String(payload?.asin || payload?.fnsku || '').trim());
+    // Explicitly reject not-in-database responses — fnsku alone is not a valid product
+    if (payload?.not_in_api_database) return false;
+    // Require a real ASIN (10+ chars) or a meaningful title — not just the FNSKU echoed back
+    const rawAsin = String(payload?.asin || '').trim();
+    const rawTitle = String(payload?.title || '').trim();
+    const hasAsin = rawAsin.length >= 10;
+    const hasTitle = rawTitle.length > 0 && !rawTitle.startsWith('FNSKU:') && rawTitle !== rawAsin;
+    const hasIdentity = hasAsin || hasTitle;
     const hasDetails = Boolean(
-      String(payload?.title || payload?.description || payload?.upc || '').trim()
+      String(payload?.description || payload?.upc || '').trim()
     );
     const hasMedia = Array.isArray(payload?.images)
       ? payload.images.filter(Boolean).length > 0
@@ -985,13 +992,20 @@ const Scanner = () => {
       }
 
       try {
+        // Cap the attempt sent to backend so old threshold (8) is never triggered
+        const cappedAttempt = Math.min(attempt, 6);
         const statusUrl = getApiEndpoint('/scan/status')
           + '?code=' + encodeURIComponent(normalizedCode)
-          + `&attempt=${attempt}`
+          + `&attempt=${cappedAttempt}`
           + '&include_scan_count=0'
           + '&include_enrichment=1';
 
         const { data } = await axios.get(statusUrl, buildScanAxiosConfig({ timeout: 10000 }));
+        // Skip not_in_api_database — backend may say this prematurely; keep waiting
+        if (data?.not_in_api_database) {
+          if (attempt < maxChecks) await sleep(delayMs);
+          continue;
+        }
         if (isReadyScanStatusPayload(data, { requireImages })) {
           const product = buildDisplayableApiProduct(data, normalizedCode);
           await handleProductFound(product, normalizedCode, data, { skipAutoInventory });
@@ -1035,20 +1049,18 @@ const Scanner = () => {
     const normalizedCode = String(code || '').trim().toUpperCase();
     if (!normalizedCode || !userId) return false;
 
-    // After first scan triggers external ASIN lookup, retry with force_api_lookup
-    // using a tiered backoff: 3s → 5s → 8s → 12s waits before each re-scan attempt.
-    // This gives the external API (Rainforest/etc.) time to return before we give up.
-    const retryDelays = [3000, 5000, 8000, 12000];
+    // Tiered backoff: wait before each force-rescan so the external FNSKU/ASIN
+    // service has time to resolve. Delays are shorter than before so we respond faster.
+    const retryDelays = [2000, 4000, 7000, 11000];
 
     for (let attempt = 0; attempt < retryDelays.length; attempt++) {
-      // Show progress only on first attempt so UI feedback is clean
       if (attempt === 0 && !batchModeRef.current) {
-        toast.info('Looking up product... please wait.', { autoClose: retryDelays[0] + 1000 });
+        toast.info('Looking up product... please wait.', { autoClose: retryDelays[0] + 2000 });
       }
 
       await sleep(retryDelays[attempt]);
 
-      // Check local cache/DB first — backend may have cached it by now
+      // Fast path: backend may have cached result by now
       const localMatch = await findProductInLocalSources(normalizedCode);
       if (localMatch?.product && (!requireImages || hasProductImages(localMatch.product))) {
         await handleProductFound(localMatch.product, normalizedCode, { source: localMatch.source }, { skipAutoInventory });
@@ -1062,23 +1074,23 @@ const Scanner = () => {
           code: normalizedCode,
           user_id: userId,
           force_api_lookup: true,
-        }, buildScanAxiosConfig({ timeout: 40000 }));
+        }, buildScanAxiosConfig({ timeout: 45000 }));
 
         const data = response?.data;
         if (!data?.success) continue;
 
         applyScanCountFromPayload(data.scan_count);
 
+        // not_in_api_database means external FNSKU service hasn't resolved yet — keep waiting
         if (data.not_in_api_database) {
-          // External API hasn't returned yet — loop and try next delay tier
-          console.log(`⏳ Recovery attempt ${attempt + 1}: still not in database, waiting...`);
+          console.log(`⏳ One-go recovery attempt ${attempt + 1}: FNSKU not resolved yet, continuing...`);
           continue;
         }
 
+        // Backend is still processing (ASIN lookup in progress) — poll status
         if (data.processing) {
-          // Backend is processing — poll status until ready
           const statusRecovered = await tryRecoverPendingLookup(normalizedCode, {
-            maxChecks: 10,
+            maxChecks: 12,
             delayMs: 1500,
             skipAutoInventory,
             suppressToast: true,
@@ -1091,6 +1103,7 @@ const Scanner = () => {
           continue;
         }
 
+        // Full product data — check it is real (not just an echoed FNSKU)
         if (isReadyScanStatusPayload(data, { requireImages })) {
           const product = buildDisplayableApiProduct(data, normalizedCode);
           await handleProductFound(product, normalizedCode, data, { skipAutoInventory });
@@ -1098,19 +1111,21 @@ const Scanner = () => {
           return true;
         }
 
-        // Has some data but missing images — show it and keep trying for images
-        if (isReadyScanStatusPayload(data) && requireImages) {
+        // Product found with ASIN/title but images missing — show it immediately,
+        // the background enrichment on the caller side will fetch images
+        if (isReadyScanStatusPayload(data, { requireImages: false }) && requireImages) {
           const partialProduct = buildDisplayableApiProduct(data, normalizedCode);
           await handleProductFound(partialProduct, normalizedCode, data, { skipAutoInventory });
-          // Continue loop trying to get images
+          completeScanTimer('API_RECOVERY', normalizedCode);
+          return true;
         }
 
       } catch (error) {
-        console.warn(`Recovery attempt ${attempt + 1} failed for ${normalizedCode}:`, error?.message);
+        console.warn(`One-go recovery attempt ${attempt + 1} failed for ${normalizedCode}:`, error?.message);
       }
     }
 
-    // Final check — show whatever we have locally
+    // Final local check — use whatever the backend cached during recovery attempts
     const finalLocalMatch = await findProductInLocalSources(normalizedCode);
     if (finalLocalMatch?.product) {
       await handleProductFound(finalLocalMatch.product, normalizedCode, { source: finalLocalMatch.source }, { skipAutoInventory });
