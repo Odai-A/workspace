@@ -1077,6 +1077,11 @@ const Scanner = () => {
         }, buildScanAxiosConfig({ timeout: 45000 }));
 
         const data = response?.data;
+        console.log(
+          `🔄 Recovery attempt ${attempt + 1} for ${normalizedCode}: success=${data?.success}, ` +
+          `processing=${data?.processing}, not_in_db=${data?.not_in_api_database}, ` +
+          `asin=${data?.asin || '(none)'}, has_images=${!!(data?.images?.length || data?.image)}`
+        );
         if (!data?.success) continue;
 
         applyScanCountFromPayload(data.scan_count);
@@ -1286,7 +1291,12 @@ const Scanner = () => {
         }));
         
         const apiResult = response.data;
-        console.log("🚀 Backend scan response:", apiResult);
+        console.log(
+          `🚀 Backend scan response for ${upperCode}: success=${apiResult?.success}, ` +
+          `processing=${apiResult?.processing}, not_in_db=${apiResult?.not_in_api_database}, ` +
+          `asin=${apiResult?.asin || '(none)'}, has_images=${!!(apiResult?.images?.length || apiResult?.image)}, ` +
+          `source=${apiResult?.source || '(none)'}`
+        );
         
         if (apiResult && apiResult.success) {
           if (apiResult.not_in_api_database) {
