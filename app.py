@@ -146,8 +146,8 @@ RAINFOREST_REQUEST_TIMEOUT = float(os.environ.get('RAINFOREST_REQUEST_TIMEOUT', 
 FNSKU_SCAN_INITIAL_MAX_POLLS = int(os.environ.get('FNSKU_SCAN_INITIAL_MAX_POLLS', '3'))
 FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS = int(os.environ.get('FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS', '700'))
 FNSKU_SCAN_RETRY_ADD_AFTER = int(os.environ.get('FNSKU_SCAN_RETRY_ADD_AFTER', '2'))
-FNSKU_NOT_IN_DATABASE_ATTEMPTS = int(os.environ.get('FNSKU_NOT_IN_DATABASE_ATTEMPTS', '8'))
-SKIP_RAINFOREST_ON_STANDARD_SCAN = str(os.environ.get('SKIP_RAINFOREST_ON_STANDARD_SCAN', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
+FNSKU_NOT_IN_DATABASE_ATTEMPTS = int(os.environ.get('FNSKU_NOT_IN_DATABASE_ATTEMPTS', '15'))
+SKIP_RAINFOREST_ON_STANDARD_SCAN = str(os.environ.get('SKIP_RAINFOREST_ON_STANDARD_SCAN', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 
 # --- Creator/CEO Configuration ---
 # Only the creator of the software can have CEO role

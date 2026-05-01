@@ -1189,28 +1189,16 @@ const Scanner = () => {
       const localMatch = await findProductInLocalSources(upperCode);
       if (localMatch?.product) {
         await handleProductFound(localMatch.product, upperCode, { cached: true, source: localMatch.source });
-        const missingImages = !hasProductImages(localMatch.product);
-        if (!missingImages) {
-          completeScanTimer('DB', upperCode);
-          if (!batchMode) {
-            toast.success('Found in your database.');
-          }
-          setLoading(false);
-          return;
-        }
-
+        completeScanTimer('DB', upperCode);
         if (!batchMode) {
-          toast.info('Found in database. Fetching missing images...');
+          toast.success('Found in your database.');
         }
-        setLoading(true);
-        const recoveredWithImages = await attemptOneGoApiRecovery(upperCode, {
-          requireImages: true,
-        });
         setLoading(false);
-        if (recoveredWithImages) {
-          return;
+        // Background image enrichment — show product immediately, fetch images silently
+        if (!hasProductImages(localMatch.product) && localMatch.product.asin) {
+          attemptOneGoApiRecovery(upperCode, { requireImages: true, skipAutoInventory: true })
+            .catch(() => {});
         }
-        await lookupProductByCode(upperCode, { forceApiLookup: true, suppressBatchItemToast: true });
         return;
       }
     }
@@ -1287,11 +1275,12 @@ const Scanner = () => {
         
         if (apiResult && apiResult.success) {
           if (apiResult.not_in_api_database) {
-            // Backend triggered async external ASIN lookup — wait and retry automatically
-            // so the user never needs to press Fetch again
+            // Backend triggered async external ASIN lookup — wait and retry automatically.
+            // requireImages:false so we show product as soon as identity is resolved;
+            // background enrichment (below) then silently fetches images.
             const recovered = await attemptOneGoApiRecovery(upperCode, {
               skipAutoInventory: forceApiLookup,
-              requireImages: true,
+              requireImages: false,
             });
             if (recovered) {
               setNotInDatabaseMessage(null);
@@ -1374,17 +1363,14 @@ const Scanner = () => {
           } else if (batchMode && forceApiLookup && !suppressBatchItemToast) {
             toast.success(`${upperCode}: saved to catalog (${allImages.length} image${allImages.length !== 1 ? 's' : ''}).`, { autoClose: 2000 });
           }
-          // Set product info - pass apiResult to detect incomplete data
+          // Show product immediately — background-enrich images if missing
           await handleProductFound(displayableProduct, code, apiResult, { skipAutoInventory: forceApiLookup });
-          const missingImagesAfterApi = !hasProductImages(displayableProduct);
-          if (missingImagesAfterApi) {
-            const recoveredWithImages = await attemptOneGoApiRecovery(upperCode, {
-              skipAutoInventory: forceApiLookup,
+          completeScanTimer('API', upperCode);
+          if (!hasProductImages(displayableProduct) && displayableProduct.asin) {
+            attemptOneGoApiRecovery(upperCode, {
+              skipAutoInventory: true,
               requireImages: true,
-            });
-            completeScanTimer(recoveredWithImages ? 'API_RECOVERY' : 'API', upperCode);
-          } else {
-            completeScanTimer('API', upperCode);
+            }).catch(() => {});
           }
           
           // Prefer scan_count from response to avoid extra /api/scan-count refetch; backend includes it in all scan responses
@@ -3239,9 +3225,13 @@ const Scanner = () => {
       }
       try {
         const includeEnrichment = attempts % 4 === 0 ? '1' : '0';
+        // Cap the attempt value sent to the backend at 6 so the server never
+        // reaches FNSKU_NOT_IN_DATABASE_ATTEMPTS (15) from status polling alone.
+        // We keep polling internally (up to maxAttempts=20) for patient recovery.
+        const cappedAttempt = Math.min(attempts, 6);
         const url = getApiEndpoint('/scan/status')
           + '?code=' + encodeURIComponent(normalizedCode)
-          + '&attempt=' + attempts
+          + '&attempt=' + cappedAttempt
           + '&include_scan_count=0'
           + `&include_enrichment=${includeEnrichment}`;
         const { data: { session } } = await supabase.auth.getSession();
@@ -3256,7 +3246,7 @@ const Scanner = () => {
           stopProcessingPoll(normalizedCode);
           setIsApiProcessing(false);
           const recovered = await attemptOneGoApiRecovery(normalizedCode, {
-            requireImages: true,
+            requireImages: false,
           });
           if (recovered) {
             completeScanTimer('POLL_RECOVERY', normalizedCode);
@@ -3280,18 +3270,13 @@ const Scanner = () => {
           setIsApiProcessing(false);
           const displayableProduct = buildDisplayableApiProduct(data, normalizedCode);
           handleProductFound(displayableProduct, normalizedCode);
-          const missingImagesAfterPoll = !hasProductImages(displayableProduct);
-          if (missingImagesAfterPoll) {
-            const recoveredWithImages = await attemptOneGoApiRecovery(normalizedCode, { requireImages: true });
-            if (recoveredWithImages) {
-              completeScanTimer('POLL_RECOVERY', normalizedCode);
-            } else {
-              completeScanTimer('POLL', normalizedCode);
-            }
-          } else {
-            completeScanTimer('POLL', normalizedCode);
-          }
+          completeScanTimer('POLL', normalizedCode);
           if (!batchMode) toast.success('Product details ready.', { icon: '💚' });
+          // Background image enrichment — don't block; card is already shown
+          if (!hasProductImages(displayableProduct) && displayableProduct.asin) {
+            attemptOneGoApiRecovery(normalizedCode, { requireImages: true, skipAutoInventory: true })
+              .catch(() => {});
+          }
           if (data.scan_count) {
             const used = data.scan_count.used || 0;
             const limit = data.scan_count.limit || null;
