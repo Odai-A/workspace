@@ -138,6 +138,17 @@ FREE_TRIAL_SCAN_LIMIT = int(os.environ.get('FREE_TRIAL_SCAN_LIMIT', '50'))
 FNSKU_PROCESSING_MESSAGE = "We're looking up this product. Please try again in a moment or use 'Check for Updates'."
 FNSKU_NOT_IN_DATABASE_MESSAGE = "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time. You may try again later or add the product manually."
 
+# Keep scan endpoints responsive for mobile/desktop clients.
+FNSKU_ADD_OR_GET_TIMEOUT = float(os.environ.get('FNSKU_ADD_OR_GET_TIMEOUT', '8'))
+FNSKU_GET_BY_BARCODE_TIMEOUT = float(os.environ.get('FNSKU_GET_BY_BARCODE_TIMEOUT', '4'))
+FNSKU_STATUS_LOOKUP_TIMEOUT = float(os.environ.get('FNSKU_STATUS_LOOKUP_TIMEOUT', '4'))
+RAINFOREST_REQUEST_TIMEOUT = float(os.environ.get('RAINFOREST_REQUEST_TIMEOUT', '7'))
+FNSKU_SCAN_INITIAL_MAX_POLLS = int(os.environ.get('FNSKU_SCAN_INITIAL_MAX_POLLS', '3'))
+FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS = int(os.environ.get('FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS', '700'))
+FNSKU_SCAN_RETRY_ADD_AFTER = int(os.environ.get('FNSKU_SCAN_RETRY_ADD_AFTER', '2'))
+FNSKU_NOT_IN_DATABASE_ATTEMPTS = int(os.environ.get('FNSKU_NOT_IN_DATABASE_ATTEMPTS', '8'))
+SKIP_RAINFOREST_ON_STANDARD_SCAN = str(os.environ.get('SKIP_RAINFOREST_ON_STANDARD_SCAN', '1')).strip().lower() in ('1', 'true', 'yes', 'on')
+
 # --- Creator/CEO Configuration ---
 # Only the creator of the software can have CEO role
 # Set this to your email address or user ID in the .env file
@@ -4426,7 +4437,7 @@ def scan_product():
         
         # Call AddOrGet first: creates or returns task and often returns ASIN immediately (one round trip)
         try:
-            response = requests.post(add_scan_url, headers=headers, json=payload, timeout=15)
+            response = requests.post(add_scan_url, headers=headers, json=payload, timeout=FNSKU_ADD_OR_GET_TIMEOUT)
             if response.status_code == 200:
                 add_result = response.json()
                 if add_result.get('succeeded') and add_result.get('data'):
@@ -4445,7 +4456,7 @@ def scan_product():
         # If AddOrGet didn't return a task or we need to check existing, try GetByBarCode once
         if not scan_data:
             try:
-                response = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=8)
+                response = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=FNSKU_GET_BY_BARCODE_TIMEOUT)
                 if response.status_code == 200 and response.text and response.text.strip():
                     lookup_result = response.json()
                     if lookup_result.get('succeeded') and lookup_result.get('data'):
@@ -4473,23 +4484,20 @@ def scan_product():
                 asin = str(potential_asin).strip()
         
         task_id = scan_data.get('id') if scan_data else None
-        max_polls = 10  # Poll up to ~10s so ASIN often ready in one request; frontend still polls if we return processing
-        poll_interval = 1000  # 1 second between polls
-        retry_add_or_get_after = 2
+        max_polls = max(1, FNSKU_SCAN_INITIAL_MAX_POLLS)
+        poll_interval = max(200, FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS)
+        retry_add_or_get_after = max(1, FNSKU_SCAN_RETRY_ADD_AFTER)
         
         # If ASIN not available, poll for it
         if not asin or len(asin) < 10:
             logger.info(f"⏳ ASIN not immediately available. Polling for task {task_id} (max {max_polls} attempts, ~{max_polls}s)...")
-            import time
             task_state = 0  # Initialize task_state before polling loop
-            # Brief initial wait so FNSKU API has time to start processing after AddOrGet
-            time.sleep(0.5)
             for attempt in range(1, max_polls + 1):
                 # Retry AddOrGet after 2 polls to trigger processing
                 if attempt == retry_add_or_get_after:
                     logger.info(f"🔄 Retrying AddOrGet to trigger processing (attempt {attempt})...")
                     try:
-                        retry_response = requests.post(add_scan_url, headers=headers, json=payload, timeout=30)
+                        retry_response = requests.post(add_scan_url, headers=headers, json=payload, timeout=FNSKU_ADD_OR_GET_TIMEOUT)
                         if retry_response.status_code == 200:
                             retry_result = retry_response.json()
                             if retry_result.get('succeeded') and retry_result.get('data'):
@@ -4509,10 +4517,11 @@ def scan_product():
                 
                 # Wait between polls (skip wait after retry attempt)
                 if attempt > 1 and attempt != retry_add_or_get_after + 1:
+                    import time
                     time.sleep(poll_interval / 1000)  # 1 second between polls
                 
                 try:
-                    poll_response = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=5)  # Reduced timeout
+                    poll_response = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=FNSKU_GET_BY_BARCODE_TIMEOUT)
                     if poll_response.status_code == 200:
                         poll_result = poll_response.json()
                         if poll_result.get('succeeded') and poll_result.get('data'):
@@ -4572,51 +4581,27 @@ def scan_product():
                 "scan_task_id": str(task_id) if task_id else None,
                 "bar_code": code
             }
-            scan_count_data = None
             if supabase_admin and user_id:
-                scan_was_logged = log_scan_to_history(
+                log_scan_to_history(
                     user_id, tenant_id, code, code or '', supabase_admin,
                     api_lookup_cache_id=None,
                     product_description=(scan_data.get('productName') or scan_data.get('name') or '') if scan_data else ''
                 )
-                try:
-                    is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
-                    if not is_paid and not is_ceo_admin:
-                        trial_start_date = get_trial_start_date(tenant_id, user_id)
-                        used_scans = 0
-                        max_retries = 3 if scan_was_logged else 1
-                        for _attempt in range(max_retries):
-                            used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
-                            if not scan_was_logged or used_scans > 0 or _attempt == max_retries - 1:
-                                break
-                            import time
-                            time.sleep(0.2 * (_attempt + 1))
-                        scan_count_data = {
-                            'used': used_scans,
-                            'limit': FREE_TRIAL_SCAN_LIMIT,
-                            'remaining': max(0, FREE_TRIAL_SCAN_LIMIT - used_scans),
-                            'is_paid': False,
-                            'is_ceo_admin': is_ceo_admin
-                        }
-                    else:
-                        scan_count_data = {
-                            'used': 0,
-                            'limit': None,
-                            'remaining': None,
-                            'is_paid': is_paid,
-                            'is_ceo_admin': is_ceo_admin
-                        }
-                except Exception as count_error:
-                    logger.error(f"Error getting scan count for processing response: {count_error}")
+                scan_count_data = _scan_count_for_response(user_id, tenant_id)
                 if scan_count_data:
                     processing_response['scan_count'] = scan_count_data
             return jsonify(processing_response), 200
         
-        # STEP 4: If we have ASIN, fetch from Rainforest API
+        # STEP 4: If we have ASIN, optionally fetch from Rainforest API.
+        # Standard scans can skip enrichment for faster first response; force_api_lookup keeps full enrichment.
         rainforest_data = None
-        logger.info(f"🔍 Checking Rainforest API conditions - ASIN: '{asin}' (len={len(asin) if asin else 0}), API Key: {'SET' if RAINFOREST_API_KEY else 'MISSING'}")
+        should_fetch_rainforest = bool(force_api_lookup) or (not SKIP_RAINFOREST_ON_STANDARD_SCAN)
+        logger.info(
+            f"🔍 Checking Rainforest API conditions - ASIN: '{asin}' (len={len(asin) if asin else 0}), "
+            f"API Key: {'SET' if RAINFOREST_API_KEY else 'MISSING'}, should_fetch={should_fetch_rainforest}, force_api_lookup={force_api_lookup}"
+        )
         
-        if asin and len(asin) >= 10:
+        if asin and len(asin) >= 10 and should_fetch_rainforest:
             if not RAINFOREST_API_KEY:
                 logger.warning("⚠️ RAINFOREST_API_KEY not set - skipping Rainforest API call")
             else:
@@ -4632,7 +4617,7 @@ def scan_product():
                             'amazon_domain': 'amazon.com',
                             'asin': asin
                         },
-                        timeout=10
+                        timeout=RAINFOREST_REQUEST_TIMEOUT
                     )
                     
                     logger.info(f"📡 Rainforest API response status: {rainforest_response.status_code}")
@@ -4745,7 +4730,10 @@ def scan_product():
                     import traceback
                     logger.error(f"Traceback: {traceback.format_exc()}")
         else:
-            logger.warning(f"⚠️ Cannot call Rainforest API - ASIN invalid: '{asin}' (len={len(asin) if asin else 0})")
+            if not should_fetch_rainforest:
+                logger.info(f"⏩ Skipping Rainforest API for standard scan (force_api_lookup={force_api_lookup}).")
+            else:
+                logger.warning(f"⚠️ Cannot call Rainforest API - ASIN invalid: '{asin}' (len={len(asin) if asin else 0})")
         
         # STEP 5: Build response and save to cache (shared helper used by POST /api/scan and GET /api/scan/status)
         if not scan_data:
@@ -4783,55 +4771,11 @@ def scan_product():
                 logger.warning(f"Failed to log scan event in api_scan_logs: {log_error}")
         
         # Get updated scan count to include in response (for free trial display)
-        # Always calculate scan count, even if scan wasn't logged (to show current count)
+        # Use one fast query path to keep scan responses snappy on mobile/desktop.
         if supabase_admin and user_id:
-            try:
-                is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
-                if not is_paid:
-                    # Count scans for free trial users
-                    # Retry count query up to 5 times if scan was just logged (to account for DB commit delay)
-                    used_scans = 0
-                    max_retries = 5 if scan_was_logged else 1
-                    print(f"\nCALCULATING SCAN COUNT (non-cached, was_logged={scan_was_logged}, max_retries={max_retries})")
-                    print(f"   user_id: {user_id}")
-                    print(f"   tenant_id: {tenant_id}")
-                    
-                    # Get trial start date to exclude old test scans
-                    trial_start_date = get_trial_start_date(tenant_id, user_id)
-                    
-                    for attempt in range(max_retries):
-                        print(f"   Attempt {attempt + 1}/{max_retries}...")
-                        used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
-                        print(f"   Count result: {used_scans} scans found")
-                        if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
-                            import time
-                            wait_time = 0.3 * (attempt + 1)
-                            print(f"   Waiting {wait_time}s before retry...")
-                            time.sleep(wait_time)
-                            logger.info(f"   Retry {attempt + 1}/{max_retries}: count was 0, retrying...")
-                        else:
-                            break
-                    logger.info(f"📊 Scan count calculated: used={used_scans}, limit={FREE_TRIAL_SCAN_LIMIT}, "
-                               f"was_logged={scan_was_logged}, user_id={user_id}, tenant_id={tenant_id}")
-                    print(f"FINAL SCAN COUNT (non-cached): {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
-                    
-                    response_data['scan_count'] = {
-                        'used': used_scans,
-                        'limit': FREE_TRIAL_SCAN_LIMIT,
-                        'remaining': max(0, FREE_TRIAL_SCAN_LIMIT - used_scans),
-                        'is_paid': False
-                    }
-                else:
-                    response_data['scan_count'] = {
-                        'used': 0,
-                        'limit': None,
-                        'remaining': None,
-                        'is_paid': True
-                    }
-            except Exception as count_error:
-                logger.error(f"❌ Failed to get scan count for response: {count_error}")
-                import traceback
-                logger.error(f"   Traceback: {traceback.format_exc()}")
+            scan_count_data = _scan_count_for_response(user_id, tenant_id)
+            if scan_count_data:
+                response_data['scan_count'] = scan_count_data
         
         # Log final response status
         print("\n" + "=" * 60)
@@ -4963,6 +4907,10 @@ def scan_status():
     """
     code = (request.args.get('code') or '').strip().upper()
     attempt = request.args.get('attempt', type=int) or 0
+    include_scan_count_raw = str(request.args.get('include_scan_count', '')).strip().lower()
+    include_scan_count = include_scan_count_raw in ('1', 'true', 'yes', 'on')
+    include_enrichment_raw = str(request.args.get('include_enrichment', '')).strip().lower()
+    include_enrichment = include_enrichment_raw in ('1', 'true', 'yes', 'on')
     user_id, tenant_id = get_ids_from_request()
     if not code:
         return jsonify({"success": False, "error": "Invalid code", "message": "Query param 'code' is required"}), 400
@@ -5014,9 +4962,10 @@ def scan_status():
                     "amazon_url": f"https://www.amazon.com/dp/{cached_asin}" if cached_asin else '',
                     "source": "cache", "cost_status": "no_charge", "cached": True
                 }
-                scan_count_data = _scan_count_for_response(user_id, tenant_id)
-                if scan_count_data:
-                    full_response['scan_count'] = scan_count_data
+                if include_scan_count:
+                    scan_count_data = _scan_count_for_response(user_id, tenant_id)
+                    if scan_count_data:
+                        full_response['scan_count'] = scan_count_data
                 return jsonify(full_response)
         FNSKU_API_KEY = os.environ.get('FNSKU_API_KEY')
         RAINFOREST_API_KEY = os.environ.get('RAINFOREST_API_KEY')
@@ -5025,19 +4974,19 @@ def scan_status():
         BASE_URL = "https://ato.fnskutoasin.com"
         headers = {'api-key': FNSKU_API_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json'}
         lookup_url = f"{BASE_URL}/api/v1/ScanTask/GetByBarCode"
-        resp = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=10)
+        resp = requests.get(lookup_url, headers=headers, params={'BarCode': code}, timeout=FNSKU_STATUS_LOOKUP_TIMEOUT)
         try:
             fnsku_json = resp.json() if resp.text and resp.text.strip() else {}
         except (ValueError, json.JSONDecodeError, requests.exceptions.JSONDecodeError) as json_err:
             logger.warning(f"FNSKU GetByBarCode returned non-JSON for {code}: {json_err}")
-            if attempt >= 15:
+            if attempt >= FNSKU_NOT_IN_DATABASE_ATTEMPTS:
                 return jsonify({
                     "success": True, "processing": False, "not_in_api_database": True,
                     "fnsku": code, "message": FNSKU_NOT_IN_DATABASE_MESSAGE, "bar_code": code
                 }), 200
             return jsonify({"success": True, "processing": True, "fnsku": code, "message": FNSKU_PROCESSING_MESSAGE, "bar_code": code}), 200
         if resp.status_code != 200 or not (fnsku_json.get('succeeded') and fnsku_json.get('data')):
-            if attempt >= 15:
+            if attempt >= FNSKU_NOT_IN_DATABASE_ATTEMPTS:
                 return jsonify({
                     "success": True, "processing": False, "not_in_api_database": True,
                     "fnsku": code, "message": FNSKU_NOT_IN_DATABASE_MESSAGE, "bar_code": code
@@ -5046,7 +4995,7 @@ def scan_status():
         scan_data = fnsku_json['data']
         asin = (scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or '').strip()
         if not asin or len(asin) < 10:
-            if attempt >= 15:
+            if attempt >= FNSKU_NOT_IN_DATABASE_ATTEMPTS:
                 return jsonify({
                     "success": True, "processing": False, "not_in_api_database": True,
                     "fnsku": code, "asin": "", "title": scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}",
@@ -5059,11 +5008,11 @@ def scan_status():
                 "scan_task_id": str(scan_data.get('id')) if scan_data.get('id') else None, "bar_code": code
             }), 200
         rainforest_data = None
-        if RAINFOREST_API_KEY:
+        if include_enrichment and RAINFOREST_API_KEY:
             try:
                 rf_resp = requests.get('https://api.rainforestapi.com/request', params={
                     'api_key': RAINFOREST_API_KEY, 'type': 'product', 'amazon_domain': 'amazon.com', 'asin': asin
-                }, timeout=10)
+                }, timeout=RAINFOREST_REQUEST_TIMEOUT)
                 if rf_resp.status_code == 200:
                     response_json = rf_resp.json()
                     rainforest_full_response = response_json
@@ -5090,9 +5039,10 @@ def scan_status():
             except Exception as rf_err:
                 logger.warning(f"Rainforest error in scan_status: {rf_err}")
         response_data, _ = _build_fnsku_scan_response_and_save(code, asin, scan_data, rainforest_data, supabase_admin)
-        scan_count_data = _scan_count_for_response(user_id, tenant_id)
-        if scan_count_data:
-            response_data['scan_count'] = scan_count_data
+        if include_scan_count:
+            scan_count_data = _scan_count_for_response(user_id, tenant_id)
+            if scan_count_data:
+                response_data['scan_count'] = scan_count_data
         return jsonify(response_data)
     except Exception as e:
         logger.error(f"Error in scan_status: {str(e)}")

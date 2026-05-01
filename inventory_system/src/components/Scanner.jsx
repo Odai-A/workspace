@@ -106,8 +106,7 @@ const Scanner = () => {
   const [autoRefreshCode, setAutoRefreshCode] = useState(null);
   const autoRefreshIntervalRef = useRef(null);
   const countdownIntervalRef = useRef(null);
-  const processingPollRef = useRef(null);
-  const processingPollTimeoutRef = useRef(null);
+  const processingPollersRef = useRef(new Map());
   const productInfoSectionRef = useRef(null);
   const batchModeRef = useRef(batchMode);
   batchModeRef.current = batchMode;
@@ -124,6 +123,25 @@ const Scanner = () => {
       headers.Authorization = `Bearer ${token}`;
     }
     return { ...extra, headers };
+  };
+
+  const stopProcessingPoll = (codeToStop) => {
+    const key = String(codeToStop || '').trim().toUpperCase();
+    if (!key) return;
+    const poller = processingPollersRef.current.get(key);
+    if (poller?.intervalId) {
+      clearInterval(poller.intervalId);
+    }
+    processingPollersRef.current.delete(key);
+  };
+
+  const stopAllProcessingPolls = () => {
+    for (const [, poller] of processingPollersRef.current.entries()) {
+      if (poller?.intervalId) {
+        clearInterval(poller.intervalId);
+      }
+    }
+    processingPollersRef.current.clear();
   };
 
   const formatScanHttpError = (error) => {
@@ -203,14 +221,7 @@ const Scanner = () => {
   // Cleanup intervals on unmount
   useEffect(() => {
     return () => {
-      if (processingPollTimeoutRef.current) {
-        clearTimeout(processingPollTimeoutRef.current);
-        processingPollTimeoutRef.current = null;
-      }
-      if (processingPollRef.current) {
-        clearInterval(processingPollRef.current);
-        processingPollRef.current = null;
-      }
+      stopAllProcessingPolls();
       if (autoRefreshIntervalRef.current) {
         clearInterval(autoRefreshIntervalRef.current);
       }
@@ -877,13 +888,8 @@ const Scanner = () => {
       console.log('⏹️ Stopping auto-refresh due to new manual scan');
       stopAutoRefresh();
     }
-    if (processingPollTimeoutRef.current) {
-      clearTimeout(processingPollTimeoutRef.current);
-      processingPollTimeoutRef.current = null;
-    }
-    if (processingPollRef.current) {
-      clearInterval(processingPollRef.current);
-      processingPollRef.current = null;
+    if (!batchModeRef.current) {
+      stopAllProcessingPolls();
     }
 
     try {
@@ -903,12 +909,13 @@ const Scanner = () => {
         const scanUrl = getApiEndpoint('/scan');
         
         console.log("🚀 Calling unified scan endpoint:", scanUrl);
+        const scanRequestTimeout = batchModeRef.current ? 20000 : 45000;
         const response = await axios.post(scanUrl, {
           code: upperCode,
           user_id: userId,
           ...(forceApiLookup ? { force_api_lookup: true } : {})
         }, buildScanAxiosConfig({
-          timeout: 60000 // 60 seconds timeout
+          timeout: scanRequestTimeout
         }));
         
         const apiResult = response.data;
@@ -965,7 +972,7 @@ const Scanner = () => {
                 });
               }, 0);
             }
-            startProcessingPoll(code);
+            startProcessingPoll(upperCode);
             return;
           }
 
@@ -2813,72 +2820,70 @@ const Scanner = () => {
 
   // Auto-poll when backend returned processing: true (first poll immediately, then every 2s; no manual "Check for Updates" needed)
   const startProcessingPoll = (codeToPoll) => {
-    if (processingPollTimeoutRef.current) clearTimeout(processingPollTimeoutRef.current);
-    if (processingPollRef.current) clearInterval(processingPollRef.current);
+    const normalizedCode = String(codeToPoll || '').trim().toUpperCase();
+    if (!normalizedCode) return;
+    if (!batchModeRef.current) {
+      stopAllProcessingPolls();
+    } else {
+      stopProcessingPoll(normalizedCode);
+    }
     let attempts = 0;
-    const maxAttempts = 30; // 30 * 2s ≈ 60s total; full data appears automatically when ready
+    const maxAttempts = 20; // cap processing wait and fail faster when API cannot resolve code
     const poll = async () => {
+      const poller = processingPollersRef.current.get(normalizedCode);
+      if (poller?.inFlight) return;
+      if (poller) {
+        poller.inFlight = true;
+        processingPollersRef.current.set(normalizedCode, poller);
+      }
       attempts++;
       if (attempts > maxAttempts) {
-        if (processingPollRef.current) {
-          clearInterval(processingPollRef.current);
-          processingPollRef.current = null;
-        }
+        stopProcessingPoll(normalizedCode);
         setIsApiProcessing(false);
         if (batchModeRef.current) {
-          setBatchQueue((prev) => updateFirstBatchQueueItem(
-            prev,
-            (item) => item.code === codeToPoll && item.isProcessing,
-            (item) => ({ ...item, isProcessing: false, hasFailed: true })
-          ).nextQueue);
-          toast.warning(`Could not retrieve data for ${codeToPoll} in time. You can retry from the queue.`, { autoClose: 4000 });
+          setBatchQueue((prev) => prev.map((item) => (
+            item.code === normalizedCode && item.isProcessing
+              ? { ...item, isProcessing: false, hasFailed: true }
+              : item
+          )));
+          toast.warning(`Could not retrieve data for ${normalizedCode} in time. You can retry from the queue.`, { autoClose: 4000 });
         }
         return;
       }
       try {
-        const url = getApiEndpoint('/scan/status') + '?code=' + encodeURIComponent(codeToPoll) + '&attempt=' + attempts;
+        const url = getApiEndpoint('/scan/status')
+          + '?code=' + encodeURIComponent(normalizedCode)
+          + '&attempt=' + attempts
+          + '&include_scan_count=0'
+          + '&include_enrichment=0';
         const { data: { session } } = await supabase.auth.getSession();
         const token = session?.access_token || '';
         const res = await axios.get(url, {
-          timeout: 15000,
+          timeout: 10000,
           headers: token ? { 'Authorization': `Bearer ${token}` } : {}
         });
         const data = res.data;
         if (data && data.not_in_api_database) {
-          if (processingPollRef.current) {
-            clearInterval(processingPollRef.current);
-            processingPollRef.current = null;
-          }
-          if (processingPollTimeoutRef.current) {
-            clearTimeout(processingPollTimeoutRef.current);
-            processingPollTimeoutRef.current = null;
-          }
+          stopProcessingPoll(normalizedCode);
           setIsApiProcessing(false);
           setNotInDatabaseMessage(data.message || "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time.");
-          setLastScannedCode(codeToPoll);
+          setLastScannedCode(normalizedCode);
           if (batchModeRef.current) {
-            setBatchQueue((prev) => updateFirstBatchQueueItem(
-              prev,
-              (item) => item.code === codeToPoll && item.isProcessing,
-              (item) => ({ ...item, isProcessing: false, hasFailed: true })
-            ).nextQueue);
+            setBatchQueue((prev) => prev.map((item) => (
+              item.code === normalizedCode && item.isProcessing
+                ? { ...item, isProcessing: false, hasFailed: true }
+                : item
+            )));
           }
           toast.warning(data.message || "This product could not be found in our lookup database.", { autoClose: 8000 });
           return;
         }
         if (data && data.success && !data.processing && data.asin) {
-          if (processingPollRef.current) {
-            clearInterval(processingPollRef.current);
-            processingPollRef.current = null;
-          }
-          if (processingPollTimeoutRef.current) {
-            clearTimeout(processingPollTimeoutRef.current);
-            processingPollTimeoutRef.current = null;
-          }
+          stopProcessingPoll(normalizedCode);
           setIsApiProcessing(false);
           const allImages = data.images || (data.image ? [data.image] : []);
           const displayableProduct = {
-            fnsku: data.fnsku || codeToPoll,
+            fnsku: data.fnsku || normalizedCode,
             asin: data.asin || '',
             name: data.title || '',
             image_url: allImages[0] || '',
@@ -2895,7 +2900,7 @@ const Scanner = () => {
             source: data.source || 'api',
             cost_status: data.cost_status || (data.cached ? 'no_charge' : 'charged')
           };
-          handleProductFound(displayableProduct, codeToPoll);
+          handleProductFound(displayableProduct, normalizedCode);
           if (!batchMode) toast.success('Product details ready.', { icon: '💚' });
           if (data.scan_count) {
             const used = data.scan_count.used || 0;
@@ -2917,12 +2922,19 @@ const Scanner = () => {
         }
       } catch (e) {
         console.warn('Processing poll error:', e);
+      } finally {
+        const activePoller = processingPollersRef.current.get(normalizedCode);
+        if (activePoller) {
+          activePoller.inFlight = false;
+          processingPollersRef.current.set(normalizedCode, activePoller);
+        }
       }
     };
-    // First poll immediately; in batch mode poll every 1s so products pop up faster, else every 2s
-    const pollIntervalMs = batchModeRef.current ? 1000 : 2000;
+    // First poll immediately; keep single scans responsive too.
+    const pollIntervalMs = batchModeRef.current ? 1000 : 1500;
+    const intervalId = setInterval(poll, pollIntervalMs);
+    processingPollersRef.current.set(normalizedCode, { intervalId, inFlight: false });
     poll();
-    processingPollRef.current = setInterval(poll, pollIntervalMs);
   };
 
   // Add manual check function
