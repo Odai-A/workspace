@@ -1457,9 +1457,9 @@ const Scanner = () => {
         const scanUrl = getApiEndpoint('/scan');
         
         console.log("🚀 Calling unified scan endpoint:", scanUrl);
-        // Bumped batch timeout 20s -> 35s so the first request actually has
-        // time to complete under load (avoids triggering the recovery cascade).
-        const scanRequestTimeout = batchModeRef.current ? 35000 : 45000;
+        // Render-hosted backend can take 35-60s on cold paths (Rainforest API
+        // call). 60s matches the retry path that we know succeeds on first try.
+        const scanRequestTimeout = batchModeRef.current ? 60000 : 45000;
         const response = await runWithScanSlot(upperCode, () => axios.post(scanUrl, {
           code: upperCode,
           user_id: userId,
@@ -1619,16 +1619,21 @@ const Scanner = () => {
           completeScanTimer('DB_FALLBACK', upperCode);
           return;
         }
-        // In batch mode, skip the 4-attempt recovery cascade — it amplifies
-        // load 4-5x per failed scan and is the main cause of the "long, many
-        // retries" symptom. Mark as failed; user can manually retry.
+        // In batch mode, skip the 4-attempt recovery cascade (it amplifies
+        // load) but DO auto-invoke the retry chain so the user does not have
+        // to click "Retry" for slow Render lookups. Logs show timed-out scans
+        // succeed on the first auto-retry. The activeRetryCodesRef guard
+        // prevents conflicts with a simultaneous manual retry click.
         if (batchModeRef.current && !forceApiLookup) {
-          setBatchQueue((prev) => updateFirstBatchQueueItem(
-            prev,
-            (item) => item.code === upperCode && item.isProcessing,
-            (item) => ({ ...item, isProcessing: false, hasFailed: true })
-          ).nextQueue);
           completeScanTimer(error?.code === 'ECONNABORTED' ? 'TIMEOUT' : 'NETWORK_ERROR', upperCode);
+          if (!activeRetryCodesRef.current.has(upperCode)) {
+            activeRetryCodesRef.current.add(upperCode);
+            try {
+              await retryScanInBatch(upperCode, 0);
+            } finally {
+              activeRetryCodesRef.current.delete(upperCode);
+            }
+          }
           return;
         }
         if (!forceApiLookup) {
