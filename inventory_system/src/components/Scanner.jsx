@@ -24,6 +24,73 @@ import {
   setWarehouseLayoutSettings,
 } from '../utils/warehouseSettings';
 
+// Module-level concurrency gate for /api/scan calls.
+// Prevents the "scan storm" where rapid batch-mode scans fire 50+ parallel
+// HTTP requests and overwhelm the backend (causing timeout cascades).
+// Also dedupes simultaneous in-flight requests for the same code.
+const SCAN_MAX_CONCURRENCY = 3;
+const __scanGate = {
+  active: 0,
+  queue: [],
+  inFlightByCode: new Map(),
+};
+const acquireScanSlot = () => new Promise((resolve) => {
+  if (__scanGate.active < SCAN_MAX_CONCURRENCY) {
+    __scanGate.active += 1;
+    resolve();
+  } else {
+    __scanGate.queue.push(resolve);
+  }
+});
+const releaseScanSlot = () => {
+  if (__scanGate.queue.length > 0) {
+    // Hand the slot directly to the next waiter (do not decrement active).
+    const next = __scanGate.queue.shift();
+    next();
+  } else {
+    __scanGate.active = Math.max(0, __scanGate.active - 1);
+  }
+};
+const runWithScanSlot = async (code, fn) => {
+  const key = code ? String(code).trim().toUpperCase() : null;
+  if (key && __scanGate.inFlightByCode.has(key)) {
+    // Coalesce duplicate in-flight requests for the same code.
+    return __scanGate.inFlightByCode.get(key);
+  }
+  await acquireScanSlot();
+  const promise = (async () => {
+    try {
+      return await fn();
+    } finally {
+      if (key) __scanGate.inFlightByCode.delete(key);
+      releaseScanSlot();
+    }
+  })();
+  if (key) __scanGate.inFlightByCode.set(key, promise);
+  return promise;
+};
+
+// Tiny TTL cache for local DB/cache lookups, so a single batch scan does not
+// hit manifest_data multiple times for the same code within a few seconds.
+const __localLookupCache = new Map(); // code -> { value, expiresAt }
+const LOCAL_LOOKUP_TTL_MS = 30_000;
+const getCachedLocalLookup = (code) => {
+  const key = String(code || '').trim().toUpperCase();
+  if (!key) return undefined;
+  const entry = __localLookupCache.get(key);
+  if (!entry) return undefined;
+  if (entry.expiresAt < Date.now()) {
+    __localLookupCache.delete(key);
+    return undefined;
+  }
+  return entry.value;
+};
+const setCachedLocalLookup = (code, value) => {
+  const key = String(code || '').trim().toUpperCase();
+  if (!key) return;
+  __localLookupCache.set(key, { value, expiresAt: Date.now() + LOCAL_LOOKUP_TTL_MS });
+};
+
 /**
  * Scanner component for barcode scanning and product lookup
  */
@@ -682,12 +749,12 @@ const Scanner = () => {
     
     try {
       const scanUrl = getApiEndpoint('/scan');
-      const response = await axios.post(scanUrl, {
+      const response = await runWithScanSlot(code, () => axios.post(scanUrl, {
         code: code.toUpperCase(),
         user_id: userId
       }, buildScanAxiosConfig({
         timeout: 60000
-      }));
+      })));
       
       const apiResult = response.data;
       
@@ -1070,11 +1137,11 @@ const Scanner = () => {
 
       try {
         const scanUrl = getApiEndpoint('/scan');
-        const response = await axios.post(scanUrl, {
+        const response = await runWithScanSlot(normalizedCode, () => axios.post(scanUrl, {
           code: normalizedCode,
           user_id: userId,
           force_api_lookup: true,
-        }, buildScanAxiosConfig({ timeout: 45000 }));
+        }, buildScanAxiosConfig({ timeout: 45000 })));
 
         const data = response?.data;
         console.log(
@@ -1145,22 +1212,32 @@ const Scanner = () => {
     const normalizedCode = String(code || '').trim().toUpperCase();
     if (!normalizedCode) return null;
 
+    const cached = getCachedLocalLookup(normalizedCode);
+    if (cached !== undefined) {
+      return cached;
+    }
+
     const cachedRow = await apiCacheService.getCachedLookup(normalizedCode);
     if (cachedRow) {
       const cachedProduct = apiCacheService.mapCacheRowToProductInfo(cachedRow);
       if (cachedProduct) {
-        return { product: cachedProduct, source: 'api_lookup_cache' };
+        const result = { product: cachedProduct, source: 'api_lookup_cache' };
+        setCachedLocalLookup(normalizedCode, result);
+        return result;
       }
     }
 
     const manifestProduct = await dbProductLookupService.getProductByFnsku(normalizedCode);
     if (manifestProduct) {
-      return {
+      const result = {
         product: buildDisplayableManifestProduct(manifestProduct, normalizedCode),
         source: 'manifest_data',
       };
+      setCachedLocalLookup(normalizedCode, result);
+      return result;
     }
 
+    setCachedLocalLookup(normalizedCode, null);
     return null;
   };
 
@@ -1281,14 +1358,16 @@ const Scanner = () => {
         const scanUrl = getApiEndpoint('/scan');
         
         console.log("🚀 Calling unified scan endpoint:", scanUrl);
-        const scanRequestTimeout = batchModeRef.current ? 20000 : 45000;
-        const response = await axios.post(scanUrl, {
+        // Bumped batch timeout 20s -> 35s so the first request actually has
+        // time to complete under load (avoids triggering the recovery cascade).
+        const scanRequestTimeout = batchModeRef.current ? 35000 : 45000;
+        const response = await runWithScanSlot(upperCode, () => axios.post(scanUrl, {
           code: upperCode,
           user_id: userId,
           ...(forceApiLookup ? { force_api_lookup: true } : {})
         }, buildScanAxiosConfig({
           timeout: scanRequestTimeout
-        }));
+        })));
         
         const apiResult = response.data;
         console.log(
@@ -1300,9 +1379,21 @@ const Scanner = () => {
         
         if (apiResult && apiResult.success) {
           if (apiResult.not_in_api_database) {
-            // Backend triggered async external ASIN lookup — wait and retry automatically.
-            // requireImages:false so we show product as soon as identity is resolved;
-            // background enrichment (below) then silently fetches images.
+            // In batch mode, do NOT trigger the 4-attempt recovery cascade
+            // (each attempt is a 45s HTTP call). It overwhelms the backend
+            // when many scans are queued. Mark as failed in the queue so the
+            // user can manually retry just the items that need it.
+            if (batchModeRef.current && !forceApiLookup) {
+              setBatchQueue((prev) => updateFirstBatchQueueItem(
+                prev,
+                (item) => item.code === upperCode && item.isProcessing,
+                (item) => ({ ...item, isProcessing: false, hasFailed: true })
+              ).nextQueue);
+              setIsApiProcessing(false);
+              completeScanTimer('NOT_FOUND', upperCode);
+              return;
+            }
+            // Single-scan mode: keep automatic recovery (only one item, no cascade risk).
             const recovered = await attemptOneGoApiRecovery(upperCode, {
               skipAutoInventory: forceApiLookup,
               requireImages: false,
@@ -1426,6 +1517,18 @@ const Scanner = () => {
         });
         if (recoveredLocally) {
           completeScanTimer('DB_FALLBACK', upperCode);
+          return;
+        }
+        // In batch mode, skip the 4-attempt recovery cascade — it amplifies
+        // load 4-5x per failed scan and is the main cause of the "long, many
+        // retries" symptom. Mark as failed; user can manually retry.
+        if (batchModeRef.current && !forceApiLookup) {
+          setBatchQueue((prev) => updateFirstBatchQueueItem(
+            prev,
+            (item) => item.code === upperCode && item.isProcessing,
+            (item) => ({ ...item, isProcessing: false, hasFailed: true })
+          ).nextQueue);
+          completeScanTimer(error?.code === 'ECONNABORTED' ? 'TIMEOUT' : 'NETWORK_ERROR', upperCode);
           return;
         }
         if (!forceApiLookup) {
