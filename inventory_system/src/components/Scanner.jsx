@@ -1566,6 +1566,7 @@ const Scanner = () => {
       }
       
       try {
+        const scanRoundTripT0 = typeof performance !== 'undefined' ? performance.now() : null;
         // Use centralized API config
         const scanUrl = getApiEndpoint('/scan');
         
@@ -1601,6 +1602,22 @@ const Scanner = () => {
             __scanLookupCoalesce.set(soloKey, soloPromise);
             response = await soloPromise;
           }
+        }
+        if (
+          typeof localStorage !== 'undefined'
+          && localStorage.getItem('SCAN_CLIENT_TIMING') === '1'
+          && scanRoundTripT0 != null
+          && typeof performance !== 'undefined'
+        ) {
+          const wallMs = Math.round(performance.now() - scanRoundTripT0);
+          const h = response.headers || {};
+          const serverTotal = h['x-scan-server-total-ms'] ?? h['X-Scan-Server-Total-Ms'];
+          const serverStages = h['x-scan-server-stages-ms'] ?? h['X-Scan-Server-Stages-Ms'];
+          console.info(
+            `[SCAN_CLIENT_TIMING] code=${upperCode} client_roundtrip_ms=${wallMs} ` +
+            `server_total_ms=${serverTotal ?? 'n/a'} server_stages=${serverStages ?? 'n/a'} ` +
+            `forceApi=${!!forceApiLookup} batch=${!!batchModeRef.current}`
+          );
         }
         
         const apiResult = response.data;
@@ -4691,7 +4708,7 @@ const Scanner = () => {
                 {item.product && productNeedsAmazonEnrich(item.product) && !item.isProcessing && !item.hasFailed && (
                   <button
                     type="button"
-                    onClick={() => lookupProductByCode(item.code, { forceApiLookup: true })}
+                    onClick={() => void lookupProductByCode(item.code, { forceApiLookup: true })}
                     disabled={!userId || batchEnrichAllRunning || batchForceLookupCode !== null}
                     className="mt-2 w-full px-2 py-1.5 text-xs font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
                   >

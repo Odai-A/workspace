@@ -109,7 +109,7 @@ def _ttl_cache(ttl_seconds):
         return wrapper
     return decorator
 
-from flask import Flask, request, render_template, redirect, url_for, flash, jsonify
+from flask import Flask, request, render_template, redirect, url_for, flash, jsonify, g, has_request_context
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -173,6 +173,7 @@ if allowed_origins == ['*']:
             "origins": "*",
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
             "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+            "expose_headers": ["X-Scan-Server-Total-Ms", "X-Scan-Server-Stages-Ms"],
             "supports_credentials": False
         }
     })
@@ -184,10 +185,61 @@ else:
             "origins": allowed_origins,
             "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
             "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+            "expose_headers": ["X-Scan-Server-Total-Ms", "X-Scan-Server-Stages-Ms"],
             "supports_credentials": False
         }
     })
     logger.info(f"CORS configured for origins: {', '.join(allowed_origins)}")
+
+
+def scan_server_perf_mark(label):
+    """Record elapsed ms since before_request init for this POST /api/scan (Render latency diagnosis)."""
+    try:
+        if not has_request_context():
+            return
+        p = getattr(g, '_scan_server_perf', None)
+        if p is not None:
+            p['marks'][label] = round((_time.time() - p['t0']) * 1000, 1)
+    except Exception:
+        pass
+
+
+@app.before_request
+def _scan_server_perf_before_request():
+    if request.method != 'POST':
+        return
+    path = (request.path or '').rstrip('/')
+    if path.endswith('/api/scan') or path == '/api/scan':
+        g._scan_server_perf = {'t0': _time.time(), 'marks': {}}
+
+
+@app.after_request
+def _scan_server_perf_after_request(response):
+    try:
+        if not has_request_context():
+            return response
+        perf = getattr(g, '_scan_server_perf', None)
+        if perf is None or request.method != 'POST':
+            return response
+        t0 = perf.get('t0')
+        if t0 is None:
+            return response
+        total_ms = int((_time.time() - t0) * 1000)
+        response.headers['X-Scan-Server-Total-Ms'] = str(total_ms)
+        marks = perf.get('marks') or {}
+        if marks:
+            try:
+                compact = ';'.join(f"{k}:{v}ms" for k, v in list(marks.items())[:24])
+                if len(compact) < 1800:
+                    response.headers['X-Scan-Server-Stages-Ms'] = compact
+            except Exception:
+                pass
+        code = getattr(g, '_scan_perf_code', '') or ''
+        logger.info("SCAN_PERF total_ms=%s marks=%s code=%s", total_ms, marks, code)
+    except Exception:
+        pass
+    return response
+
 
 # eBay API Configuration
 EBAY_CLIENT_ID = os.getenv('EBAY_CLIENT_ID')
@@ -3381,6 +3433,12 @@ def scan_product():
         })
         # #endregion
 
+        try:
+            g._scan_perf_code = code
+            scan_server_perf_mark('auth_inputs_ready')
+        except Exception:
+            pass
+
         # Get API keys from environment (needed for ASIN, UPC, and FNSKU handling)
         FNSKU_API_KEY = os.environ.get('FNSKU_API_KEY')
         RAINFOREST_API_KEY = os.environ.get('RAINFOREST_API_KEY')
@@ -3452,6 +3510,7 @@ def scan_product():
                     "error": "trial_check_failed",
                     "message": "Unable to verify trial usage. Please contact support or try again later."
                 }), 500
+        scan_server_perf_mark('after_trial_gate')
         # Handle ASIN codes directly with Rainforest API
         if code_type == 'ASIN':
             logger.info(f"📦 Detected ASIN code - checking 3-layer architecture")
@@ -3463,6 +3522,7 @@ def scan_product():
                 code_type='ASIN',
                 supabase_client=supabase_admin
             )
+            scan_server_perf_mark('asin_layer_lookup_done')
             
             # If found in any table, return it (unless client asked to enrich from Amazon API — manifest/products responses omit images)
             if (product_data or manifest_item_data) and not force_api_lookup:
@@ -4227,6 +4287,7 @@ def scan_product():
         # Check by FNSKU for FNSKU codes, by UPC for UPC codes
         if supabase_admin:
             try:
+                scan_server_perf_mark('before_fnsku_cache')
                 logger.info(f"🔍 Checking cache for {code_type} code: {code}")
                 if code_type == 'UPC':
                     cache_result = supabase_admin.table('api_lookup_cache').select('*').eq('upc', code).limit(1).execute()
@@ -4478,6 +4539,7 @@ def scan_product():
                                             response_data['scan_count'] = scan_count_data
                                         
                                         logger.info(f"✅ Returning enriched cached data for {code_type} {code}")
+                                        scan_server_perf_mark('fnsku_cache_return')
                                         return jsonify(response_data)
                             except Exception as enrich_error:
                                 logger.warning(f"⚠️ Could not enrich cache with Rainforest API: {enrich_error}")
@@ -4533,6 +4595,7 @@ def scan_product():
                         logger.info(f"   Response includes scan_count: {response_data.get('scan_count', 'MISSING')}")
                         print("Returning cached data - NO API CHARGE")
                         print(f"Final scan_count in response: {response_data.get('scan_count', {})}")
+                        scan_server_perf_mark('fnsku_cache_return')
                         return jsonify(response_data)
                 else:
                     logger.info(f"NOT FOUND IN CACHE: {code_type} {code}")
@@ -4542,6 +4605,7 @@ def scan_product():
                 import traceback
                 logger.error(f"   Traceback: {traceback.format_exc()}")
                 print(f"Cache check error: {cache_error}")
+        scan_server_perf_mark('after_fnsku_cache_block')
         
         # ---- Server negative cache (single /api/scan fast fail; same semantics as batch) ----
         if _is_negatively_cached(code) and not force_api_lookup:
@@ -4563,6 +4627,7 @@ def scan_product():
                 neg['scan_count'] = scn
             return jsonify(neg), 200
 
+        scan_server_perf_mark('before_fnsku_external')
         fnsku_external_t0 = _time.time()
 
         # STEP 2: Not in cache - call FNSKU API. AddOrGet first for fastest first-scan (GetByBarCode often fails or is slow).
@@ -4753,6 +4818,7 @@ def scan_product():
             'asin_len': len(str(asin).strip()) if asin else 0,
         })
         # #endregion
+        scan_server_perf_mark('after_fnsku_external_asin')
         
         # STEP 4: If we have ASIN, optionally fetch from Rainforest API.
         # Standard scans can skip enrichment for faster first response; force_api_lookup keeps full enrichment.
@@ -4896,6 +4962,7 @@ def scan_product():
                 logger.info(f"⏩ Skipping Rainforest API for standard scan (force_api_lookup={force_api_lookup}).")
             else:
                 logger.warning(f"⚠️ Cannot call Rainforest API - ASIN invalid: '{asin}' (len={len(asin) if asin else 0})")
+        scan_server_perf_mark('after_rainforest_block')
         
         # STEP 5: Build response and save to cache (shared helper used by POST /api/scan and GET /api/scan/status)
         if not scan_data:
@@ -4906,6 +4973,7 @@ def scan_product():
                 "message": "Failed to retrieve scan task data. Please try again."
             }), 500
         response_data, cache_row_id = _build_fnsku_scan_response_and_save(code, asin, scan_data, rainforest_data, supabase_admin)
+        scan_server_perf_mark('after_db_save_build')
         
         # Log scan event for Stripe usage tracking and local analytics
         # Also record the scan in scan_history so free trial limits and reporting work.
