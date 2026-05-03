@@ -91,6 +91,74 @@ const setCachedLocalLookup = (code, value) => {
   __localLookupCache.set(key, { value, expiresAt: Date.now() + LOCAL_LOOKUP_TTL_MS });
 };
 
+// Batch-scan dispatcher: when many scans land within a short window we bundle
+// them into a single POST /api/scan/batch request so the backend can process
+// codes in parallel server-side (much faster than one HTTP round trip per
+// code over the slow Render link). Each caller still gets back its own
+// per-code response object via the returned promise.
+const BATCH_DISPATCH_DELAY_MS = 200;   // window to collect more codes
+const BATCH_MAX_SIZE = 25;             // matches backend MAX_BATCH cap
+const __batchDispatcher = {
+  pending: new Map(), // code -> { resolve, reject }
+  timer: null,
+  forceApiLookup: false,
+};
+const flushBatch = async (axiosInstance, scanBatchUrl, axiosConfig) => {
+  if (__batchDispatcher.timer) {
+    clearTimeout(__batchDispatcher.timer);
+    __batchDispatcher.timer = null;
+  }
+  const pending = __batchDispatcher.pending;
+  if (pending.size === 0) return;
+  const codes = Array.from(pending.keys());
+  const waiters = new Map(pending);
+  pending.clear();
+  const force = __batchDispatcher.forceApiLookup;
+  __batchDispatcher.forceApiLookup = false;
+  try {
+    const response = await axiosInstance.post(scanBatchUrl, {
+      codes,
+      ...(force ? { force_api_lookup: true } : {}),
+    }, axiosConfig);
+    const results = response?.data?.results || {};
+    for (const [code, waiter] of waiters.entries()) {
+      const payload = results[code];
+      if (payload) {
+        waiter.resolve({ data: payload });
+      } else {
+        waiter.reject(new Error(`No batch result for ${code}`));
+      }
+    }
+  } catch (err) {
+    for (const waiter of waiters.values()) {
+      waiter.reject(err);
+    }
+  }
+};
+const scheduleBatchScan = (code, axiosInstance, scanBatchUrl, axiosConfig, options = {}) =>
+  new Promise((resolve, reject) => {
+    if (options.forceApiLookup) __batchDispatcher.forceApiLookup = true;
+    // Same-code coalescing: if the code is already pending in this window,
+    // reuse its waiter so we don't duplicate work.
+    const existing = __batchDispatcher.pending.get(code);
+    if (existing) {
+      const prevResolve = existing.resolve;
+      const prevReject = existing.reject;
+      existing.resolve = (val) => { prevResolve(val); resolve(val); };
+      existing.reject = (err) => { prevReject(err); reject(err); };
+      return;
+    }
+    __batchDispatcher.pending.set(code, { resolve, reject });
+    if (__batchDispatcher.pending.size >= BATCH_MAX_SIZE) {
+      flushBatch(axiosInstance, scanBatchUrl, axiosConfig);
+      return;
+    }
+    if (__batchDispatcher.timer) clearTimeout(__batchDispatcher.timer);
+    __batchDispatcher.timer = setTimeout(() => {
+      flushBatch(axiosInstance, scanBatchUrl, axiosConfig);
+    }, BATCH_DISPATCH_DELAY_MS);
+  });
+
 /**
  * Scanner component for barcode scanning and product lookup
  */
@@ -1460,13 +1528,28 @@ const Scanner = () => {
         // Render-hosted backend can take 35-60s on cold paths (Rainforest API
         // call). 60s matches the retry path that we know succeeds on first try.
         const scanRequestTimeout = batchModeRef.current ? 60000 : 45000;
-        const response = await runWithScanSlot(upperCode, () => axios.post(scanUrl, {
-          code: upperCode,
-          user_id: userId,
-          ...(forceApiLookup ? { force_api_lookup: true } : {})
-        }, buildScanAxiosConfig({
-          timeout: scanRequestTimeout
-        })));
+        let response;
+        if (batchModeRef.current && !forceApiLookup) {
+          // Batch mode: route through the dispatcher so multiple rapid scans
+          // get bundled into a single POST /api/scan/batch (server-side
+          // ThreadPoolExecutor processes them in parallel). We do NOT wrap
+          // this in runWithScanSlot - the dispatcher handles its own pacing
+          // (200ms debounce, 25-code cap), and gating per code here would
+          // limit batches to gate-size which defeats the whole point.
+          const scanBatchUrl = getApiEndpoint('/scan/batch');
+          response = await scheduleBatchScan(upperCode, axios, scanBatchUrl, buildScanAxiosConfig({
+            // Allow extra headroom for a full batch on the slow Render path.
+            timeout: 110000,
+          }), { forceApiLookup });
+        } else {
+          response = await runWithScanSlot(upperCode, () => axios.post(scanUrl, {
+            code: upperCode,
+            user_id: userId,
+            ...(forceApiLookup ? { force_api_lookup: true } : {})
+          }, buildScanAxiosConfig({
+            timeout: scanRequestTimeout
+          })));
+        }
         
         const apiResult = response.data;
         console.log(

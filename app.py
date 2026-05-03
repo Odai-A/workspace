@@ -2,6 +2,7 @@ import os
 import requests
 import json
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 from flask import Flask, request, render_template, redirect, url_for, flash, jsonify
 from flask_sqlalchemy import SQLAlchemy
@@ -4875,6 +4876,120 @@ def scan_product():
             "success": False,
             "error": "Internal server error",
             "message": f"Error performing scan: {str(e)}"
+        }), 500
+
+
+def _invoke_scan_for_batch(code, user_id, force_api_lookup, auth_header):
+    """
+    Invoke the scan_product view function in a thread for batch processing.
+    Uses app.test_request_context so scan_product sees a real Flask request
+    context with the right body/headers (request and g globals are thread-local
+    in Flask, so concurrent calls from different threads do not interfere).
+    Returns (response_json_dict, http_status).
+    """
+    headers = {}
+    if auth_header:
+        headers['Authorization'] = auth_header
+    body = {'code': code, 'user_id': user_id}
+    if force_api_lookup:
+        body['force_api_lookup'] = True
+    try:
+        with app.test_request_context('/api/scan', method='POST', headers=headers, json=body):
+            response = scan_product()
+            if isinstance(response, tuple):
+                resp_obj = response[0]
+                status = response[1] if len(response) > 1 else 200
+            else:
+                resp_obj = response
+                status = 200
+            payload = resp_obj.get_json() if hasattr(resp_obj, 'get_json') else None
+            if payload is None:
+                payload = {'success': False, 'error': 'no_json_response'}
+            return payload, status
+    except Exception as e:
+        logger.exception(f"Batch scan thread error for code {code}: {e}")
+        return {'success': False, 'error': 'internal_error', 'message': str(e)}, 500
+
+
+@app.route('/api/scan/batch', methods=['POST'])
+def scan_product_batch():
+    """
+    Batch scan endpoint. Accepts a list of codes and processes them in parallel
+    on the server using a thread pool. Returns a single response with all
+    results keyed by code. Lets the frontend make ONE HTTP request and get
+    many product lookups back, dramatically reducing per-scan network overhead
+    and exploiting server-side parallelism on Render.
+
+    Request body: { "codes": [...], "user_id"?: "...", "force_api_lookup"?: bool }
+    Response: { "success": true, "count": N, "results": { CODE: {scan response}, ... } }
+    """
+    try:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "error": "invalid_json"}), 400
+
+        codes_in = data.get('codes')
+        if not isinstance(codes_in, list) or len(codes_in) == 0:
+            return jsonify({"success": False, "error": "codes_required",
+                            "message": "Body must include a non-empty 'codes' array"}), 400
+
+        # Normalize, dedupe, cap. 25 keeps a single batch under gunicorn's 120s
+        # window even when several codes need a Rainforest call.
+        MAX_BATCH = 25
+        seen = set()
+        codes = []
+        for c in codes_in:
+            if not c:
+                continue
+            norm = str(c).strip().upper()
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            codes.append(norm)
+            if len(codes) >= MAX_BATCH:
+                break
+
+        if not codes:
+            return jsonify({"success": False, "error": "codes_required",
+                            "message": "All codes were empty"}), 400
+
+        user_id_from_token, _ = get_ids_from_request()
+        user_id = user_id_from_token or str(data.get('user_id') or '').strip()
+        if not user_id:
+            return jsonify({"success": False, "error": "unauthorized",
+                            "message": "User is required to scan products"}), 401
+
+        force_api_lookup = bool(data.get('force_api_lookup') or data.get('forceApiLookup'))
+        auth_header = request.headers.get('Authorization')
+
+        results = {}
+        # 5 worker threads: enough to overlap I/O for FNSKU/Rainforest/Supabase
+        # calls while leaving headroom on the gunicorn worker for the second
+        # in-flight HTTP request the other gunicorn worker may be serving.
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_to_code = {
+                executor.submit(_invoke_scan_for_batch, c, user_id, force_api_lookup, auth_header): c
+                for c in codes
+            }
+            for future in as_completed(future_to_code):
+                code = future_to_code[future]
+                try:
+                    payload, _status = future.result()
+                except Exception as e:
+                    payload = {'success': False, 'error': 'thread_error', 'message': str(e)}
+                results[code] = payload
+
+        return jsonify({
+            'success': True,
+            'count': len(results),
+            'results': results,
+        })
+    except Exception as e:
+        logger.exception(f"Error in scan_product_batch: {e}")
+        return jsonify({
+            "success": False,
+            "error": "internal_error",
+            "message": f"Error performing batch scan: {str(e)}"
         }), 500
 
 
