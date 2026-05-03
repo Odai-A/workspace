@@ -1,9 +1,47 @@
 import os
+import time as _time
+import threading as _threading
 import requests
 import json
 import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
+
+
+# Lightweight TTL cache for slow-changing per-user / per-tenant helpers.
+# These helpers are called several times per scan_product invocation (CEO
+# check, trial check, subscription check). In a batch of 25 scans for one
+# user that meant ~125 redundant Supabase round-trips per batch. Memoizing
+# them collapses this to ~5 calls, saving 5-30s of latency on Render.
+# The cache is in-memory and per-process; TTLs are short enough that role
+# changes and subscription updates take effect within a minute.
+_ttl_cache_store = {}
+_ttl_cache_lock = _threading.Lock()
+
+
+def _ttl_cache(ttl_seconds):
+    def decorator(fn):
+        def wrapper(*args, **kwargs):
+            try:
+                key = (fn.__name__, args, tuple(sorted(kwargs.items())))
+            except TypeError:
+                # Unhashable argument (e.g., dict) - bypass cache.
+                return fn(*args, **kwargs)
+            now = _time.time()
+            with _ttl_cache_lock:
+                entry = _ttl_cache_store.get(key)
+                if entry and entry[1] > now:
+                    return entry[0]
+            result = fn(*args, **kwargs)
+            with _ttl_cache_lock:
+                _ttl_cache_store[key] = (result, now + ttl_seconds)
+            return result
+        wrapper.__name__ = fn.__name__
+        wrapper.__doc__ = fn.__doc__
+        wrapper.__wrapped__ = fn
+        return wrapper
+    return decorator
+
 from flask import Flask, request, render_template, redirect, url_for, flash, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
@@ -321,6 +359,7 @@ def count_tenant_users(tenant_id):
         return 0
 
 
+@_ttl_cache(60)
 def tenant_has_paid_subscription(tenant_id):
     """
     Returns True if the tenant has an active Stripe subscription.
@@ -348,6 +387,7 @@ def tenant_has_paid_subscription(tenant_id):
         logger.error(f"Error checking paid subscription for tenant {tenant_id}: {e}")
         return False
 
+@_ttl_cache(300)
 def get_trial_start_date(tenant_id, user_id):
     """
     Get the trial start date for a tenant or user.
@@ -412,11 +452,14 @@ def get_trial_start_date(tenant_id, user_id):
         return default_date
 
 
+@_ttl_cache(5)
 def get_used_scan_count(user_id, tenant_id, trial_start_date=None):
     """
     Count scans for trial limit: (user_id = X) and (tenant_id = Y or tenant_id is null).
     When tenant_id is set, includes legacy rows with tenant_id null so count is correct after refresh.
     Returns 0 if supabase_admin is not available.
+    Cached for 5s — long enough to coalesce a batch, short enough to keep
+    the trial limit enforcement responsive.
     """
     if not supabase_admin or not user_id:
         return 0
@@ -639,6 +682,7 @@ def get_ids_from_request():
         logger.debug("No Authorization Bearer token found in request headers.")
     return user_id, tenant_id
 
+@_ttl_cache(60)
 def get_user_role(user_id):
     """
     Get the user's role from app_metadata or users table.
@@ -694,6 +738,7 @@ def is_ceo_or_admin(user_id):
     
     return is_ceo_admin
 
+@_ttl_cache(60)
 def is_unlimited_scan_user(user_id):
     """
     Only CEO (and creator) should bypass free-trial scan limits.
@@ -714,6 +759,7 @@ def is_unlimited_scan_user(user_id):
         logger.debug(f"Scan-limited user: user_id={user_id}, role={role}")
     return is_unlimited
 
+@_ttl_cache(300)
 def is_creator(user_id):
     """
     Check if the user is the creator of the software.
@@ -4961,15 +5007,202 @@ def scan_product_batch():
 
         force_api_lookup = bool(data.get('force_api_lookup') or data.get('forceApiLookup'))
         auth_header = request.headers.get('Authorization')
+        _, tenant_id = get_ids_from_request()
+
+        # ---- One-time trial check for the whole batch ----
+        # The thread path inside scan_product enforces this per-code, but on
+        # the bulk fast path below we bypass scan_product entirely, so we
+        # need an explicit check here. Helpers are TTL-cached so this is
+        # essentially free after the first call in the last 60s.
+        is_ceo_batch = is_unlimited_scan_user(user_id) if supabase_admin else False
+        is_paid_batch = tenant_has_paid_subscription(tenant_id) if (tenant_id and supabase_admin) else False
+        if not is_ceo_batch and not is_paid_batch and supabase_admin:
+            try:
+                trial_start_batch = get_trial_start_date(tenant_id, user_id)
+                used_batch = get_used_scan_count(user_id, tenant_id, trial_start_batch)
+                if used_batch >= FREE_TRIAL_SCAN_LIMIT:
+                    return jsonify({
+                        "success": False,
+                        "error": "trial_limit_reached",
+                        "message": f"Your free trial of {FREE_TRIAL_SCAN_LIMIT} scans has been used. "
+                                   "Please upgrade to continue scanning.",
+                        "used_scans": used_batch,
+                        "limit": FREE_TRIAL_SCAN_LIMIT,
+                    }), 402
+            except Exception as e:
+                logger.warning(f"Batch trial check error (continuing): {e}")
 
         results = {}
+        fast_path_codes_for_logging = []  # codes & cache_ids to bulk-log
+
+        # ---- Bulk pre-fetch from api_lookup_cache ----
+        # One Supabase round-trip for the whole batch, so codes that already
+        # have a cached row can be returned without spinning up a thread or
+        # invoking scan_product (which would do ~5 more Supabase calls per
+        # code just for trial/CEO checks). For typical re-scans of the same
+        # inventory this skips the thread pool entirely.
+        codes_to_thread = list(codes)
+        if not force_api_lookup and supabase_admin and codes:
+            try:
+                bulk_rows = []
+                # Two cheap IN-list queries cover the common code types.
+                try:
+                    res_fnsku = supabase_admin.table('api_lookup_cache') \
+                        .select('id,fnsku,asin,product_name,price,image_url,brand,category,description,upc,api_source,updated_at,created_at,lookup_count') \
+                        .in_('fnsku', codes).execute()
+                    bulk_rows.extend(getattr(res_fnsku, 'data', None) or [])
+                except Exception as e:
+                    logger.warning(f"Bulk cache fnsku prefetch failed: {e}")
+                try:
+                    res_asin = supabase_admin.table('api_lookup_cache') \
+                        .select('id,fnsku,asin,product_name,price,image_url,brand,category,description,upc,api_source,updated_at,created_at,lookup_count') \
+                        .in_('asin', codes).execute()
+                    bulk_rows.extend(getattr(res_asin, 'data', None) or [])
+                except Exception as e:
+                    logger.warning(f"Bulk cache asin prefetch failed: {e}")
+
+                indexed = {}
+                for row in bulk_rows:
+                    fnsku = (row.get('fnsku') or '').upper()
+                    asin = (row.get('asin') or '').upper()
+                    if fnsku:
+                        indexed.setdefault(fnsku, row)
+                    if asin:
+                        indexed.setdefault(asin, row)
+
+                fast_codes = []
+                for code in codes:
+                    cached = indexed.get(code)
+                    if not cached:
+                        continue
+                    name = (cached.get('product_name') or '').strip()
+                    if not name or name.startswith('Amazon Product (ASIN:') or name.startswith('FNSKU:'):
+                        continue  # placeholder row - let scan_product re-fetch
+                    image_field = cached.get('image_url') or ''
+                    images = []
+                    try:
+                        parsed = json.loads(image_field) if image_field else []
+                        if isinstance(parsed, list):
+                            images = [u for u in parsed if u]
+                        elif isinstance(parsed, str) and parsed:
+                            images = [parsed]
+                    except Exception:
+                        if image_field:
+                            images = [image_field]
+                    results[code] = {
+                        'success': True,
+                        'asin': cached.get('asin') or '',
+                        'fnsku': cached.get('fnsku') or '',
+                        'title': name,
+                        'price': str(cached.get('price') or ''),
+                        'image': images[0] if images else '',
+                        'images': images,
+                        'images_count': len(images),
+                        'brand': cached.get('brand') or '',
+                        'category': cached.get('category') or '',
+                        'description': cached.get('description') or '',
+                        'upc': cached.get('upc') or '',
+                        'amazon_url': f"https://www.amazon.com/dp/{cached.get('asin')}" if cached.get('asin') else '',
+                        'source': 'cache',
+                        'cost_status': 'no_charge',
+                        'cached': True,
+                    }
+                    fast_codes.append(code)
+                    fast_path_codes_for_logging.append({
+                        'code': code,
+                        'cache_id': cached.get('id'),
+                        'product_name': name,
+                    })
+
+                if fast_codes:
+                    logger.info(f"Batch fast path: {len(fast_codes)}/{len(codes)} codes returned directly from bulk cache")
+                    codes_to_thread = [c for c in codes if c not in results]
+            except Exception as e:
+                logger.warning(f"Batch bulk prefetch failed, falling back to thread pool only: {e}")
+                codes_to_thread = list(codes)
+
+        # ---- Bulk-log the fast-path scans to scan_history ----
+        # One SELECT to find which codes the user has already scanned (those
+        # do not count again), then ONE bulk INSERT for the new ones. Keeps
+        # trial enforcement accurate without N round-trips.
+        if fast_path_codes_for_logging and supabase_admin:
+            try:
+                fp_codes_only = [r['code'] for r in fast_path_codes_for_logging]
+                dedup_q = supabase_admin.from_('scan_history').select('scanned_code') \
+                    .eq('user_id', user_id).in_('scanned_code', fp_codes_only)
+                if tenant_id:
+                    dedup_q = dedup_q.eq('tenant_id', tenant_id)
+                else:
+                    dedup_q = dedup_q.is_('tenant_id', 'null')
+                dedup_res = dedup_q.execute()
+                already_scanned = {row.get('scanned_code') for row in (getattr(dedup_res, 'data', None) or [])}
+
+                now_iso = datetime.now(timezone.utc).isoformat()
+                new_rows = []
+                for entry in fast_path_codes_for_logging:
+                    if entry['code'] in already_scanned:
+                        continue
+                    row = {
+                        'user_id': user_id,
+                        'scanned_code': entry['code'],
+                        'scanned_at': now_iso,
+                    }
+                    if tenant_id:
+                        row['tenant_id'] = tenant_id
+                    if entry.get('cache_id') is not None:
+                        row['api_lookup_cache_id'] = entry['cache_id']
+                    if entry.get('product_name'):
+                        row['product_description'] = str(entry['product_name'])[:2000]
+                    new_rows.append(row)
+                if new_rows:
+                    supabase_admin.table('scan_history').insert(new_rows).execute()
+                    # Invalidate the count cache so the response below reflects reality.
+                    try:
+                        with _ttl_cache_lock:
+                            keys_to_drop = [k for k in _ttl_cache_store.keys() if k[0] == 'get_used_scan_count']
+                            for k in keys_to_drop:
+                                _ttl_cache_store.pop(k, None)
+                    except Exception:
+                        pass
+                    logger.info(f"Batch fast path: bulk-logged {len(new_rows)} new scans to scan_history")
+            except Exception as e:
+                logger.warning(f"Batch fast-path scan_history bulk insert failed: {e}")
+
+        # ---- Attach scan_count to one fast-path result so the UI updates ----
+        if results and supabase_admin:
+            try:
+                if is_ceo_batch or is_paid_batch:
+                    sc_payload = {'used': 0, 'limit': None, 'remaining': None,
+                                  'is_paid': is_paid_batch, 'is_ceo_admin': is_ceo_batch}
+                else:
+                    trial_start_after = get_trial_start_date(tenant_id, user_id)
+                    used_after = get_used_scan_count(user_id, tenant_id, trial_start_after)
+                    sc_payload = {
+                        'used': used_after,
+                        'limit': FREE_TRIAL_SCAN_LIMIT,
+                        'remaining': max(0, FREE_TRIAL_SCAN_LIMIT - used_after),
+                        'is_paid': False,
+                        'is_ceo_admin': False,
+                    }
+                first_code = next(iter(results))
+                results[first_code]['scan_count'] = sc_payload
+            except Exception as e:
+                logger.debug(f"Could not attach scan_count to batch fast-path response: {e}")
+
+        if not codes_to_thread:
+            return jsonify({
+                'success': True,
+                'count': len(results),
+                'results': results,
+            })
+
         # 5 worker threads: enough to overlap I/O for FNSKU/Rainforest/Supabase
         # calls while leaving headroom on the gunicorn worker for the second
         # in-flight HTTP request the other gunicorn worker may be serving.
         with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_code = {
                 executor.submit(_invoke_scan_for_batch, c, user_id, force_api_lookup, auth_header): c
-                for c in codes
+                for c in codes_to_thread
             }
             for future in as_completed(future_to_code):
                 code = future_to_code[future]
