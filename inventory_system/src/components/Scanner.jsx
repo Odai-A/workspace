@@ -271,86 +271,6 @@ const Scanner = () => {
     return { ...extra, headers };
   };
 
-  // #region agent log
-  // Round-2 instrumentation (session 879cbd) for Render-only batch scan issues:
-  // H6 manual-retry storms, H7 processing=true treated as incomplete,
-  // H8 unknown 4xx for some code formats, H9 empty-error network failures.
-  if (typeof window !== 'undefined' && !window.__dbgScanR2_879cbd) {
-    window.__dbgScanR2_879cbd = {
-      manualRetriesByCode: new Map(), // code -> [timestamps]
-      send(payload) {
-        try {
-          fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '879cbd' },
-            body: JSON.stringify({
-              sessionId: '879cbd',
-              location: 'Scanner.jsx',
-              hypothesisId: payload.hypothesisId,
-              message: payload.message,
-              data: payload.data,
-              timestamp: Date.now(),
-            }),
-          }).catch(() => {});
-        } catch (_) { /* noop */ }
-      },
-      noteManualRetry(code) {
-        const now = Date.now();
-        const arr = this.manualRetriesByCode.get(code) || [];
-        const recent = arr.filter((t) => now - t < 30_000);
-        recent.push(now);
-        this.manualRetriesByCode.set(code, recent);
-        this.send({
-          message: 'manual_retry_invoked',
-          hypothesisId: 'H6',
-          data: { code, totalRecent: recent.length, intervalsMs: recent.map((t, i, a) => i === 0 ? 0 : t - a[i - 1]) },
-        });
-      },
-      noteRetryDecision(kind, code, info) {
-        this.send({
-          message: 'retry_decision',
-          hypothesisId: 'H7',
-          data: { kind, code, ...info },
-        });
-      },
-      noteScanError(code, error, source) {
-        this.send({
-          message: 'scan_error_detail',
-          hypothesisId: 'H8+H9',
-          data: {
-            code,
-            source,
-            errorCode: error?.code || null,
-            errorMessage: error?.message || null,
-            httpStatus: error?.response?.status || null,
-            httpStatusText: error?.response?.statusText || null,
-            responseDataSnippet: error?.response?.data ? String(JSON.stringify(error.response.data)).slice(0, 200) : null,
-            isAxiosError: !!error?.isAxiosError,
-            isTimeout: error?.code === 'ECONNABORTED',
-            networkError: !error?.response,
-          },
-        });
-      },
-      noteScanResult(code, source, payload) {
-        this.send({
-          message: 'scan_result',
-          hypothesisId: 'H7',
-          data: {
-            code,
-            source,
-            success: !!payload?.success,
-            processing: !!payload?.processing,
-            notInDb: !!payload?.not_in_api_database,
-            hasImages: !!(payload?.images?.length || payload?.image),
-            backendSource: payload?.source || null,
-          },
-        });
-      },
-    };
-  }
-  const __dbg2 = (typeof window !== 'undefined' ? window.__dbgScanR2_879cbd : null);
-  // #endregion
-
   const stopProcessingPoll = (codeToStop) => {
     const key = String(codeToStop || '').trim().toUpperCase();
     if (!key) return;
@@ -908,7 +828,6 @@ const Scanner = () => {
       })));
       
       const apiResult = response.data;
-      __dbg2?.noteScanResult(code, 'retryScanInBatch', apiResult);
 
       // If backend says it is still processing the lookup, do NOT re-POST
       // /api/scan in 3-9s loops (Rainforest will not be done that fast and we
@@ -916,7 +835,6 @@ const Scanner = () => {
       // hits the cheap GET /api/scan/status endpoint and updates the queue
       // when the result is ready.
       if (apiResult && apiResult.success && apiResult.processing) {
-        __dbg2?.noteRetryDecision('retryScanInBatch.handoff_to_poll', code, { retryCount });
         startProcessingPoll(code.toUpperCase());
         return;
       }
@@ -949,9 +867,6 @@ const Scanner = () => {
         // Check if data is still incomplete
         if (isProductIncomplete(displayableProduct, apiResult)) {
           // Still incomplete, retry again
-          __dbg2?.noteRetryDecision('retryScanInBatch.incomplete', code, {
-            retryCount, maxRetries, processing: !!apiResult?.processing,
-          });
           console.log(`⏳ Data still incomplete for ${code}, retrying...`);
           setBatchQueue((prev) => updateFirstBatchQueueItem(
             prev,
@@ -983,7 +898,6 @@ const Scanner = () => {
         await retryScanInBatch(code, retryCount + 1);
       }
     } catch (error) {
-      __dbg2?.noteScanError(code, error, 'retryScanInBatch');
       // Handle different types of errors
       const isServerError = error.response?.status >= 500;
       const isClientError = error.response?.status >= 400 && error.response?.status < 500;
@@ -1692,7 +1606,6 @@ const Scanner = () => {
           completeScanTimer('ERROR', upperCode);
         }
       } catch (error) {
-        __dbg2?.noteScanError(upperCode, error, 'lookupProductByCode.initial');
         console.error("Error calling backend scan endpoint:", error);
         const recoveredLocally = await tryLocalFallbackLookup(upperCode, {
           skipAutoInventory: forceApiLookup,
@@ -3613,7 +3526,6 @@ const Scanner = () => {
         }
       } catch (e) {
         consecutiveErrors += 1;
-        __dbg2?.noteScanError(normalizedCode, e, 'startProcessingPoll');
         console.warn('Processing poll error:', e);
         if (consecutiveErrors >= 3) {
           stopProcessingPoll(normalizedCode);
@@ -3879,7 +3791,6 @@ const Scanner = () => {
   // Manual retry for a specific item in batch queue
   const handleManualRetry = async (code) => {
     console.log(`🔄 Manual retry requested for ${code}`);
-    __dbg2?.noteManualRetry(code);
     // Per-code guard: ignore extra clicks while a retry chain is already in
     // flight for this code. Otherwise the user can launch many parallel retry
     // chains (each going attempt 1->2->3 with its own delays), flooding the
