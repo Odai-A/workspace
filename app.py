@@ -18,6 +18,51 @@ from datetime import datetime, timezone, timedelta
 _ttl_cache_store = {}
 _ttl_cache_lock = _threading.Lock()
 
+# Negative cache for codes the FNSKU/Rainforest pipeline could not resolve.
+# Storing these for a few minutes prevents a re-scan of the same dud code
+# from triggering the same expensive external lookup again, and lets the
+# batch endpoint mark them failed instantly.
+_negative_cache = {}  # code -> expires_at_unix
+_negative_cache_lock = _threading.Lock()
+_NEGATIVE_CACHE_TTL_SECONDS = 5 * 60
+
+
+def _is_negatively_cached(code):
+    if not code:
+        return False
+    key = str(code).strip().upper()
+    if not key:
+        return False
+    now = _time.time()
+    with _negative_cache_lock:
+        expires = _negative_cache.get(key)
+        if not expires:
+            return False
+        if expires < now:
+            _negative_cache.pop(key, None)
+            return False
+        return True
+
+
+def _mark_negatively_cached(code):
+    if not code:
+        return
+    key = str(code).strip().upper()
+    if not key:
+        return
+    with _negative_cache_lock:
+        _negative_cache[key] = _time.time() + _NEGATIVE_CACHE_TTL_SECONDS
+
+
+def _clear_negative_cache(code):
+    if not code:
+        return
+    key = str(code).strip().upper()
+    if not key:
+        return
+    with _negative_cache_lock:
+        _negative_cache.pop(key, None)
+
 
 def _ttl_cache(ttl_seconds):
     def decorator(fn):
@@ -5035,6 +5080,33 @@ def scan_product_batch():
         results = {}
         fast_path_codes_for_logging = []  # codes & cache_ids to bulk-log
 
+        # ---- Negative-cache fast fail ----
+        # Codes recently confirmed unresolvable get returned immediately
+        # without touching Supabase or external APIs. User can override via
+        # forceApiLookup or by hitting manual retry (frontend clears its
+        # local negative entry on retry).
+        if not force_api_lookup:
+            still_to_process = []
+            for code in codes:
+                if _is_negatively_cached(code):
+                    results[code] = {
+                        'success': True,
+                        'not_in_api_database': True,
+                        'message': 'Code previously confirmed unresolvable (cached). Use manual retry to force a fresh lookup.',
+                        'source': 'negative_cache',
+                        'cost_status': 'no_charge',
+                        'cached': True,
+                    }
+                else:
+                    still_to_process.append(code)
+            codes = still_to_process
+            if not codes:
+                return jsonify({
+                    'success': True,
+                    'count': len(results),
+                    'results': results,
+                })
+
         # ---- Bulk pre-fetch from api_lookup_cache ----
         # One Supabase round-trip for the whole batch, so codes that already
         # have a cached row can be returned without spinning up a thread or
@@ -5113,6 +5185,8 @@ def scan_product_batch():
                         'cache_id': cached.get('id'),
                         'product_name': name,
                     })
+                    # Code resolved fine - any old negative entry must be stale.
+                    _clear_negative_cache(code)
 
                 if fast_codes:
                     logger.info(f"Batch fast path: {len(fast_codes)}/{len(codes)} codes returned directly from bulk cache")
@@ -5211,6 +5285,11 @@ def scan_product_batch():
                 except Exception as e:
                     payload = {'success': False, 'error': 'thread_error', 'message': str(e)}
                 results[code] = payload
+                # Update server-side negative cache from this run's outcome.
+                if payload.get('not_in_api_database'):
+                    _mark_negatively_cached(code)
+                elif payload.get('success') and (payload.get('asin') or payload.get('title')):
+                    _clear_negative_cache(code)
 
         return jsonify({
             'success': True,

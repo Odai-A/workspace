@@ -91,6 +91,33 @@ const setCachedLocalLookup = (code, value) => {
   __localLookupCache.set(key, { value, expiresAt: Date.now() + LOCAL_LOOKUP_TTL_MS });
 };
 
+// Negative cache: when a code resolves to "not in any database / cannot be
+// looked up" we remember that for 5 minutes so re-scans of the same dud code
+// fail fast instead of hammering the backend / external APIs again.
+const __negativeLookupCache = new Map(); // code -> expiresAt
+const NEGATIVE_LOOKUP_TTL_MS = 5 * 60_000;
+const isNegativelyCached = (code) => {
+  const key = String(code || '').trim().toUpperCase();
+  if (!key) return false;
+  const expiresAt = __negativeLookupCache.get(key);
+  if (!expiresAt) return false;
+  if (expiresAt < Date.now()) {
+    __negativeLookupCache.delete(key);
+    return false;
+  }
+  return true;
+};
+const markNegativelyCached = (code) => {
+  const key = String(code || '').trim().toUpperCase();
+  if (!key) return;
+  __negativeLookupCache.set(key, Date.now() + NEGATIVE_LOOKUP_TTL_MS);
+};
+const clearNegativeCache = (code) => {
+  const key = String(code || '').trim().toUpperCase();
+  if (!key) return;
+  __negativeLookupCache.delete(key);
+};
+
 // Batch-scan dispatcher: when many scans land within a short window we bundle
 // them into a single POST /api/scan/batch request so the backend can process
 // codes in parallel server-side (much faster than one HTTP round trip per
@@ -795,8 +822,11 @@ const Scanner = () => {
 
   // Helper function to retry scanning a code (used for incomplete scans in batch mode)
   const retryScanInBatch = async (code, retryCount = 0) => {
-    const maxRetries = 3;
-    // Exponential backoff: 3s, 6s, 9s
+    // 2 retries is enough — the runtime evidence shows timed-out scans
+    // succeed on attempt 1 in almost every case. Going past 2 just adds
+    // more wall-clock time to items that are genuinely failing.
+    const maxRetries = 2;
+    // Exponential backoff: 3s, 6s
     const retryDelay = 3000 * (retryCount + 1);
     
     if (retryCount >= maxRetries) {
@@ -1379,6 +1409,29 @@ const Scanner = () => {
         }
         return;
       }
+
+      // Negative cache: if this exact code was confirmed unresolvable in the
+      // last 5 minutes, fail fast in batch mode instead of paying the full
+      // backend round-trip again. The user can force a re-check via the
+      // manual retry button (which clears the negative entry).
+      if (batchModeRef.current && isNegativelyCached(upperCode)) {
+        console.log(`⚡ Negative cache hit for ${upperCode} - failing fast`);
+        setBatchQueue((prev) => ([
+          ...prev,
+          {
+            id: Date.now() + Math.random(),
+            code: upperCode,
+            product: null,
+            timestamp: new Date().toISOString(),
+            sequence: batchSequenceRef.current++,
+            isProcessing: false,
+            hasFailed: true,
+            retryCount: 0,
+          },
+        ]));
+        completeScanTimer('NEG_CACHE', upperCode);
+        return;
+      }
     }
 
     if (forceApiLookup) {
@@ -1480,6 +1533,7 @@ const Scanner = () => {
             // when many scans are queued. Mark as failed in the queue so the
             // user can manually retry just the items that need it.
             if (batchModeRef.current && !forceApiLookup) {
+              markNegativelyCached(upperCode);
               setBatchQueue((prev) => updateFirstBatchQueueItem(
                 prev,
                 (item) => item.code === upperCode && item.isProcessing,
@@ -3420,7 +3474,11 @@ const Scanner = () => {
     }
     let attempts = 0;
     let consecutiveErrors = 0;
-    const maxAttempts = 20; // cap processing wait and fail faster when API cannot resolve code
+    // 8 attempts × 1s interval = ~8s of patient polling. Beyond that the
+    // backend's external lookup is almost certainly going to keep returning
+    // not_found, so we stop wasting cycles and fall back to local data /
+    // mark as failed.
+    const maxAttempts = 8;
     const poll = async () => {
       const poller = processingPollersRef.current.get(normalizedCode);
       if (poller?.inFlight) return;
@@ -3474,10 +3532,12 @@ const Scanner = () => {
         if (data && data.not_in_api_database) {
           stopProcessingPoll(normalizedCode);
           setIsApiProcessing(false);
+          markNegativelyCached(normalizedCode);
           const recovered = await attemptOneGoApiRecovery(normalizedCode, {
             requireImages: false,
           });
           if (recovered) {
+            clearNegativeCache(normalizedCode);
             completeScanTimer('POLL_RECOVERY', normalizedCode);
             return;
           }
@@ -3800,6 +3860,9 @@ const Scanner = () => {
       console.log(`⏸️ Manual retry ignored for ${code} - already retrying`);
       return;
     }
+    // Manual retry overrides the negative cache - user explicitly wants
+    // another attempt at a previously-unresolvable code.
+    clearNegativeCache(code);
     activeRetryCodesRef.current.add(code);
     setBatchQueue(prev => prev.map(item => 
       item.code === code 
