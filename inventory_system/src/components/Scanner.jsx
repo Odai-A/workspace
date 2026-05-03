@@ -95,7 +95,7 @@ const setCachedLocalLookup = (code, value) => {
 // looked up" we remember that for 5 minutes so re-scans of the same dud code
 // fail fast instead of hammering the backend / external APIs again.
 const __negativeLookupCache = new Map(); // code -> expiresAt
-const NEGATIVE_LOOKUP_TTL_MS = 5 * 60_000;
+const NEGATIVE_LOOKUP_TTL_MS = 300 * 1000; // 5 min — same code not_found / dud hits DB less often on Render
 const isNegativelyCached = (code) => {
   const key = String(code || '').trim().toUpperCase();
   if (!key) return false;
@@ -116,6 +116,23 @@ const clearNegativeCache = (code) => {
   const key = String(code || '').trim().toUpperCase();
   if (!key) return;
   __negativeLookupCache.delete(key);
+};
+
+const dbgIngestScan = (hypothesisId, location, message, data = {}) => {
+  // #region agent log
+  fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '879cbd' },
+    body: JSON.stringify({
+      sessionId: '879cbd',
+      hypothesisId,
+      location,
+      message,
+      data,
+      timestamp: Date.now(),
+    }),
+  }).catch(() => {});
+  // #endregion
 };
 
 // Batch-scan dispatcher: when many scans land within a short window we bundle
@@ -185,6 +202,11 @@ const scheduleBatchScan = (code, axiosInstance, scanBatchUrl, axiosConfig, optio
       flushBatch(axiosInstance, scanBatchUrl, axiosConfig);
     }, BATCH_DISPATCH_DELAY_MS);
   });
+
+/** Same in-flight POST /api/scan (or batch slot) for identical code+mode — avoids duplicate Render round-trips. */
+const __scanLookupCoalesce = new Map();
+const SCAN_SINGLE_HTTP_TIMEOUT_MS = 8000;
+const SCAN_STATUS_HTTP_TIMEOUT_MS = 7500;
 
 /**
  * Scanner component for barcode scanning and product lookup
@@ -278,6 +300,9 @@ const Scanner = () => {
   // Tracks which codes have an active manual-retry chain so duplicate clicks
   // on the retry button do not launch parallel chains.
   const activeRetryCodesRef = useRef(new Set());
+  /** Avoid parallel image-only enrich / force lookups for the same code. */
+  const imageEnrichPendingRef = useRef(new Set());
+  const forceApiLookupInFlightRef = useRef(new Set());
   const productInfoSectionRef = useRef(null);
   const scanTimingStartRef = useRef(0);
   const scanTimingCodeRef = useRef('');
@@ -350,6 +375,11 @@ const Scanner = () => {
       code: normalizedCode,
       at: Date.now(),
     });
+    // #region agent log
+    dbgIngestScan('H2', 'Scanner.jsx:completeScanTimer', 'scan_timing', {
+      source, elapsedMs, code: normalizedCode,
+    });
+    // #endregion
   };
 
   const formatScanLatencySource = (source) => {
@@ -675,20 +705,26 @@ const Scanner = () => {
     const cleanedCode = code.trim().replace(/\s+/g, '').toUpperCase();
     console.log("Detected code via Camera:", cleanedCode);
     
-    // Keep camera active for continuous scanning in batch mode
-    if (!batchMode) {
-      setIsCameraActive(false);
-    }
-    
+    // POS: keep camera active for rapid single-item scanning; input stays usable.
     setScannedCodes(prev => {
       const newHistory = [
-        { code: cleanedCode, timestamp: new Date().toISOString(), type: 'camera' },
+        {
+          code: cleanedCode,
+          timestamp: new Date().toISOString(),
+          type: 'camera',
+          scanStatus: 'loading',
+          pending: true,
+          productInfo: { name: 'Loading...', pending: true },
+        },
         ...prev.filter(item => item.code !== cleanedCode)
       ].slice(0, 10);
       return newHistory;
     });
-    
-    lookupProductByCode(cleanedCode);
+
+    void lookupProductByCode(cleanedCode, { posBackground: true });
+    setTimeout(() => {
+      searchInputRef.current?.focus();
+    }, 50);
   }
 
   // Helper function to automatically add product to inventory (used by auto-process feature)
@@ -778,7 +814,7 @@ const Scanner = () => {
   // Helper function to detect if product data is incomplete (still processing)
   const isProductIncomplete = (product, apiResult) => {
     // Check if API explicitly says it's processing
-    if (apiResult?.processing === true) {
+    if (apiResult?.processing === true || apiResult?.lookup_still_pending) {
       console.log(`⏳ Product ${product.fnsku || 'unknown'} marked as processing by API`);
       return true;
     }
@@ -854,7 +890,7 @@ const Scanner = () => {
         code: code.toUpperCase(),
         user_id: userId
       }, buildScanAxiosConfig({
-        timeout: 60000
+        timeout: SCAN_SINGLE_HTTP_TIMEOUT_MS
       })));
       
       const apiResult = response.data;
@@ -864,7 +900,7 @@ const Scanner = () => {
       // just burn requests). Hand off to the dedicated status poller, which
       // hits the cheap GET /api/scan/status endpoint and updates the queue
       // when the result is ready.
-      if (apiResult && apiResult.success && apiResult.processing) {
+      if (apiResult && apiResult.success && (apiResult.processing || apiResult.lookup_still_pending)) {
         startProcessingPoll(code.toUpperCase());
         return;
       }
@@ -1038,7 +1074,31 @@ const Scanner = () => {
     } else {
       // Normal mode - set product info
       setProductInfo(product);
-      
+
+      const rowProduct = {
+        name: product.name,
+        asin: product.asin,
+        fnsku: product.fnsku,
+        lpn: product.lpn,
+        upc: product.upc,
+        price: product.price,
+        category: product.category,
+        image_url: product.image_url,
+        images: product.images,
+      };
+      setScannedCodes((prev) => prev.map((item) => (
+        String(item.code).toUpperCase() === String(code).toUpperCase()
+          ? {
+            ...item,
+            scanStatus: product.notFound ? 'not_found' : 'ok',
+            pending: false,
+            productInfo: product.notFound
+              ? { name: 'Product Not Found', notFound: true, fnsku: code }
+              : rowProduct,
+          }
+          : item
+      )));
+
       // Auto-process: automatically add to inventory if enabled
       if (!skipAutoInventory) {
         await autoAddToInventory(product);
@@ -1103,6 +1163,7 @@ const Scanner = () => {
   const isReadyScanStatusPayload = (payload, options = {}) => {
     const { requireImages = false } = options;
     if (!payload?.success || payload?.processing) return false;
+    if (payload?.lookup_still_pending) return false;
     // Explicitly reject not-in-database responses — fnsku alone is not a valid product
     if (payload?.not_in_api_database) return false;
     // Require a real ASIN (10+ chars) or a meaningful title — not just the FNSKU echoed back
@@ -1178,7 +1239,11 @@ const Scanner = () => {
           + '&include_scan_count=0'
           + '&include_enrichment=1';
 
-        const { data } = await axios.get(statusUrl, buildScanAxiosConfig({ timeout: 10000 }));
+        const { data } = await axios.get(statusUrl, buildScanAxiosConfig({ timeout: SCAN_STATUS_HTTP_TIMEOUT_MS }));
+        if (data?.lookup_still_pending) {
+          if (attempt < maxChecks) await sleep(delayMs);
+          continue;
+        }
         // Skip not_in_api_database — backend may say this prematurely; keep waiting
         if (data?.not_in_api_database) {
           if (attempt < maxChecks) await sleep(delayMs);
@@ -1227,88 +1292,65 @@ const Scanner = () => {
     const normalizedCode = String(code || '').trim().toUpperCase();
     if (!normalizedCode || !userId) return false;
 
-    // Tiered backoff: wait before each force-rescan so the external FNSKU/ASIN
-    // service has time to resolve. Delays are shorter than before so we respond faster.
-    const retryDelays = [2000, 4000, 7000, 11000];
+    // #region agent log
+    dbgIngestScan('H4', 'Scanner.jsx:attemptOneGoApiRecovery', 'recovery_start', {
+      code: normalizedCode, requireImages,
+    });
+    // #endregion
 
-    for (let attempt = 0; attempt < retryDelays.length; attempt++) {
-      if (attempt === 0 && !batchModeRef.current) {
-        toast.info('Looking up product... please wait.', { autoClose: retryDelays[0] + 2000 });
+    // Single recovery pass + at most one short wait (POS: no multi-minute cascades).
+    await sleep(400);
+
+    const localMatch = await findProductInLocalSources(normalizedCode);
+    if (localMatch?.product && (!requireImages || hasProductImages(localMatch.product))) {
+      await handleProductFound(localMatch.product, normalizedCode, { source: localMatch.source }, { skipAutoInventory });
+      completeScanTimer('DB_RECOVERY', normalizedCode);
+      return true;
+    }
+
+    try {
+      const scanUrl = getApiEndpoint('/scan');
+      const response = await runWithScanSlot(normalizedCode, () => axios.post(scanUrl, {
+        code: normalizedCode,
+        user_id: userId,
+        force_api_lookup: true,
+      }, buildScanAxiosConfig({ timeout: SCAN_SINGLE_HTTP_TIMEOUT_MS })));
+
+      const data = response?.data;
+      console.log(
+        `🔄 Recovery for ${normalizedCode}: success=${data?.success}, ` +
+        `processing=${data?.processing}, not_in_db=${data?.not_in_api_database}, ` +
+        `asin=${data?.asin || '(none)'}, has_images=${!!(data?.images?.length || data?.image)}`
+      );
+      if (!data?.success) return false;
+
+      applyScanCountFromPayload(data.scan_count);
+
+      if (data.not_in_api_database) {
+        return false;
       }
 
-      await sleep(retryDelays[attempt]);
+      if (data.processing) {
+        return false;
+      }
 
-      // Fast path: backend may have cached result by now
-      const localMatch = await findProductInLocalSources(normalizedCode);
-      if (localMatch?.product && (!requireImages || hasProductImages(localMatch.product))) {
-        await handleProductFound(localMatch.product, normalizedCode, { source: localMatch.source }, { skipAutoInventory });
-        completeScanTimer('DB_RECOVERY', normalizedCode);
+      if (isReadyScanStatusPayload(data, { requireImages })) {
+        const product = buildDisplayableApiProduct(data, normalizedCode);
+        await handleProductFound(product, normalizedCode, data, { skipAutoInventory });
+        completeScanTimer('API_RECOVERY', normalizedCode);
         return true;
       }
 
-      try {
-        const scanUrl = getApiEndpoint('/scan');
-        const response = await runWithScanSlot(normalizedCode, () => axios.post(scanUrl, {
-          code: normalizedCode,
-          user_id: userId,
-          force_api_lookup: true,
-        }, buildScanAxiosConfig({ timeout: 45000 })));
-
-        const data = response?.data;
-        console.log(
-          `🔄 Recovery attempt ${attempt + 1} for ${normalizedCode}: success=${data?.success}, ` +
-          `processing=${data?.processing}, not_in_db=${data?.not_in_api_database}, ` +
-          `asin=${data?.asin || '(none)'}, has_images=${!!(data?.images?.length || data?.image)}`
-        );
-        if (!data?.success) continue;
-
-        applyScanCountFromPayload(data.scan_count);
-
-        // not_in_api_database means external FNSKU service hasn't resolved yet — keep waiting
-        if (data.not_in_api_database) {
-          console.log(`⏳ One-go recovery attempt ${attempt + 1}: FNSKU not resolved yet, continuing...`);
-          continue;
-        }
-
-        // Backend is still processing (ASIN lookup in progress) — poll status
-        if (data.processing) {
-          const statusRecovered = await tryRecoverPendingLookup(normalizedCode, {
-            maxChecks: 12,
-            delayMs: 1500,
-            skipAutoInventory,
-            suppressToast: true,
-            requireImages,
-          });
-          if (statusRecovered) {
-            completeScanTimer('POLL_RECOVERY', normalizedCode);
-            return true;
-          }
-          continue;
-        }
-
-        // Full product data — check it is real (not just an echoed FNSKU)
-        if (isReadyScanStatusPayload(data, { requireImages })) {
-          const product = buildDisplayableApiProduct(data, normalizedCode);
-          await handleProductFound(product, normalizedCode, data, { skipAutoInventory });
-          completeScanTimer('API_RECOVERY', normalizedCode);
-          return true;
-        }
-
-        // Product found with ASIN/title but images missing — show it immediately,
-        // the background enrichment on the caller side will fetch images
-        if (isReadyScanStatusPayload(data, { requireImages: false }) && requireImages) {
-          const partialProduct = buildDisplayableApiProduct(data, normalizedCode);
-          await handleProductFound(partialProduct, normalizedCode, data, { skipAutoInventory });
-          completeScanTimer('API_RECOVERY', normalizedCode);
-          return true;
-        }
-
-      } catch (error) {
-        console.warn(`One-go recovery attempt ${attempt + 1} failed for ${normalizedCode}:`, error?.message);
+      if (isReadyScanStatusPayload(data, { requireImages: false }) && requireImages) {
+        const partialProduct = buildDisplayableApiProduct(data, normalizedCode);
+        await handleProductFound(partialProduct, normalizedCode, data, { skipAutoInventory });
+        completeScanTimer('API_RECOVERY', normalizedCode);
+        return true;
       }
+    } catch (error) {
+      console.warn(`One-go recovery failed for ${normalizedCode}:`, error?.message);
     }
 
-    // Final local check — use whatever the backend cached during recovery attempts
     const finalLocalMatch = await findProductInLocalSources(normalizedCode);
     if (finalLocalMatch?.product) {
       await handleProductFound(finalLocalMatch.product, normalizedCode, { source: finalLocalMatch.source }, { skipAutoInventory });
@@ -1371,10 +1413,17 @@ const Scanner = () => {
 
   async function lookupProductByCode(code, options = {}) {
     const forceApiLookup = options.forceApiLookup === true;
+    const posBackground = options.posBackground === true;
     const suppressBatchItemToast = options.suppressBatchItemToast === true;
     // Ensure code is uppercase (safety measure)
     const upperCode = code.trim().toUpperCase();
-    console.log(`🔍 Looking up product by code: ${upperCode}, UserID: ${userId || 'N/A'}, Batch Mode: ${batchMode}, forceApiLookup: ${forceApiLookup}`);
+    const posUi = posBackground && !batchMode && !forceApiLookup;
+    console.log(`🔍 Looking up product by code: ${upperCode}, UserID: ${userId || 'N/A'}, Batch Mode: ${batchMode}, forceApiLookup: ${forceApiLookup}, posBackground: ${posUi}`);
+    // #region agent log
+    dbgIngestScan('H2', 'Scanner.jsx:lookupProductByCode', 'lookup_start', {
+      code: upperCode, batchMode, forceApiLookup, posUi,
+    });
+    // #endregion
     if (!forceApiLookup || !scanTimingStartRef.current) {
       startScanTimer(upperCode);
     }
@@ -1393,57 +1442,84 @@ const Scanner = () => {
       return;
     }
 
+    if (forceApiLookup && forceApiLookupInFlightRef.current.has(upperCode)) {
+      // #region agent log
+      dbgIngestScan('H3', 'Scanner.jsx:lookupProductByCode', 'skip_duplicate_force_lookup', { code: upperCode });
+      // #endregion
+      return;
+    }
+
     if (!forceApiLookup) {
       const localMatch = await findProductInLocalSources(upperCode);
       if (localMatch?.product) {
         await handleProductFound(localMatch.product, upperCode, { cached: true, source: localMatch.source });
         completeScanTimer('DB', upperCode);
-        if (!batchMode) {
+        if (!batchMode && !posUi) {
           toast.success('Found in your database.');
         }
         setLoading(false);
         // Background image enrichment — show product immediately, fetch images silently
         if (!hasProductImages(localMatch.product) && localMatch.product.asin) {
-          attemptOneGoApiRecovery(upperCode, { requireImages: true, skipAutoInventory: true })
-            .catch(() => {});
+          const k = upperCode;
+          if (!imageEnrichPendingRef.current.has(k)) {
+            imageEnrichPendingRef.current.add(k);
+            attemptOneGoApiRecovery(upperCode, { requireImages: true, skipAutoInventory: true, silent: true })
+              .finally(() => imageEnrichPendingRef.current.delete(k))
+              .catch(() => {});
+          }
         }
         return;
       }
 
-      // Negative cache: if this exact code was confirmed unresolvable in the
-      // last 5 minutes, fail fast in batch mode instead of paying the full
-      // backend round-trip again. The user can force a re-check via the
-      // manual retry button (which clears the negative entry).
-      if (batchModeRef.current && isNegativelyCached(upperCode)) {
+      // Negative cache: fail fast for batch and single (no duplicate /api/scan until TTL expires).
+      if (isNegativelyCached(upperCode)) {
         console.log(`⚡ Negative cache hit for ${upperCode} - failing fast`);
-        setBatchQueue((prev) => ([
-          ...prev,
-          {
-            id: Date.now() + Math.random(),
-            code: upperCode,
-            product: null,
-            timestamp: new Date().toISOString(),
-            sequence: batchSequenceRef.current++,
-            isProcessing: false,
-            hasFailed: true,
-            retryCount: 0,
-          },
-        ]));
         completeScanTimer('NEG_CACHE', upperCode);
+        if (batchModeRef.current) {
+          setBatchQueue((prev) => ([
+            ...prev,
+            {
+              id: Date.now() + Math.random(),
+              code: upperCode,
+              product: null,
+              timestamp: new Date().toISOString(),
+              sequence: batchSequenceRef.current++,
+              isProcessing: false,
+              hasFailed: true,
+              retryCount: 0,
+            },
+          ]));
+        } else {
+          const msg = 'This code was recently not found. Wait a few minutes or use refresh to try again.';
+          setNotInDatabaseMessage(msg);
+          setProductInfo({ name: 'Product Not Found', fnsku: upperCode, notFound: true });
+          setScannedCodes((prev) => prev.map((item) => (
+            item.code === upperCode
+              ? {
+                ...item,
+                scanStatus: 'not_found',
+                pending: false,
+                productInfo: { name: 'Product Not Found', notFound: true, fnsku: upperCode },
+              }
+              : item
+          )));
+          toast.warning(msg, { autoClose: 5000 });
+        }
         return;
       }
     }
 
     if (forceApiLookup) {
+      forceApiLookupInFlightRef.current.add(upperCode);
       if (batchMode) {
         setBatchForceLookupCode(upperCode);
       } else {
         setApiEnrichLoading(true);
       }
-    } else {
+    } else if (!posUi) {
       setLoading(true);
     }
-    if (!batchMode && !forceApiLookup) {
+    if (!batchMode && !forceApiLookup && !posUi) {
       setProductInfo(null); // Clear previous product info only in normal mode
     }
     if (batchMode && !forceApiLookup) {
@@ -1480,21 +1556,20 @@ const Scanner = () => {
       // Backend will check cache first and return cached data quickly if available
       // This ensures all scans are properly logged to scan_history for trial tracking
       console.log(`Calling backend /api/scan to log scan and get updated count for code: ${upperCode}`);
-      toast.info(
-        batchMode
-          ? (forceApiLookup ? `Amazon API: ${upperCode}…` : 'Scanning...')
-          : (forceApiLookup ? 'Fetching images and details from Amazon…' : 'Scanning product. Please wait...'),
-        { autoClose: batchMode ? (forceApiLookup ? 2000 : 1000) : forceApiLookup ? 3500 : 2000 }
-      );
+      if (!posUi) {
+        toast.info(
+          batchMode
+            ? (forceApiLookup ? `Amazon API: ${upperCode}…` : 'Scanning...')
+            : (forceApiLookup ? 'Fetching images and details from Amazon…' : 'Scanning product. Please wait...'),
+          { autoClose: batchMode ? (forceApiLookup ? 2000 : 1000) : forceApiLookup ? 3500 : 2000 }
+        );
+      }
       
       try {
         // Use centralized API config
         const scanUrl = getApiEndpoint('/scan');
         
         console.log("🚀 Calling unified scan endpoint:", scanUrl);
-        // Render-hosted backend can take 35-60s on cold paths (Rainforest API
-        // call). 60s matches the retry path that we know succeeds on first try.
-        const scanRequestTimeout = batchModeRef.current ? 60000 : 45000;
         let response;
         if (batchModeRef.current && !forceApiLookup) {
           // Batch mode: route through the dispatcher so multiple rapid scans
@@ -1509,13 +1584,23 @@ const Scanner = () => {
             timeout: 110000,
           }), { forceApiLookup });
         } else {
-          response = await runWithScanSlot(upperCode, () => axios.post(scanUrl, {
-            code: upperCode,
-            user_id: userId,
-            ...(forceApiLookup ? { force_api_lookup: true } : {})
-          }, buildScanAxiosConfig({
-            timeout: scanRequestTimeout
-          })));
+          const soloKey = `${upperCode}:${forceApiLookup ? 'f' : 'n'}`;
+          let soloPromise = __scanLookupCoalesce.get(soloKey);
+          if (soloPromise) {
+            dbgIngestScan('H6', 'Scanner.jsx:lookupProductByCode', 'coalesced_solo_scan_post', { key: soloKey });
+            response = await soloPromise;
+          } else {
+            soloPromise = runWithScanSlot(upperCode, () => axios.post(scanUrl, {
+              code: upperCode,
+              user_id: userId,
+              ...(forceApiLookup ? { force_api_lookup: true } : {})
+            }, buildScanAxiosConfig({
+              timeout: SCAN_SINGLE_HTTP_TIMEOUT_MS
+            })));
+            soloPromise.finally(() => { __scanLookupCoalesce.delete(soloKey); });
+            __scanLookupCoalesce.set(soloKey, soloPromise);
+            response = await soloPromise;
+          }
         }
         
         const apiResult = response.data;
@@ -1543,27 +1628,35 @@ const Scanner = () => {
               completeScanTimer('NOT_FOUND', upperCode);
               return;
             }
-            // Single-scan mode: keep automatic recovery (only one item, no cascade risk).
-            const recovered = await attemptOneGoApiRecovery(upperCode, {
-              skipAutoInventory: forceApiLookup,
-              requireImages: false,
-            });
-            if (recovered) {
-              setNotInDatabaseMessage(null);
-              setIsApiProcessing(false);
-              return;
+            // Single-scan: backend already bounded external work; fail fast in UI (no 45s recovery cascade).
+            if (apiResult.scan_count) {
+              applyScanCountFromPayload(apiResult.scan_count);
             }
-            // Truly not found after all retry tiers exhausted
-            setNotInDatabaseMessage(apiResult.message || "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time.");
-            setLastScannedCode(code);
+            markNegativelyCached(upperCode);
+            const nfMsg = apiResult.message || "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time.";
+            setNotInDatabaseMessage(nfMsg);
+            setLastScannedCode(upperCode);
             setIsApiProcessing(false);
-            toast.warning(apiResult.message || "This product could not be found in our lookup database.", { autoClose: 8000 });
+            setProductInfo({ name: 'Product Not Found', fnsku: upperCode, notFound: true });
+            setScannedCodes((prev) => prev.map((item) => (
+              item.code === upperCode
+                ? {
+                  ...item,
+                  scanStatus: 'not_found',
+                  pending: false,
+                  productInfo: { name: 'Product Not Found', notFound: true, fnsku: upperCode },
+                }
+                : item
+            )));
+            toast.warning(nfMsg, { autoClose: 6000 });
             completeScanTimer('NOT_FOUND', upperCode);
             return;
           }
-          // Backend returned "processing: true" – we're still looking up; show partial data and Check for Updates
-          if (apiResult.processing) {
-            setIsApiProcessing(true);
+          // Backend still resolving (legacy processing=true or lookup_still_pending from /api/scan/status).
+          if (apiResult.processing || apiResult.lookup_still_pending) {
+            if (batchModeRef.current) {
+              setIsApiProcessing(true);
+            }
             const partialImages = apiResult.images || (apiResult.image ? [apiResult.image] : []);
             const displayableProduct = {
               fnsku: apiResult.fnsku || code,
@@ -1604,7 +1697,12 @@ const Scanner = () => {
                 });
               }, 0);
             }
-            startProcessingPoll(upperCode);
+            if (batchModeRef.current) {
+              startProcessingPoll(upperCode);
+            } else {
+              setIsApiProcessing(false);
+              toast.info('Product is still resolving upstream. Tap "Check for updates" to refresh — no background polling.', { autoClose: 5000 });
+            }
             return;
           }
 
@@ -1612,7 +1710,7 @@ const Scanner = () => {
           const allImages = apiResult.images || (apiResult.image ? [apiResult.image] : []);
           const displayableProduct = buildDisplayableApiProduct(apiResult, code);
           
-          if (!batchMode) {
+          if (!batchMode && !posUi) {
             if (forceApiLookup) {
               if (apiResult.source === 'rainforest_api' || apiResult.source === 'cache_enriched' || apiResult.cost_status === 'charged') {
                 toast.success(`Fetched from Amazon: ${allImages.length} image${allImages.length !== 1 ? 's' : ''} and updated details.`, { icon: "💚" });
@@ -1633,10 +1731,15 @@ const Scanner = () => {
           await handleProductFound(displayableProduct, code, apiResult, { skipAutoInventory: forceApiLookup });
           completeScanTimer('API', upperCode);
           if (!hasProductImages(displayableProduct) && displayableProduct.asin) {
-            attemptOneGoApiRecovery(upperCode, {
-              skipAutoInventory: true,
-              requireImages: true,
-            }).catch(() => {});
+            const k = upperCode;
+            if (!imageEnrichPendingRef.current.has(k)) {
+              imageEnrichPendingRef.current.add(k);
+              attemptOneGoApiRecovery(upperCode, {
+                skipAutoInventory: true,
+                requireImages: true,
+                silent: true,
+              }).finally(() => imageEnrichPendingRef.current.delete(k)).catch(() => {});
+            }
           }
           
           // Prefer scan_count from response to avoid extra /api/scan-count refetch; backend includes it in all scan responses
@@ -1686,7 +1789,7 @@ const Scanner = () => {
           }
           return;
         }
-        if (!forceApiLookup) {
+        if (!forceApiLookup && !posUi) {
           const forceRecovered = await attemptOneGoApiRecovery(upperCode, {
             skipAutoInventory: forceApiLookup,
             requireImages: true,
@@ -1769,6 +1872,9 @@ const Scanner = () => {
           completeScanTimer('NETWORK_ERROR', upperCode);
         }
       } finally {
+        if (forceApiLookup) {
+          forceApiLookupInFlightRef.current.delete(upperCode);
+        }
         setLoading(false);
         setApiEnrichLoading(false);
         setBatchForceLookupCode(null);
@@ -1791,6 +1897,9 @@ const Scanner = () => {
         toast.error("Error occurred while looking up product by code: " + (error.message || 'An unknown error occurred'));
       }
     } finally {
+      if (forceApiLookup) {
+        forceApiLookupInFlightRef.current.delete(upperCode);
+      }
       setLoading(false);
       setApiEnrichLoading(false);
       setBatchForceLookupCode(null);
@@ -1799,6 +1908,9 @@ const Scanner = () => {
         setTimeout(() => {
           searchInputRef.current?.focus();
         }, 200);
+      }
+      if (posUi && searchInputRef.current) {
+        setTimeout(() => searchInputRef.current?.focus(), 80);
       }
     }
   }
@@ -1816,9 +1928,13 @@ const Scanner = () => {
       toast.error('No barcode or ASIN available to look up.');
       return;
     }
+    if (forceApiLookupInFlightRef.current.has(code)) {
+      toast.info('Already fetching details for this code.');
+      return;
+    }
     setApiEnrichLoading(true);
     try {
-      const recovered = await attemptOneGoApiRecovery(code, { requireImages: true });
+      const recovered = await attemptOneGoApiRecovery(code, { requireImages: true, silent: true });
       if (!recovered) {
         await lookupProductByCode(code, { forceApiLookup: true });
       }
@@ -1844,13 +1960,21 @@ const Scanner = () => {
     
     setScannedCodes(prev => {
       const newHistory = [
-        { code: cleanedBarcode, timestamp: new Date().toISOString(), type: 'manual' },
+        {
+          code: cleanedBarcode,
+          timestamp: new Date().toISOString(),
+          type: 'manual',
+          scanStatus: 'loading',
+          pending: true,
+          productInfo: { name: 'Loading...', pending: true },
+        },
         ...prev.filter(item => item.code !== cleanedBarcode)
       ].slice(0, 10);
       return newHistory;
     });
 
-    await lookupProductByCode(cleanedBarcode);
+    setSearchQuery('');
+    void lookupProductByCode(cleanedBarcode, { posBackground: true });
     setIsManualScanning(false);
   };
 
@@ -2984,7 +3108,23 @@ const Scanner = () => {
       e.preventDefault();
       const code = searchQuery.trim().toUpperCase(); // Convert to uppercase
       setSearchQuery(''); // Clear immediately for next scan
-      lookupProductByCode(code);
+      if (!batchMode) {
+        setScannedCodes((prev) => {
+          const newHistory = [
+            {
+              code,
+              timestamp: new Date().toISOString(),
+              type: 'search',
+              scanStatus: 'loading',
+              pending: true,
+              productInfo: { name: 'Loading...', pending: true },
+            },
+            ...prev.filter((item) => item.code !== code),
+          ].slice(0, 10);
+          return newHistory;
+        });
+      }
+      void lookupProductByCode(code, { posBackground: true });
       // Refocus after a brief delay to ensure smooth scanning
       setTimeout(() => {
         if (searchInputRef.current) {
@@ -3445,7 +3585,7 @@ const Scanner = () => {
       } catch (error) {
         console.error('❌ Auto-refresh error:', error);
       }
-    }, 45000); // Every 45 seconds
+    }, 120000); // Auto-refresh interval (ms) — not related to HTTP scan timeout
   };
   
   const stopAutoRefresh = () => {
@@ -3524,7 +3664,7 @@ const Scanner = () => {
         const { data: { session } } = await supabase.auth.getSession();
         const token = session?.access_token || '';
         const res = await axios.get(url, {
-          timeout: 10000,
+          timeout: SCAN_STATUS_HTTP_TIMEOUT_MS,
           headers: token ? { 'Authorization': `Bearer ${token}` } : {}
         });
         const data = res.data;
@@ -3533,13 +3673,15 @@ const Scanner = () => {
           stopProcessingPoll(normalizedCode);
           setIsApiProcessing(false);
           markNegativelyCached(normalizedCode);
-          const recovered = await attemptOneGoApiRecovery(normalizedCode, {
-            requireImages: false,
-          });
-          if (recovered) {
-            clearNegativeCache(normalizedCode);
-            completeScanTimer('POLL_RECOVERY', normalizedCode);
-            return;
+          if (batchModeRef.current) {
+            const recovered = await attemptOneGoApiRecovery(normalizedCode, {
+              requireImages: false,
+            });
+            if (recovered) {
+              clearNegativeCache(normalizedCode);
+              completeScanTimer('POLL_RECOVERY', normalizedCode);
+              return;
+            }
           }
           setNotInDatabaseMessage(data.message || "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time.");
           setLastScannedCode(normalizedCode);
@@ -3547,6 +3689,18 @@ const Scanner = () => {
             setBatchQueue((prev) => prev.map((item) => (
               item.code === normalizedCode && item.isProcessing
                 ? { ...item, isProcessing: false, hasFailed: true }
+                : item
+            )));
+          } else {
+            setProductInfo({ name: 'Product Not Found', fnsku: normalizedCode, notFound: true });
+            setScannedCodes((prev) => prev.map((item) => (
+              item.code === normalizedCode
+                ? {
+                  ...item,
+                  scanStatus: 'not_found',
+                  pending: false,
+                  productInfo: { name: 'Product Not Found', notFound: true, fnsku: normalizedCode },
+                }
                 : item
             )));
           }
@@ -3563,8 +3717,13 @@ const Scanner = () => {
           if (!batchMode) toast.success('Product details ready.', { icon: '💚' });
           // Background image enrichment — don't block; card is already shown
           if (!hasProductImages(displayableProduct) && displayableProduct.asin) {
-            attemptOneGoApiRecovery(normalizedCode, { requireImages: true, skipAutoInventory: true })
-              .catch(() => {});
+            const k = normalizedCode;
+            if (!imageEnrichPendingRef.current.has(k)) {
+              imageEnrichPendingRef.current.add(k);
+              attemptOneGoApiRecovery(normalizedCode, { requireImages: true, skipAutoInventory: true, silent: true })
+                .finally(() => imageEnrichPendingRef.current.delete(k))
+                .catch(() => {});
+            }
           }
           if (data.scan_count) {
             const used = data.scan_count.used || 0;
@@ -4994,6 +5153,8 @@ const Scanner = () => {
               const numPrice = priceVal != null && priceVal !== '' ? parseFloat(priceVal) : null;
               const hasRealPrice = numPrice != null && !Number.isNaN(numPrice) && numPrice > 0;
               const priceDisplay = hasRealPrice ? `$${numPrice.toFixed(2)}` : null;
+              const isLoadingRow = item.productInfo?.pending || item.scanStatus === 'loading';
+              const isNotFound = item.scanStatus === 'not_found' || item.productInfo?.notFound;
               return (
               <div key={`${item.code}-${item.timestamp}-${index}`} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:bg-gray-50 dark:hover:bg-gray-700">
                 <div className="flex justify-between items-start gap-3">
@@ -5015,7 +5176,12 @@ const Scanner = () => {
                       <div className="flex items-center gap-2 mb-0.5 flex-wrap">
                         <span className="font-mono text-sm font-semibold text-gray-800 dark:text-gray-200">{item.code}</span>
                         <span className="capitalize text-xs text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-700 px-2 py-0.5 rounded">({item.type})</span>
-                        {priceDisplay ? (
+                        {isNotFound ? (
+                          <span className="text-xs font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 px-2 py-0.5 rounded">Not Found</span>
+                        ) : null}
+                        {isLoadingRow ? (
+                          <span className="text-xs italic text-indigo-600 dark:text-indigo-400">Loading…</span>
+                        ) : priceDisplay ? (
                           <span className="text-sm font-semibold text-green-600 dark:text-green-400">{priceDisplay}</span>
                         ) : (
                           <span className="text-xs italic text-amber-600 dark:text-amber-400">No price</span>
@@ -5024,12 +5190,16 @@ const Scanner = () => {
                       <span className="text-xs text-gray-400 dark:text-gray-500">{new Date(item.timestamp).toLocaleString()}</span>
                       {item.productInfo ? (
                         <div className="mt-2 space-y-1">
-                          <p className="text-sm font-medium text-gray-900 dark:text-white line-clamp-2">{item.productInfo.name || item.code || 'Product'}</p>
-                          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-400">
-                            {item.productInfo.asin && <span>ASIN: <span className="font-mono">{item.productInfo.asin}</span></span>}
-                            {item.productInfo.fnsku && <span>FNSKU: <span className="font-mono">{item.productInfo.fnsku}</span></span>}
-                            {item.productInfo.lpn && <span>LPN: <span className="font-mono">{item.productInfo.lpn}</span></span>}
-                          </div>
+                          <p className={`text-sm font-medium line-clamp-2 ${isNotFound ? 'text-red-700 dark:text-red-300' : 'text-gray-900 dark:text-white'}`}>
+                            {item.productInfo.name || item.code || 'Product'}
+                          </p>
+                          {!isLoadingRow && !isNotFound ? (
+                            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600 dark:text-gray-400">
+                              {item.productInfo.asin && <span>ASIN: <span className="font-mono">{item.productInfo.asin}</span></span>}
+                              {item.productInfo.fnsku && <span>FNSKU: <span className="font-mono">{item.productInfo.fnsku}</span></span>}
+                              {item.productInfo.lpn && <span>LPN: <span className="font-mono">{item.productInfo.lpn}</span></span>}
+                            </div>
+                          ) : null}
                         </div>
                       ) : (
                         <p className="text-xs text-gray-500 dark:text-gray-400 italic mt-1">Loading product details...</p>
@@ -5044,7 +5214,7 @@ const Scanner = () => {
                     <XMarkIcon className="h-4 w-4" />
                   </button>
                 </div>
-                {item.productInfo && (
+                {item.productInfo && !isLoadingRow && !isNotFound && (
                   <div className="mt-3 flex flex-col gap-2">
                     <div className="flex flex-wrap gap-2">
                       <button

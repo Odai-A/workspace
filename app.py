@@ -64,6 +64,28 @@ def _clear_negative_cache(code):
         _negative_cache.pop(key, None)
 
 
+# #region agent log
+_DEBUG_SCAN_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug-879cbd.log')
+
+
+def _dbg_scan_perf_log(hypothesis_id, location, message, data=None):
+    """Append one NDJSON line for POS/scan performance debugging (session 879cbd)."""
+    try:
+        rec = {
+            'sessionId': '879cbd',
+            'hypothesisId': hypothesis_id,
+            'location': location,
+            'message': message,
+            'timestamp': int(_time.time() * 1000),
+            'data': data or {},
+        }
+        with open(_DEBUG_SCAN_LOG_PATH, 'a', encoding='utf-8') as _df:
+            _df.write(json.dumps(rec, default=str) + '\n')
+    except Exception:
+        pass
+# #endregion
+
+
 def _ttl_cache(ttl_seconds):
     def decorator(fn):
         def wrapper(*args, **kwargs):
@@ -222,18 +244,16 @@ FREE_TRIAL_SCAN_LIMIT = int(os.environ.get('FREE_TRIAL_SCAN_LIMIT', '50'))
 FNSKU_PROCESSING_MESSAGE = "We're looking up this product. Please try again in a moment or use 'Check for Updates'."
 FNSKU_NOT_IN_DATABASE_MESSAGE = "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time. You may try again later or add the product manually."
 
-# FNSKU/Rainforest timeouts — raised from earlier defaults since Gunicorn timeout is now 120s
-FNSKU_ADD_OR_GET_TIMEOUT = float(os.environ.get('FNSKU_ADD_OR_GET_TIMEOUT', '15'))
+# FNSKU/Rainforest — POS-oriented defaults (~5–8s external budget per scan; override via env).
+FNSKU_ADD_OR_GET_TIMEOUT = float(os.environ.get('FNSKU_ADD_OR_GET_TIMEOUT', '8'))
 FNSKU_GET_BY_BARCODE_TIMEOUT = float(os.environ.get('FNSKU_GET_BY_BARCODE_TIMEOUT', '8'))
 FNSKU_STATUS_LOOKUP_TIMEOUT = float(os.environ.get('FNSKU_STATUS_LOOKUP_TIMEOUT', '8'))
-RAINFOREST_REQUEST_TIMEOUT = float(os.environ.get('RAINFOREST_REQUEST_TIMEOUT', '15'))
-# Patient initial polling: FNSKU service typically needs 15-25s for new codes to resolve to ASIN.
-# Raised from 3 polls (2s) to 20 polls (~16s) so first scan resolves ASIN inline most of the time.
-# Safe under Gunicorn timeout 120s. AddOrGet retry happens halfway through.
-FNSKU_SCAN_INITIAL_MAX_POLLS = int(os.environ.get('FNSKU_SCAN_INITIAL_MAX_POLLS', '20'))
-FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS = int(os.environ.get('FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS', '800'))
-FNSKU_SCAN_RETRY_ADD_AFTER = int(os.environ.get('FNSKU_SCAN_RETRY_ADD_AFTER', '8'))
-FNSKU_NOT_IN_DATABASE_ATTEMPTS = int(os.environ.get('FNSKU_NOT_IN_DATABASE_ATTEMPTS', '15'))
+RAINFOREST_REQUEST_TIMEOUT = float(os.environ.get('RAINFOREST_REQUEST_TIMEOUT', '8'))
+# Short inline poll window: prefer fast not_found + client retry over long processing responses.
+FNSKU_SCAN_INITIAL_MAX_POLLS = int(os.environ.get('FNSKU_SCAN_INITIAL_MAX_POLLS', '6'))
+FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS = int(os.environ.get('FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS', '700'))
+FNSKU_SCAN_RETRY_ADD_AFTER = int(os.environ.get('FNSKU_SCAN_RETRY_ADD_AFTER', '3'))
+FNSKU_NOT_IN_DATABASE_ATTEMPTS = int(os.environ.get('FNSKU_NOT_IN_DATABASE_ATTEMPTS', '6'))
 SKIP_RAINFOREST_ON_STANDARD_SCAN = str(os.environ.get('SKIP_RAINFOREST_ON_STANDARD_SCAN', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 
 # --- Creator/CEO Configuration ---
@@ -3352,6 +3372,14 @@ def scan_product():
 
         # When true, skip fast paths that return manifest/products rows without images and fetch Amazon/Rainforest data when possible
         force_api_lookup = bool(data.get('force_api_lookup') or data.get('forceApiLookup'))
+        if force_api_lookup:
+            _clear_negative_cache(code)
+
+        # #region agent log
+        _dbg_scan_perf_log('H0', 'app.py:scan_product:entry', 'scan_start', {
+            'code': code, 'code_type': code_type, 'force_api_lookup': force_api_lookup,
+        })
+        # #endregion
 
         # Get API keys from environment (needed for ASIN, UPC, and FNSKU handling)
         FNSKU_API_KEY = os.environ.get('FNSKU_API_KEY')
@@ -4515,6 +4543,28 @@ def scan_product():
                 logger.error(f"   Traceback: {traceback.format_exc()}")
                 print(f"Cache check error: {cache_error}")
         
+        # ---- Server negative cache (single /api/scan fast fail; same semantics as batch) ----
+        if _is_negatively_cached(code) and not force_api_lookup:
+            _dbg_scan_perf_log('H5', 'app.py:scan_product:fnsku_neg', 'negative_cache_hit', {'code': code})
+            neg = {
+                'success': True,
+                'processing': False,
+                'not_in_api_database': True,
+                'not_found': True,
+                'fnsku': code,
+                'message': 'Code previously confirmed unresolvable (cached). Use manual retry to force a fresh lookup.',
+                'bar_code': code,
+                'source': 'negative_cache',
+                'cost_status': 'no_charge',
+                'cached': True,
+            }
+            scn = _scan_count_for_response(user_id, tenant_id) if supabase_admin and user_id else None
+            if scn:
+                neg['scan_count'] = scn
+            return jsonify(neg), 200
+
+        fnsku_external_t0 = _time.time()
+
         # STEP 2: Not in cache - call FNSKU API. AddOrGet first for fastest first-scan (GetByBarCode often fails or is slow).
         logger.info(f"💰 {code_type} {code} not in cache - calling API (will be charged)")
         print(f"CALLING EXTERNAL API - THIS WILL BE CHARGED")
@@ -4654,15 +4704,25 @@ def scan_product():
                 if asin and isinstance(asin, str) and len(asin.strip()) >= 10:
                     logger.info(f"✅ ASIN confirmed available: {asin} - exiting polling immediately")
                     break
-            # After short polling loop, no final long lookup - return processing quickly for good UX
+            # After bounded inline poll, prefer definitive not_found over long-lived processing + polling.
             if not asin or not isinstance(asin, str) or len(asin.strip()) < 10:
-                logger.info(f"⏳ Short poll done, ASIN not yet available. Returning processing - user can Check for Updates or scan again.")
+                logger.info(f"⏳ Short poll done, ASIN not yet available — returning not_in_api_database (POS fast path).")
         
-        # Final ASIN validation - return processing response so frontend can show partial + Check for Updates
+        # Final ASIN validation — no open-ended processing=true for normal scans (avoids 45s+ client polling).
         # Log this scan here so it counts toward the free trial; GET /api/scan/status does not log (no user context).
         if not asin or not isinstance(asin, str) or len(asin.strip()) < 10:
-            processing_response = {
+            _mark_negatively_cached(code)
+            ext_ms = int((_time.time() - fnsku_external_t0) * 1000)
+            # #region agent log
+            _dbg_scan_perf_log('H1', 'app.py:scan_product:fnsku_no_asin', 'not_found_after_bounded_poll', {
+                'code': code, 'external_ms': ext_ms, 'task_id': str(task_id) if task_id else None,
+            })
+            # #endregion
+            not_found_response = {
                 "success": True,
+                "processing": False,
+                "not_in_api_database": True,
+                "not_found": True,
                 "fnsku": code,
                 "asin": "",
                 "title": scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}",
@@ -4671,10 +4731,10 @@ def scan_product():
                 "images": [scan_data.get('imageUrl') or scan_data.get('image')] if (scan_data and (scan_data.get('imageUrl') or scan_data.get('image'))) else [],
                 "brand": "",
                 "category": "External API",
-                "message": FNSKU_PROCESSING_MESSAGE,
-                "processing": True,
+                "message": FNSKU_NOT_IN_DATABASE_MESSAGE,
                 "scan_task_id": str(task_id) if task_id else None,
-                "bar_code": code
+                "bar_code": code,
+                "source": "fnsku_external",
             }
             if supabase_admin and user_id:
                 log_scan_to_history(
@@ -4684,8 +4744,15 @@ def scan_product():
                 )
                 scan_count_data = _scan_count_for_response(user_id, tenant_id)
                 if scan_count_data:
-                    processing_response['scan_count'] = scan_count_data
-            return jsonify(processing_response), 200
+                    not_found_response['scan_count'] = scan_count_data
+            return jsonify(not_found_response), 200
+        
+        # #region agent log
+        _dbg_scan_perf_log('H1', 'app.py:scan_product:fnsku_asin_ok', 'asin_resolved', {
+            'code': code, 'external_ms': int((_time.time() - fnsku_external_t0) * 1000),
+            'asin_len': len(str(asin).strip()) if asin else 0,
+        })
+        # #endregion
         
         # STEP 4: If we have ASIN, optionally fetch from Rainforest API.
         # Standard scans can skip enrichment for faster first response; force_api_lookup keeps full enrichment.
@@ -5400,7 +5467,16 @@ def scan_status():
         FNSKU_API_KEY = os.environ.get('FNSKU_API_KEY')
         RAINFOREST_API_KEY = os.environ.get('RAINFOREST_API_KEY')
         if not FNSKU_API_KEY:
-            return jsonify({"success": True, "processing": True, "fnsku": code, "message": FNSKU_PROCESSING_MESSAGE, "bar_code": code}), 200
+            return jsonify({
+                "success": True,
+                "processing": False,
+                "lookup_still_pending": False,
+                "not_in_api_database": True,
+                "not_found": True,
+                "fnsku": code,
+                "message": "FNSKU API key not configured on server.",
+                "bar_code": code,
+            }), 200
         BASE_URL = "https://ato.fnskutoasin.com"
         headers = {'api-key': FNSKU_API_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json'}
         lookup_url = f"{BASE_URL}/api/v1/ScanTask/GetByBarCode"
@@ -5414,14 +5490,28 @@ def scan_status():
                     "success": True, "processing": False, "not_in_api_database": True,
                     "fnsku": code, "message": FNSKU_NOT_IN_DATABASE_MESSAGE, "bar_code": code
                 }), 200
-            return jsonify({"success": True, "processing": True, "fnsku": code, "message": FNSKU_PROCESSING_MESSAGE, "bar_code": code}), 200
+            return jsonify({
+                "success": True,
+                "processing": False,
+                "lookup_still_pending": True,
+                "fnsku": code,
+                "message": FNSKU_PROCESSING_MESSAGE,
+                "bar_code": code,
+            }), 200
         if resp.status_code != 200 or not (fnsku_json.get('succeeded') and fnsku_json.get('data')):
             if attempt >= FNSKU_NOT_IN_DATABASE_ATTEMPTS:
                 return jsonify({
                     "success": True, "processing": False, "not_in_api_database": True,
                     "fnsku": code, "message": FNSKU_NOT_IN_DATABASE_MESSAGE, "bar_code": code
                 }), 200
-            return jsonify({"success": True, "processing": True, "fnsku": code, "message": FNSKU_PROCESSING_MESSAGE, "bar_code": code}), 200
+            return jsonify({
+                "success": True,
+                "processing": False,
+                "lookup_still_pending": True,
+                "fnsku": code,
+                "message": FNSKU_PROCESSING_MESSAGE,
+                "bar_code": code,
+            }), 200
         scan_data = fnsku_json['data']
         asin = (scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or '').strip()
         if not asin or len(asin) < 10:
@@ -5433,9 +5523,15 @@ def scan_status():
                     "scan_task_id": str(scan_data.get('id')) if scan_data.get('id') else None, "bar_code": code
                 }), 200
             return jsonify({
-                "success": True, "processing": True, "fnsku": code, "asin": "", "title": scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}",
+                "success": True,
+                "processing": False,
+                "lookup_still_pending": True,
+                "fnsku": code,
+                "asin": "",
+                "title": scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}",
                 "message": FNSKU_PROCESSING_MESSAGE,
-                "scan_task_id": str(scan_data.get('id')) if scan_data.get('id') else None, "bar_code": code
+                "scan_task_id": str(scan_data.get('id')) if scan_data.get('id') else None,
+                "bar_code": code,
             }), 200
         rainforest_data = None
         if include_enrichment and RAINFOREST_API_KEY:
