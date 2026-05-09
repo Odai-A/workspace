@@ -2227,11 +2227,37 @@ const Scanner = () => {
   const getProductCodeForLabel = (product) =>
     product?.asin || product?.upc || product?.fnsku || product?.code || '';
 
+  /** Prefer FNSKU in Code128 so later scans hit FNSKU lookup; fall back to sku/code/upc/asin. */
+  const getFnskuForBarcodeLabel = (product) => {
+    const raw = String(
+      product?.fnsku ?? product?.sku ?? product?.code ?? ''
+    ).trim().toUpperCase();
+    return raw;
+  };
+
+  const getBarcodePayloadForPrint = (product) =>
+    getFnskuForBarcodeLabel(product) || String(getProductCodeForLabel(product) || '').trim().toUpperCase();
+
+  /** Code128 block for 4×6 product labels (single + batch). Encodes FNSKU when available. */
+  const build4x6BarcodeHtml = (productInfo) => {
+    const code = getBarcodePayloadForPrint(productInfo);
+    if (!code) return '';
+    const safeAttr = escapeHtml(code);
+    return `
+          <div class="barcode-section">
+            <p class="barcode-caption">Scan — FNSKU (Code128)</p>
+            <div class="barcode-wrap-4x6">
+              <svg class="product-fnsku-barcode-svg" data-barcode-value="${safeAttr}"></svg>
+            </div>
+          </div>`;
+  };
+
   const createBarcodeLabelHTML = (product) => {
-    const productCode = getProductCodeForLabel(product);
+    const scanValue = getBarcodePayloadForPrint(product);
+    const hasFnsku = !!getFnskuForBarcodeLabel(product);
     const productName = escapeHtml(product?.name || 'Product');
-    const codeLabel = escapeHtml(productCode || 'N/A');
-    const barcodeValue = JSON.stringify(String(productCode || ''));
+    const codeLabel = escapeHtml(scanValue || 'N/A');
+    const barcodeValue = JSON.stringify(String(scanValue || ''));
     return `
       <!DOCTYPE html>
       <html>
@@ -2295,6 +2321,14 @@ const Scanner = () => {
               white-space: nowrap;
               overflow: hidden;
               text-overflow: ellipsis;
+              font-family: Consolas, "Courier New", monospace;
+            }
+            .fnsku-note {
+              font-size: 6pt;
+              text-align: center;
+              color: #374151;
+              margin-top: 0.02in;
+              line-height: 1.1;
             }
             .print-button {
               position: fixed;
@@ -2328,6 +2362,7 @@ const Scanner = () => {
               <svg id="barcode"></svg>
             </div>
             <div class="code">${codeLabel}</div>
+            <div class="fnsku-note">${hasFnsku ? 'Barcode = FNSKU (scan to look up)' : 'Barcode = scan code (look up product)'}</div>
           </div>
           <script>
             (function () {
@@ -2359,9 +2394,9 @@ const Scanner = () => {
       toast.error("No product information available to print barcode label");
       return;
     }
-    const productCode = getProductCodeForLabel(product);
-    if (!productCode) {
-      toast.error("No product code available for barcode label");
+    const scanValue = getBarcodePayloadForPrint(product);
+    if (!scanValue) {
+      toast.error("No FNSKU or product code available for barcode label");
       return;
     }
     const printWindow = window.open('', '_blank');
@@ -2393,7 +2428,8 @@ const Scanner = () => {
     
     // Get product identifier for title (ASIN, UPC, FNSKU, or code)
     const productId = productInfo.asin || productInfo.upc || productInfo.fnsku || productInfo.code || 'Product';
-    
+    const barcodeSectionHtml = build4x6BarcodeHtml(productInfo);
+
     return `
       <!DOCTYPE html>
       <html>
@@ -2521,13 +2557,41 @@ const Scanner = () => {
               letter-spacing: 0.03em;
               font-family: Consolas, "Courier New", monospace;
             }
+            .barcode-section {
+              flex-shrink: 0;
+              text-align: center;
+              margin: 0.03in 0 0.05in 0;
+              padding: 0.04in 0.06in;
+              border: 1px solid #000;
+              background: #fafafa;
+            }
+            .barcode-caption {
+              font-size: 6.5pt;
+              font-weight: bold;
+              margin: 0 0 0.03in 0;
+              padding: 0;
+              color: #111;
+            }
+            .barcode-wrap-4x6 {
+              display: flex;
+              justify-content: center;
+              align-items: center;
+              width: 100%;
+              max-height: 0.56in;
+              overflow: hidden;
+            }
+            .barcode-wrap-4x6 svg {
+              max-width: 100%;
+              width: auto;
+              height: auto;
+            }
             .product-image-section {
               display: flex;
               align-items: center;
               justify-content: center;
               margin: 0.08in 0;
-              max-height: 2.8in;
-              min-height: 2.2in;
+              max-height: 2.35in;
+              min-height: 1.85in;
               flex-shrink: 1;
               overflow: hidden;
               padding: 0.05in;
@@ -2539,7 +2603,7 @@ const Scanner = () => {
             }
             .product-image {
               max-width: 100%;
-              max-height: 2.8in;
+              max-height: 2.35in;
               width: auto;
               height: auto;
               object-fit: contain;
@@ -2639,6 +2703,8 @@ const Scanner = () => {
             ${productInfo.asin && productInfo.fnsku ? `<div class="asin-display-fnsku">FNSKU: ${escapeHtml(String(productInfo.fnsku))}</div>` : ''}
           </div>
 
+          ${barcodeSectionHtml}
+
           <div class="product-image-section">
             ${productInfo.image_url ? `
               <img src="${productInfo.image_url}" alt="Product Image" class="product-image" 
@@ -2661,6 +2727,27 @@ const Scanner = () => {
               </div>
             </div>
           ` : ''}
+          ${barcodeSectionHtml ? `
+          <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+          <script>
+            (function () {
+              var svg = document.querySelector('.product-fnsku-barcode-svg');
+              if (!svg || typeof JsBarcode === 'undefined') return;
+              var v = svg.getAttribute('data-barcode-value');
+              if (!v) return;
+              try {
+                JsBarcode(svg, v, {
+                  format: 'CODE128',
+                  displayValue: true,
+                  fontSize: 8,
+                  textMargin: 2,
+                  height: 32,
+                  width: 1.15,
+                  margin: 2
+                });
+              } catch (e) {}
+            })();
+          </script>` : ''}
         </body>
       </html>
     `;
@@ -2680,6 +2767,7 @@ const Scanner = () => {
     const retailPrice = productInfo.price != null ? parseFloat(productInfo.price) : 0;
     const ourPrice = retailPrice * discountMultiplier;
     const productName = productInfo.name || 'Product';
+    const barcodeSectionHtml = build4x6BarcodeHtml(productInfo);
 
     return `
       <div class="label-page">
@@ -2698,6 +2786,8 @@ const Scanner = () => {
           <div class="asin-display-primary">${productInfo.asin ? `ASIN: ${escapeHtml(productInfo.asin)}` : (productInfo.upc ? `UPC: ${escapeHtml(productInfo.upc)}` : (productInfo.fnsku ? `FNSKU: ${escapeHtml(String(productInfo.fnsku))}` : 'Product Code'))}</div>
           ${productInfo.asin && productInfo.fnsku ? `<div class="asin-display-fnsku">FNSKU: ${escapeHtml(String(productInfo.fnsku))}</div>` : ''}
         </div>
+
+        ${barcodeSectionHtml}
 
         <div class="product-image-section">
           ${productInfo.image_url ? `
@@ -2889,13 +2979,41 @@ const Scanner = () => {
               letter-spacing: 0.03em;
               font-family: Consolas, "Courier New", monospace;
             }
+            .barcode-section {
+              flex-shrink: 0;
+              text-align: center;
+              margin: 0.03in 0 0.05in 0;
+              padding: 0.04in 0.06in;
+              border: 1px solid #000;
+              background: #fafafa;
+            }
+            .barcode-caption {
+              font-size: 6.5pt;
+              font-weight: bold;
+              margin: 0 0 0.03in 0;
+              padding: 0;
+              color: #111;
+            }
+            .barcode-wrap-4x6 {
+              display: flex;
+              justify-content: center;
+              align-items: center;
+              width: 100%;
+              max-height: 0.56in;
+              overflow: hidden;
+            }
+            .barcode-wrap-4x6 svg {
+              max-width: 100%;
+              width: auto;
+              height: auto;
+            }
             .product-image-section {
               display: flex;
               align-items: center;
               justify-content: center;
               margin: 0.08in 0;
-              max-height: 2.8in;
-              min-height: 2.2in;
+              max-height: 2.35in;
+              min-height: 1.85in;
               flex-shrink: 1;
               overflow: hidden;
               padding: 0.05in;
@@ -2907,7 +3025,7 @@ const Scanner = () => {
             }
             .product-image {
               max-width: 100%;
-              max-height: 2.8in;
+              max-height: 2.35in;
               width: auto;
               height: auto;
               object-fit: contain;
@@ -2983,6 +3101,33 @@ const Scanner = () => {
             <button class="print-button" onclick="window.print()">Print All Labels</button>
           </div>
           ${labelsHTML}
+          <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+          <script>
+            (function () {
+              function init() {
+                if (typeof JsBarcode === 'undefined') {
+                  setTimeout(init, 40);
+                  return;
+                }
+                document.querySelectorAll('.product-fnsku-barcode-svg').forEach(function (svg) {
+                  var v = svg.getAttribute('data-barcode-value');
+                  if (!v) return;
+                  try {
+                    JsBarcode(svg, v, {
+                      format: 'CODE128',
+                      displayValue: true,
+                      fontSize: 8,
+                      textMargin: 2,
+                      height: 30,
+                      width: 1.1,
+                      margin: 2
+                    });
+                  } catch (e) {}
+                });
+              }
+              init();
+            })();
+          </script>
         </body>
       </html>
     `;
@@ -2996,17 +3141,21 @@ const Scanner = () => {
       location: item?.product?.location || fallbackLocation,
       item_number: item?.product?.item_number || item?.product?.itemNumber || '',
     }));
-    const labels = normalizedItems.map((item) => ({
-      name: escapeHtml(truncateToWordCount(item?.name || item?.Description || 'Unknown Product', 5)),
-      fnsku: escapeHtml(item?.fnsku || item?.['Fn Sku'] || item?.FNSKU || item?._rawData?.fnsku || 'N/A'),
-      location: escapeHtml(item?.location || item?.Location || item?._rawData?.location || 'UNASSIGNED'),
-      itemNumber: escapeHtml(
-        stripLocationPrefixFromItemNumber(
-          item?.item_number || item?.itemNumber || item?.['Item Number'] || item?._rawData?.item_number || 'N/A',
-          item?.location || item?.Location || item?._rawData?.location || ''
-        ) || 'N/A'
-      ),
-    }));
+    const labels = normalizedItems.map((item) => {
+      const fnskuRaw = String(item?.fnsku || '').trim().toUpperCase();
+      return {
+        name: escapeHtml(truncateToWordCount(item?.name || item?.Description || 'Unknown Product', 5)),
+        fnskuRaw,
+        fnskuLine: escapeHtml(fnskuRaw || 'N/A'),
+        location: escapeHtml(item?.location || item?.Location || item?._rawData?.location || 'UNASSIGNED'),
+        itemNumber: escapeHtml(
+          stripLocationPrefixFromItemNumber(
+            item?.item_number || item?.itemNumber || item?.['Item Number'] || item?._rawData?.item_number || 'N/A',
+            item?.location || item?.Location || item?._rawData?.location || ''
+          ) || 'N/A'
+        ),
+      };
+    });
 
     if (labels.length === 0) {
       return '<html><body><p>No labels to print.</p></body></html>';
@@ -3016,7 +3165,8 @@ const Scanner = () => {
       <div class="label-root">
         <div class="label-frame">
           <div class="label-title">${label.name}</div>
-          <div class="label-meta">FNSKU: ${label.fnsku}</div>
+          <div class="label-meta">FNSKU: ${label.fnskuLine}</div>
+          ${label.fnskuRaw ? `<div class="inv-barcode-wrap"><svg class="inv-fnsku-barcode" data-bc="${escapeHtml(label.fnskuRaw)}"></svg></div>` : ''}
           <div class="label-meta label-meta-strong">LOC: ${label.location}</div>
           <div class="label-meta label-meta-strong">ITEM: ${label.itemNumber}</div>
         </div>
@@ -3060,30 +3210,33 @@ const Scanner = () => {
             .label-frame {
               position: absolute;
               inset: 0;
-              padding: 0.05in 0.04in 0.04in 0.025in;
+              padding: 0.045in 0.04in 0.035in 0.025in;
               display: flex;
               flex-direction: column;
               justify-content: flex-start;
               align-items: stretch;
               text-align: left;
-              gap: 0.02in;
+              gap: 0.012in;
               overflow: hidden;
             }
 
             .label-title {
-              font-size: 8pt;
-              line-height: 1.12;
+              font-size: 7.75pt;
+              line-height: 1.38;
               font-weight: 600;
               margin: 0;
+              flex: 0 0 auto;
               display: -webkit-box;
               -webkit-line-clamp: 2;
               -webkit-box-orient: vertical;
               overflow: hidden;
               word-break: break-word;
+              min-height: calc(2 * 1.38em);
+              max-height: calc(2 * 1.38em);
             }
 
             .label-meta {
-              font-size: 8.8pt;
+              font-size: 8.5pt;
               line-height: 1.15;
               margin: 0;
               white-space: nowrap;
@@ -3096,6 +3249,22 @@ const Scanner = () => {
               font-size: 10.4pt;
               line-height: 1.16;
               font-weight: 600;
+            }
+
+            .inv-barcode-wrap {
+              flex: 0 0 auto;
+              display: flex;
+              justify-content: flex-start;
+              align-items: center;
+              max-height: 0.24in;
+              min-height: 0.16in;
+              overflow: hidden;
+              margin: 0.008in 0;
+            }
+            .inv-barcode-wrap svg {
+              max-width: 100%;
+              height: auto;
+              display: block;
             }
 
             @media print {
@@ -3119,9 +3288,34 @@ const Scanner = () => {
               }
             }
           </style>
+          <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
         </head>
         <body>
           ${pages}
+          <script>
+            (function () {
+              function init() {
+                if (typeof JsBarcode === 'undefined') {
+                  setTimeout(init, 40);
+                  return;
+                }
+                document.querySelectorAll('.inv-fnsku-barcode').forEach(function (svg) {
+                  var v = svg.getAttribute('data-bc');
+                  if (!v) return;
+                  try {
+                    JsBarcode(svg, v, {
+                      format: 'CODE128',
+                      displayValue: false,
+                      margin: 0,
+                      height: 18,
+                      width: 0.92
+                    });
+                  } catch (e) {}
+                });
+              }
+              init();
+            })();
+          </script>
         </body>
       </html>
     `;

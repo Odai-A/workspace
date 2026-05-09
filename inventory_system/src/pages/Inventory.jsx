@@ -464,6 +464,18 @@ const Inventory = () => {
   const getPrimaryProductCode = (productInfo) =>
     productInfo?.asin || productInfo?.upc || productInfo?.fnsku || productInfo?.code || productInfo?.item_number || '';
 
+  /** Prefer FNSKU in Code128 so scans resolve like Scanner labels. */
+  const getFnskuForBarcodeLabel = (productInfo) => {
+    const raw = String(
+      productInfo?.fnsku ?? productInfo?.sku ?? productInfo?.code ?? ''
+    ).trim().toUpperCase();
+    return raw;
+  };
+
+  const getBarcodePayloadForPrint = (productInfo) =>
+    getFnskuForBarcodeLabel(productInfo)
+    || String(getPrimaryProductCode(productInfo) || '').trim().toUpperCase();
+
   const getAmazonQrData = (productInfo) => {
     const asin = String(productInfo?.asin || '').trim();
     if (asin) return `https://www.amazon.com/dp/${encodeURIComponent(asin)}`;
@@ -538,6 +550,10 @@ const Inventory = () => {
       const ourPrice = retailPrice * ((100 - discountPercent) / 100);
       const qrData = getAmazonQrData(productInfo);
       const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=${size.qrPixelSize}x${size.qrPixelSize}&data=${encodeURIComponent(qrData)}`;
+      const bcPayload = getBarcodePayloadForPrint(productInfo);
+      const barcodeBlock = bcPayload
+        ? `<div class="label-barcode-wrap"><svg class="inv-print-barcode" data-bc="${escapeHtml(bcPayload)}"></svg></div>`
+        : '';
       return `
         <div class="sheet">
           <div class="label-page">
@@ -550,6 +566,7 @@ const Inventory = () => {
               </div>
               <img class="qr" src="${qrCodeUrl}" alt="QR" />
             </div>
+            ${barcodeBlock}
             <div class="price-block">
               <div class="retail">Retail: $${retailPrice.toFixed(2)}</div>
               <div class="price">$${ourPrice.toFixed(2)}</div>
@@ -566,6 +583,10 @@ const Inventory = () => {
         const ourPrice = retailPrice * ((100 - discountPercent) / 100);
         const qrData = getAmazonQrData(productInfo);
         const qrCodeUrl = `https://api.qrserver.com/v1/create-qr-code/?size=${size.qrPixelSize}x${size.qrPixelSize}&data=${encodeURIComponent(qrData)}`;
+        const bcPayload = getBarcodePayloadForPrint(productInfo);
+        const zebraBarcode = bcPayload
+          ? `<div class="zebra-bc-wrap"><svg class="inv-print-barcode" data-bc="${escapeHtml(bcPayload)}"></svg></div>`
+          : '';
         return `
           <div class="label-print-root">
             <div class="label-print-frame">
@@ -574,6 +595,7 @@ const Inventory = () => {
                 <div class="zebra-meta">${escapeHtml(productInfo.asin ? `ASIN: ${productInfo.asin}` : (productInfo.fnsku ? `FNSKU: ${productInfo.fnsku}` : (productInfo.upc ? `UPC: ${productInfo.upc}` : 'CODE')))}</div>
                 <div class="zebra-meta">LOC: ${escapeHtml(productInfo.location || 'UNASSIGNED')}</div>
                 <div class="zebra-meta">ITEM: ${escapeHtml(productInfo.item_number || 'N/A')}</div>
+                ${zebraBarcode}
                 <div class="zebra-retail">Retail: $${retailPrice.toFixed(2)}</div>
                 <div class="zebra-price">$${ourPrice.toFixed(2)}</div>
               </div>
@@ -714,6 +736,20 @@ const Inventory = () => {
                 text-overflow: ellipsis;
               }
 
+              .zebra-bc-wrap {
+                max-height: 0.2in;
+                min-height: 0.14in;
+                overflow: hidden;
+                margin: 0.01in 0;
+                display: flex;
+                align-items: center;
+              }
+              .zebra-bc-wrap svg {
+                max-width: 100%;
+                height: auto;
+                display: block;
+              }
+
               @media screen {
                 body {
                   padding: 12px;
@@ -762,8 +798,35 @@ const Inventory = () => {
                 }
               }
             </style>
+            <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
           </head>
-          <body>${zebraPages}</body>
+          <body>
+            ${zebraPages}
+            <script>
+              (function () {
+                function init() {
+                  if (typeof JsBarcode === 'undefined') {
+                    setTimeout(init, 40);
+                    return;
+                  }
+                  document.querySelectorAll('.inv-print-barcode').forEach(function (svg) {
+                    var v = svg.getAttribute('data-bc');
+                    if (!v) return;
+                    try {
+                      JsBarcode(svg, v, {
+                        format: 'CODE128',
+                        displayValue: false,
+                        margin: 0,
+                        height: 18,
+                        width: 0.9
+                      });
+                    } catch (e) {}
+                  });
+                }
+                init();
+              })();
+            </script>
+          </body>
         </html>
       `;
     }
@@ -833,6 +896,20 @@ const Inventory = () => {
             .price-block { text-align: left; margin-top: 3px; }
             .retail { font-size: ${size.metaSize}; color: #444; }
             .price { font-size: ${size.priceSize}; font-weight: 700; color: #047857; line-height: 1.1; }
+            .label-barcode-wrap {
+              display: flex;
+              justify-content: flex-start;
+              align-items: center;
+              max-height: 0.55in;
+              overflow: hidden;
+              margin: 4px 0 2px 0;
+              flex-shrink: 0;
+            }
+            .label-barcode-wrap svg {
+              max-width: 100%;
+              height: auto;
+              display: block;
+            }
             ${profile === '2inch' ? `
             .toolbar { padding: 8px 6px; }
             .label-page {
@@ -853,12 +930,37 @@ const Inventory = () => {
             }
             ` : ''}
           </style>
+          <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
         </head>
         <body>
           <div class="toolbar no-print">
             <button class="print-button" onclick="window.print()">Print Labels</button>
           </div>
           ${pages}
+          <script>
+            (function () {
+              function init() {
+                if (typeof JsBarcode === 'undefined') {
+                  setTimeout(init, 40);
+                  return;
+                }
+                document.querySelectorAll('.inv-print-barcode').forEach(function (svg) {
+                  var v = svg.getAttribute('data-bc');
+                  if (!v) return;
+                  try {
+                    JsBarcode(svg, v, {
+                      format: 'CODE128',
+                      displayValue: false,
+                      margin: 0,
+                      height: 32,
+                      width: 1.1
+                    });
+                  } catch (e) {}
+                });
+              }
+              init();
+            })();
+          </script>
         </body>
       </html>
     `;
@@ -866,17 +968,24 @@ const Inventory = () => {
 
   // Create print label HTML (single label wrapper around batch-capable template)
   const createBasicInventoryLabelHTML = (items = []) => {
-    const labels = (items || []).map((item) => ({
-      name: escapeHtml(truncateToWordCount(item?.name || item?.Description || 'Unknown Product', 5)),
-      fnsku: escapeHtml(item?.fnsku || item?.['Fn Sku'] || item?.FNSKU || item?._rawData?.fnsku || 'N/A'),
-      location: escapeHtml(item?.location || item?.Location || item?._rawData?.location || 'UNASSIGNED'),
-      itemNumber: escapeHtml(
-        stripLocationPrefixFromItemNumber(
-          item?.item_number || item?.itemNumber || item?.['Item Number'] || item?._rawData?.item_number || 'N/A',
-          item?.location || item?.Location || item?._rawData?.location || ''
-        ) || 'N/A'
-      ),
-    }));
+    const labels = (items || []).map((item) => {
+      const fnskuDisplay = String(
+        item?.fnsku || item?.['Fn Sku'] || item?.FNSKU || item?._rawData?.fnsku || ''
+      ).trim();
+      const barcodeRaw = getBarcodePayloadForPrint(item);
+      return {
+        name: escapeHtml(truncateToWordCount(item?.name || item?.Description || 'Unknown Product', 5)),
+        barcodeRaw,
+        fnskuLine: escapeHtml(fnskuDisplay || 'N/A'),
+        location: escapeHtml(item?.location || item?.Location || item?._rawData?.location || 'UNASSIGNED'),
+        itemNumber: escapeHtml(
+          stripLocationPrefixFromItemNumber(
+            item?.item_number || item?.itemNumber || item?.['Item Number'] || item?._rawData?.item_number || 'N/A',
+            item?.location || item?.Location || item?._rawData?.location || ''
+          ) || 'N/A'
+        ),
+      };
+    });
 
     if (labels.length === 0) {
       return '<html><body><p>No labels to print.</p></body></html>';
@@ -886,7 +995,8 @@ const Inventory = () => {
       <div class="label-root">
         <div class="label-frame">
           <div class="label-title">${label.name}</div>
-          <div class="label-meta">FNSKU: ${label.fnsku}</div>
+          <div class="label-meta">FNSKU: ${label.fnskuLine}</div>
+          ${label.barcodeRaw ? `<div class="inv-barcode-wrap"><svg class="inv-basic-barcode" data-bc="${escapeHtml(label.barcodeRaw)}"></svg></div>` : ''}
           <div class="label-meta label-meta-strong">LOC: ${label.location}</div>
           <div class="label-meta label-meta-strong">ITEM: ${label.itemNumber}</div>
         </div>
@@ -931,30 +1041,34 @@ const Inventory = () => {
             .label-frame {
               position: absolute;
               inset: 0;
-              padding: 0.05in 0.04in 0.04in 0.025in;
+              padding: 0.045in 0.04in 0.035in 0.025in;
               display: flex;
               flex-direction: column;
               justify-content: flex-start;
               align-items: stretch;
               text-align: left;
-              gap: 0.02in;
+              gap: 0.012in;
               overflow: hidden;
             }
 
             .label-title {
-              font-size: 8pt;
-              line-height: 1.12;
+              font-size: 7.75pt;
+              line-height: 1.38;
               font-weight: 600;
               margin: 0;
+              flex: 0 0 auto;
               display: -webkit-box;
               -webkit-line-clamp: 2;
               -webkit-box-orient: vertical;
               overflow: hidden;
               word-break: break-word;
+              /* Fixed two-line box so flex siblings don’t shrink the title (was clipping line 2) */
+              min-height: calc(2 * 1.38em);
+              max-height: calc(2 * 1.38em);
             }
 
             .label-meta {
-              font-size: 8.8pt;
+              font-size: 8.5pt;
               line-height: 1.15;
               margin: 0;
               white-space: nowrap;
@@ -967,6 +1081,22 @@ const Inventory = () => {
               font-size: 10.4pt;
               line-height: 1.16;
               font-weight: 600;
+            }
+
+            .inv-barcode-wrap {
+              flex: 0 0 auto;
+              display: flex;
+              justify-content: flex-start;
+              align-items: center;
+              max-height: 0.24in;
+              min-height: 0.16in;
+              overflow: hidden;
+              margin: 0.008in 0;
+            }
+            .inv-barcode-wrap svg {
+              max-width: 100%;
+              height: auto;
+              display: block;
             }
 
             @media print {
@@ -990,8 +1120,35 @@ const Inventory = () => {
               }
             }
           </style>
+          <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
         </head>
-        <body>${pages}</body>
+        <body>
+          ${pages}
+          <script>
+            (function () {
+              function init() {
+                if (typeof JsBarcode === 'undefined') {
+                  setTimeout(init, 40);
+                  return;
+                }
+                document.querySelectorAll('.inv-basic-barcode').forEach(function (svg) {
+                  var v = svg.getAttribute('data-bc');
+                  if (!v) return;
+                  try {
+                    JsBarcode(svg, v, {
+                      format: 'CODE128',
+                      displayValue: false,
+                      margin: 0,
+                      height: 18,
+                      width: 0.92
+                    });
+                  } catch (e) {}
+                });
+              }
+              init();
+            })();
+          </script>
+        </body>
       </html>
     `;
   };
