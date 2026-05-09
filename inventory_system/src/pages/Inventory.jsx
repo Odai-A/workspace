@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, startTransition } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
   MagnifyingGlassIcon,
@@ -19,7 +19,7 @@ import AddStockModal from '../components/inventory/AddStockModal';
 import Modal from '../components/ui/Modal';
 import { useAuth } from '../contexts/AuthContext';
 import { toast } from 'react-toastify';
-import { productLookupService, apiCacheService } from '../services/databaseService';
+import { productLookupService } from '../services/databaseService';
 import { inventoryService, supabase, formatSupabaseError } from '../config/supabaseClient';
 import { exportMarketplace } from '../utils/marketplaceExport';
 import axios from 'axios';
@@ -46,7 +46,10 @@ function readStoredItemsPerPage() {
   return INVENTORY_PAGE_SIZE_OPTIONS[0];
 }
 /** Load up to this many rows from each source, merge, then paginate in the UI (avoids broken totals from paging two tables separately). */
-const INVENTORY_FETCH_LIMIT = 10000;
+const INVENTORY_FETCH_LIMIT = 8000;
+
+/** Minimal manifest columns for merge / FNSKU enrichment (smaller payload than select('*')). */
+const MANIFEST_MERGE_SELECT = 'id, "B00 Asin", "Fn Sku", "X-Z ASIN", image_url';
 
 /** Stable row id for selection (inventory and manifest rows can share numeric ids). */
 function getInventoryRowKey(item) {
@@ -107,18 +110,112 @@ const extractItemSequence = (item) => {
   return Number.isFinite(value) ? value : null;
 };
 
+/** PostgREST `in()` batches — avoids huge URLs and keeps latency predictable. */
+const IN_QUERY_CHUNK_SIZE = 120;
+
+async function fetchManifestRowsByIds(ids) {
+  const unique = [...new Set((ids || []).filter((id) => id != null).map((id) => String(id)))];
+  const rows = [];
+  for (let i = 0; i < unique.length; i += IN_QUERY_CHUNK_SIZE) {
+    const chunk = unique.slice(i, i + IN_QUERY_CHUNK_SIZE);
+    const { data, error } = await supabase.from('manifest_data').select(MANIFEST_MERGE_SELECT).in('id', chunk);
+    if (error) console.warn('batch manifest_data by id:', error);
+    if (data?.length) rows.push(...data);
+  }
+  return rows;
+}
+
+async function fetchManifestRowsByFnsku(userId, fnskuList) {
+  if (!userId) return [];
+  const unique = [...new Set((fnskuList || []).map((c) => String(c || '').trim()).filter(Boolean))];
+  const rows = [];
+  for (let i = 0; i < unique.length; i += IN_QUERY_CHUNK_SIZE) {
+    const chunk = unique.slice(i, i + IN_QUERY_CHUNK_SIZE);
+    const { data, error } = await supabase
+      .from('manifest_data')
+      .select(MANIFEST_MERGE_SELECT)
+      .eq('user_id', userId)
+      .in('Fn Sku', chunk);
+    if (error) console.warn('batch manifest_data by Fn Sku:', error);
+    if (data?.length) rows.push(...data);
+  }
+  return rows;
+}
+
+async function fetchApiCacheImageMaps(asinSet, fnskuSet) {
+  const imageByAsin = new Map();
+  const imageByFnsku = new Map();
+  const asins = [...asinSet];
+  const fnskus = [...fnskuSet];
+  if (asins.length === 0 && fnskus.length === 0) {
+    return { imageByAsin, imageByFnsku };
+  }
+  for (let i = 0; i < asins.length; i += IN_QUERY_CHUNK_SIZE) {
+    const chunk = asins.slice(i, i + IN_QUERY_CHUNK_SIZE);
+    const { data, error } = await supabase
+      .from('api_lookup_cache')
+      .select('asin, fnsku, image_url')
+      .in('asin', chunk);
+    if (error) console.warn('batch api_lookup_cache by asin:', error);
+    (data || []).forEach((row) => {
+      if (row?.asin && row.image_url && !imageByAsin.has(row.asin)) imageByAsin.set(row.asin, row.image_url);
+    });
+  }
+  for (let i = 0; i < fnskus.length; i += IN_QUERY_CHUNK_SIZE) {
+    const chunk = fnskus.slice(i, i + IN_QUERY_CHUNK_SIZE);
+    const { data, error } = await supabase
+      .from('api_lookup_cache')
+      .select('asin, fnsku, image_url')
+      .in('fnsku', chunk);
+    if (error) console.warn('batch api_lookup_cache by fnsku:', error);
+    (data || []).forEach((row) => {
+      if (row?.fnsku && row.image_url && !imageByFnsku.has(row.fnsku)) imageByFnsku.set(row.fnsku, row.image_url);
+    });
+  }
+  return { imageByAsin, imageByFnsku };
+}
+
+/** Fill image_url from api_lookup_cache after the list is shown (faster time-to-interactive). */
+async function hydrateInventoryListImages(items) {
+  if (!items?.length) return items;
+  const asinSet = new Set();
+  const fnskuSet = new Set();
+  items.forEach((it) => {
+    const img = it.image_url || it['Image URL'] || '';
+    if (img) return;
+    const asin = it['B00 Asin'] || it.asin || '';
+    const fnsku = String(it['Fn Sku'] || it.sku || '').trim();
+    if (asin) asinSet.add(String(asin).trim());
+    if (fnsku) fnskuSet.add(fnsku);
+  });
+  const { imageByAsin, imageByFnsku } = await fetchApiCacheImageMaps(asinSet, fnskuSet);
+  if (imageByAsin.size === 0 && imageByFnsku.size === 0) return items;
+  return items.map((it) => {
+    let image_url = it.image_url || it['Image URL'] || '';
+    if (image_url) return it;
+    const asin = it['B00 Asin'] || it.asin || '';
+    const fnsku = String(it['Fn Sku'] || it.sku || '').trim();
+    if (asin && imageByAsin.has(asin)) image_url = imageByAsin.get(asin);
+    if (!image_url && fnsku && imageByFnsku.has(fnsku)) image_url = imageByFnsku.get(fnsku);
+    if (!image_url) return it;
+    return { ...it, image_url };
+  });
+}
+
 /**
  * Combine inventory and manifest results into a single list (used by Inventory load and export-all).
+ * Uses batched Supabase queries instead of per-row parallel requests (was very slow on large inventories).
  */
 async function combineInventoryAndManifest(inventoryResult, manifestResult, searchTerm, hiddenManifestIds = new Set()) {
   const isAsin = (str) => str && typeof str === 'string' && str.length === 10 && str.startsWith('B0');
   const isFnsku = (str) => str && typeof str === 'string' && (str.startsWith('X') || str.length > 10);
 
-  const inventoryItems = await Promise.all((inventoryResult.data || []).map(async (item) => {
+  const rawRows = inventoryResult.data || [];
+
+  const deriveSkuFields = (item) => {
     let asin = item.asin || '';
     let fnsku = '';
     let lpn = '';
-    // Keep inventory.image_url first (often JSON with all Scanner images); manifest fills gaps only.
     let image_url = item.image_url || '';
     const skuValue = item.sku || '';
     if (isAsin(skuValue)) {
@@ -129,53 +226,62 @@ async function combineInventoryAndManifest(inventoryResult, manifestResult, sear
     } else {
       fnsku = skuValue;
     }
+    return { asin, fnsku, lpn, image_url };
+  };
+
+  const productIds = rawRows.map((r) => r.product_id).filter((id) => id != null);
+  const manifestRowsByIdList = await fetchManifestRowsByIds(productIds);
+  const manifestById = new Map(manifestRowsByIdList.map((row) => [row.id, row]));
+
+  const fnskuNeedingManifest = new Set();
+  const staged = rawRows.map((item) => {
+    const fields = deriveSkuFields(item);
+    let { asin, fnsku, lpn, image_url } = fields;
+
     if (item.product_id) {
-      try {
-        const { data: manifestData, error } = await supabase
-          .from('manifest_data')
-          .select('*')
-          .eq('id', item.product_id)
-          .maybeSingle();
-        if (manifestData && !error) {
-          if (!asin && manifestData['B00 Asin']) asin = manifestData['B00 Asin'];
-          if (!fnsku && manifestData['Fn Sku']) fnsku = manifestData['Fn Sku'];
-          if (manifestData['X-Z ASIN']) lpn = manifestData['X-Z ASIN'];
-          if (!image_url && manifestData.image_url) image_url = manifestData.image_url;
-        } else if (fnsku && !asin) {
-          const manifestProduct = await productLookupService.getProductByFnsku(fnsku);
-          if (manifestProduct) {
-            if (!asin && manifestProduct.asin) asin = manifestProduct.asin;
-            if (!lpn && manifestProduct.lpn) lpn = manifestProduct.lpn;
-            if (!image_url && manifestProduct.image_url) image_url = manifestProduct.image_url;
-          }
-        }
-      } catch (err) {
-        console.warn('Could not fetch data from manifest_data:', err);
-      }
-    } else if (fnsku && !asin) {
-      try {
-        const manifestProduct = await productLookupService.getProductByFnsku(fnsku);
-        if (manifestProduct) {
-          if (!asin && manifestProduct.asin) asin = manifestProduct.asin;
-          if (!lpn && manifestProduct.lpn) lpn = manifestProduct.lpn;
-          if (!image_url && manifestProduct.image_url) image_url = manifestProduct.image_url;
-        }
-      } catch (err) {
-        console.warn('Could not fetch ASIN from manifest_data:', err);
+      const manifestData = manifestById.get(item.product_id);
+      if (manifestData) {
+        if (!asin && manifestData['B00 Asin']) asin = manifestData['B00 Asin'];
+        if (!fnsku && manifestData['Fn Sku']) fnsku = manifestData['Fn Sku'];
+        if (manifestData['X-Z ASIN']) lpn = manifestData['X-Z ASIN'];
+        if (!image_url && manifestData.image_url) image_url = manifestData.image_url;
       }
     }
-    if (asin && !image_url) {
-      try {
-        const cachedData = await apiCacheService.getCachedLookup(asin);
-        if (cachedData && cachedData.image_url) image_url = cachedData.image_url;
-        else if (fnsku) {
-          const cachedByFnsku = await apiCacheService.getCachedLookup(fnsku);
-          if (cachedByFnsku && cachedByFnsku.image_url) image_url = cachedByFnsku.image_url;
-        }
-      } catch (err) {
-        console.warn('Could not fetch image from cache:', err);
+    if (fnsku && !asin) fnskuNeedingManifest.add(String(fnsku).trim());
+
+    return { item, asin, fnsku, lpn, image_url };
+  });
+
+  const manifestByFnsku = new Map();
+  if (fnskuNeedingManifest.size > 0) {
+    const { data: { user } } = await supabase.auth.getUser();
+    const userId = user?.id || null;
+    if (!userId) {
+      console.warn('combineInventoryAndManifest: no user for FNSKU manifest batch');
+    } else {
+    const extraRows = await fetchManifestRowsByFnsku(userId, [...fnskuNeedingManifest]);
+    extraRows.forEach((row) => {
+      const k = row['Fn Sku'];
+      if (k && !manifestByFnsku.has(String(k).trim())) manifestByFnsku.set(String(k).trim(), row);
+    });
+    }
+  }
+
+  const inventoryItems = staged.map(({ item, asin: a0, fnsku: f0, lpn: l0, image_url: img0 }) => {
+    let asin = a0;
+    let fnsku = f0;
+    let lpn = l0;
+    let image_url = img0;
+
+    if (fnsku && !asin) {
+      const md = manifestByFnsku.get(String(fnsku).trim());
+      if (md) {
+        if (!asin && md['B00 Asin']) asin = md['B00 Asin'];
+        if (!lpn && md['X-Z ASIN']) lpn = md['X-Z ASIN'];
+        if (!image_url && md.image_url) image_url = md.image_url;
       }
     }
+
     return {
       id: item.id,
       product_id: item.product_id,
@@ -192,7 +298,7 @@ async function combineInventoryAndManifest(inventoryResult, manifestResult, sear
       source: 'inventory_table',
       _rawData: item
     };
-  }));
+  });
 
   const manifestItems = (manifestResult.data || [])
     .filter((item) => item?.id != null && !hiddenManifestIds.has(String(item.id)))
@@ -203,12 +309,27 @@ async function combineInventoryAndManifest(inventoryResult, manifestResult, sear
     }));
 
   const combinedItems = [...inventoryItems];
-  manifestItems.forEach(manifestItem => {
+  const keyToInvIdx = new Map();
+  inventoryItems.forEach((invItem, idx) => {
+    [invItem['Fn Sku'], invItem['X-Z ASIN'], invItem['B00 Asin']]
+      .map((k) => (k != null && String(k).trim() ? String(k).trim() : null))
+      .filter(Boolean)
+      .forEach((k) => {
+        if (!keyToInvIdx.has(k)) keyToInvIdx.set(k, idx);
+      });
+  });
+  manifestItems.forEach((manifestItem) => {
     const manifestSku = manifestItem['Fn Sku'] || manifestItem['X-Z ASIN'];
     const manifestAsin = manifestItem['B00 Asin'];
-    const existingIndex = combinedItems.findIndex(invItem =>
-      (invItem['Fn Sku'] === manifestSku || invItem['X-Z ASIN'] === manifestSku || invItem['B00 Asin'] === manifestAsin)
-    );
+    let existingIndex = -1;
+    for (const k of [manifestSku, manifestAsin, manifestItem['Fn Sku'], manifestItem['X-Z ASIN']]) {
+      if (k == null || k === '') continue;
+      const idx = keyToInvIdx.get(String(k).trim());
+      if (idx != null) {
+        existingIndex = idx;
+        break;
+      }
+    }
     if (existingIndex >= 0) {
       if (!combinedItems[existingIndex].image_url && manifestItem.image_url) {
         combinedItems[existingIndex].image_url = manifestItem.image_url;
@@ -239,6 +360,8 @@ async function combineInventoryAndManifest(inventoryResult, manifestResult, sear
 const Inventory = () => {
   const { apiClient } = useAuth();
   const navigate = useNavigate();
+  /** Cancels stale image hydration when a newer load starts. */
+  const inventoryLoadGenRef = useRef(0);
   const [loading, setLoading] = useState(true);
   const [products, setProducts] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
@@ -332,22 +455,25 @@ const Inventory = () => {
   }, [filteredInventoryList]);
 
   const loadInventoryData = useCallback(async () => {
+    const loadGen = ++inventoryLoadGenRef.current;
     setLoading(true);
     setError(null);
     try {
-      const inventoryResult = await inventoryService.getInventory({
-        page: 1,
-        limit: INVENTORY_FETCH_LIMIT,
-        searchQuery: appliedSearchTerm,
-      });
-
-      const manifestResult = await productLookupService.getProducts({
-        page: 1,
-        limit: INVENTORY_FETCH_LIMIT,
-        searchQuery: appliedSearchTerm,
-      });
-
-      const hiddenManifestList = await inventoryService.getHiddenManifestIds();
+      const [inventoryResult, manifestResult, hiddenManifestList] = await Promise.all([
+        inventoryService.getInventory({
+          page: 1,
+          limit: INVENTORY_FETCH_LIMIT,
+          searchQuery: appliedSearchTerm,
+        }),
+        productLookupService.getProducts({
+          page: 1,
+          limit: INVENTORY_FETCH_LIMIT,
+          searchQuery: appliedSearchTerm,
+          listSelect: 'inventory',
+        }),
+        inventoryService.getHiddenManifestIds(),
+      ]);
+      if (loadGen !== inventoryLoadGenRef.current) return;
       const hiddenManifestIds = new Set(hiddenManifestList);
 
       const combined = await combineInventoryAndManifest(
@@ -356,8 +482,21 @@ const Inventory = () => {
         appliedSearchTerm,
         hiddenManifestIds
       );
+      if (loadGen !== inventoryLoadGenRef.current) return;
 
       setFullCombinedList(combined);
+      setLoading(false);
+
+      try {
+        const withImages = await hydrateInventoryListImages(combined);
+        if (loadGen === inventoryLoadGenRef.current) {
+          startTransition(() => {
+            setFullCombinedList(withImages);
+          });
+        }
+      } catch (imgErr) {
+        console.warn('Inventory image hydrate failed:', imgErr);
+      }
 
       const invCap = (inventoryResult.data || []).length >= INVENTORY_FETCH_LIMIT;
       const manCap = (manifestResult.data || []).length >= INVENTORY_FETCH_LIMIT;
@@ -375,7 +514,9 @@ const Inventory = () => {
       setProducts([]);
       setTotalItems(0);
     } finally {
-      setLoading(false);
+      if (loadGen === inventoryLoadGenRef.current) {
+        setLoading(false);
+      }
     }
   }, [appliedSearchTerm]);
 
@@ -1348,24 +1489,28 @@ const Inventory = () => {
 
   /** Fetch all products for export (current filters) */
   const fetchAllProductsForExport = useCallback(async () => {
-    const inventoryResult = await inventoryService.getInventory({
-      page: 1,
-      limit: EXPORT_ALL_LIMIT,
-      searchQuery: appliedSearchTerm,
-    });
-    const manifestResult = await productLookupService.getProducts({
-      page: 1,
-      limit: EXPORT_ALL_LIMIT,
-      searchQuery: appliedSearchTerm,
-    });
-    const hiddenManifestList = await inventoryService.getHiddenManifestIds();
+    const [inventoryResult, manifestResult, hiddenManifestList] = await Promise.all([
+      inventoryService.getInventory({
+        page: 1,
+        limit: EXPORT_ALL_LIMIT,
+        searchQuery: appliedSearchTerm,
+      }),
+      productLookupService.getProducts({
+        page: 1,
+        limit: EXPORT_ALL_LIMIT,
+        searchQuery: appliedSearchTerm,
+        listSelect: 'inventory',
+      }),
+      inventoryService.getHiddenManifestIds(),
+    ]);
     const combined = await combineInventoryAndManifest(
       inventoryResult,
       manifestResult,
       appliedSearchTerm,
       new Set(hiddenManifestList)
     );
-    return applyBucketFilter(applyShelfRowFilters(combined));
+    const withImages = await hydrateInventoryListImages(combined);
+    return applyBucketFilter(applyShelfRowFilters(withImages));
   }, [appliedSearchTerm, applyShelfRowFilters, applyBucketFilter]);
 
   const handleMarketplaceExportDownload = async () => {

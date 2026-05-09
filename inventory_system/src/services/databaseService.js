@@ -710,18 +710,36 @@ export const productLookupService = {
     return (data || []).map(item => ({ ...item, source: 'local_database', name: item[columnMap.name] })); // basic mapping
   },
 
-  async getProducts({ page = 1, limit = 25, searchQuery = '' }) {
+  async getProducts({ page = 1, limit = 25, searchQuery = '', listSelect = 'full' } = {}) {
     // This fetches from manifest_data
     const userId = await getCurrentUserId();
     if (!userId) {
       console.warn('getProducts: No user ID found - cannot fetch manifest data');
       return { data: [], totalCount: 0 };
     }
+
+    // Narrow columns for Inventory merge = smaller payload than select('*') on large manifests.
+    const inventorySelect = [
+      'id',
+      'user_id',
+      `"${columnMap.asin}"`,
+      `"${columnMap.fnsku}"`,
+      `"${columnMap.lpn}"`,
+      `"${columnMap.name}"`,
+      `"${columnMap.price}"`,
+      `"${columnMap.category}"`,
+      `"${columnMap.quantity}"`,
+      `"${columnMap.upc}"`,
+      'image_url',
+      'Location',
+      '"Item Number"',
+    ].join(',');
+    const selectFragment = listSelect === 'inventory' ? inventorySelect : '*';
     
     const offset = (page - 1) * limit;
     let query = supabase.from(PRODUCT_TABLE);
 
-    query = query.select('*', { count: 'exact' }).eq('user_id', userId); // Only get current user's manifest data
+    query = query.select(selectFragment, { count: 'exact' }).eq('user_id', userId); // Only get current user's manifest data
 
     if (searchQuery) {
       const searchTerm = `%${searchQuery}%`;
