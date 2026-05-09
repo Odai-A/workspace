@@ -205,7 +205,8 @@ const scheduleBatchScan = (code, axiosInstance, scanBatchUrl, axiosConfig, optio
 
 /** Same in-flight POST /api/scan (or batch slot) for identical code+mode — avoids duplicate Render round-trips. */
 const __scanLookupCoalesce = new Map();
-const SCAN_SINGLE_HTTP_TIMEOUT_MS = 8000;
+// POST /api/scan can include FNSKU logging + Rainforest enrich (~3–12s). Keep above worst-case client wait.
+const SCAN_SINGLE_HTTP_TIMEOUT_MS = 24000;
 const SCAN_STATUS_HTTP_TIMEOUT_MS = 7500;
 
 /**
@@ -1399,11 +1400,23 @@ const Scanner = () => {
     const normalizedCode = String(code || '').trim().toUpperCase();
     if (!normalizedCode) return false;
 
+    // Fresh read from Supabase (avoid stale 30s in-memory row without images after a slow /api/scan).
+    __localLookupCache.delete(normalizedCode);
+
     const localMatch = await findProductInLocalSources(normalizedCode);
     if (localMatch?.product) {
       await handleProductFound(localMatch.product, normalizedCode, { source: localMatch.source }, { skipAutoInventory });
       if (!silent) {
         toast.info(`Loaded ${normalizedCode} from local database while backend is unavailable.`, { autoClose: 2500 });
+      }
+      if (!hasProductImages(localMatch.product) && localMatch.product.asin) {
+        const k = normalizedCode;
+        if (!imageEnrichPendingRef.current.has(k)) {
+          imageEnrichPendingRef.current.add(k);
+          attemptOneGoApiRecovery(k, { requireImages: true, skipAutoInventory: true, silent: true })
+            .finally(() => imageEnrichPendingRef.current.delete(k))
+            .catch(() => {});
+        }
       }
       return true;
     }
@@ -1788,6 +1801,21 @@ const Scanner = () => {
         if (recoveredLocally) {
           completeScanTimer('DB_FALLBACK', upperCode);
           return;
+        }
+        if (
+          batchModeRef.current &&
+          forceApiLookup &&
+          error?.code === 'ECONNABORTED'
+        ) {
+          const r2 = await attemptOneGoApiRecovery(upperCode, {
+            skipAutoInventory: true,
+            requireImages: false,
+            silent: suppressBatchItemToast,
+          });
+          if (r2) {
+            completeScanTimer('API_RECOVERY', upperCode);
+            return;
+          }
         }
         // In batch mode, skip the 4-attempt recovery cascade (it amplifies
         // load) but DO auto-invoke the retry chain so the user does not have
@@ -2388,21 +2416,21 @@ const Scanner = () => {
               }
               /* Ensure product image area always prints with visible outline and contrast */
               .product-image-section {
+                isolation: isolate !important;
                 border: 2px solid #000 !important;
-                background: #e5e5e5 !important;
+                background: #c8c8c8 !important;
                 -webkit-print-color-adjust: exact !important;
                 print-color-adjust: exact !important;
               }
               img.product-image {
-                image-rendering: -webkit-optimize-contrast !important;
-                image-rendering: crisp-edges !important;
-                image-rendering: pixelated !important;
+                mix-blend-mode: multiply !important;
+                image-rendering: auto !important;
                 -webkit-print-color-adjust: exact !important;
                 print-color-adjust: exact !important;
-                filter: contrast(1.35) brightness(0.88) !important;
+                filter: grayscale(1) contrast(1.9) brightness(0.76) drop-shadow(0 0 1px rgba(0,0,0,0.5)) !important;
                 border: 2px solid #000 !important;
                 outline: 2px solid #000 !important;
-                background: #e0e0e0 !important;
+                background: #c8c8c8 !important;
               }
             }
             * {
@@ -2480,6 +2508,16 @@ const Scanner = () => {
               border: 1px solid #000;
               flex-shrink: 0;
             }
+            .asin-display-primary {
+              line-height: 1.2;
+            }
+            .asin-display-fnsku {
+              font-size: 8pt;
+              font-weight: bold;
+              margin-top: 0.035in;
+              letter-spacing: 0.03em;
+              font-family: Consolas, "Courier New", monospace;
+            }
             .product-image-section {
               display: flex;
               align-items: center;
@@ -2491,7 +2529,8 @@ const Scanner = () => {
               overflow: hidden;
               padding: 0.05in;
               border: 2px solid #000;
-              background: #e5e5e5;
+              background: #d0d0d0;
+              isolation: isolate;
               -webkit-print-color-adjust: exact;
               print-color-adjust: exact;
             }
@@ -2501,15 +2540,14 @@ const Scanner = () => {
               width: auto;
               height: auto;
               object-fit: contain;
+              mix-blend-mode: multiply;
               border: 2px solid #000;
               outline: 2px solid #000;
-              background: #e0e0e0;
+              background: #d0d0d0;
               box-shadow: 0 0 0 1px #000;
               padding: 0.02in;
-              image-rendering: -webkit-optimize-contrast;
-              image-rendering: crisp-edges;
-              image-rendering: pixelated;
-              filter: contrast(1.35) brightness(0.88);
+              image-rendering: auto;
+              filter: grayscale(1) contrast(1.75) brightness(0.8) drop-shadow(0 0 0.75px rgba(0,0,0,0.4));
               -webkit-print-color-adjust: exact;
               print-color-adjust: exact;
             }
@@ -2594,14 +2632,15 @@ const Scanner = () => {
           </div>
 
           <div class="asin-display">
-            ${productInfo.asin ? `ASIN: ${productInfo.asin}` : (productInfo.upc ? `UPC: ${productInfo.upc}` : (productInfo.fnsku ? `FNSKU: ${productInfo.fnsku}` : 'Product Code'))}
+            <div class="asin-display-primary">${productInfo.asin ? `ASIN: ${escapeHtml(productInfo.asin)}` : (productInfo.upc ? `UPC: ${escapeHtml(productInfo.upc)}` : (productInfo.fnsku ? `FNSKU: ${escapeHtml(String(productInfo.fnsku))}` : 'Product Code'))}</div>
+            ${productInfo.asin && productInfo.fnsku ? `<div class="asin-display-fnsku">FNSKU: ${escapeHtml(String(productInfo.fnsku))}</div>` : ''}
           </div>
 
           <div class="product-image-section">
             ${productInfo.image_url ? `
               <img src="${productInfo.image_url}" alt="Product Image" class="product-image" 
                    onerror="this.style.display='none'; var s=this.nextElementSibling; if(s) s.style.display='block';"
-                   style="image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; border: 2px solid #000; outline: 2px solid #000; background: #e0e0e0; filter: contrast(1.35) brightness(0.88); -webkit-print-color-adjust: exact; print-color-adjust: exact;" />
+                   style="image-rendering: auto; border: 2px solid #000; outline: 2px solid #000; background: #d0d0d0; filter: grayscale(1) contrast(1.75) brightness(0.8) drop-shadow(0 0 0.75px rgba(0,0,0,0.4)); -webkit-print-color-adjust: exact; print-color-adjust: exact;" />
               <span class="no-image-text" style="display:none;">Product image</span>
             ` : `
               <span class="no-image-text">Product image</span>
@@ -2653,14 +2692,15 @@ const Scanner = () => {
         </div>
 
         <div class="asin-display">
-          ${productInfo.asin ? `ASIN: ${productInfo.asin}` : (productInfo.upc ? `UPC: ${productInfo.upc}` : (productInfo.fnsku ? `FNSKU: ${productInfo.fnsku}` : 'Product Code'))}
+          <div class="asin-display-primary">${productInfo.asin ? `ASIN: ${escapeHtml(productInfo.asin)}` : (productInfo.upc ? `UPC: ${escapeHtml(productInfo.upc)}` : (productInfo.fnsku ? `FNSKU: ${escapeHtml(String(productInfo.fnsku))}` : 'Product Code'))}</div>
+          ${productInfo.asin && productInfo.fnsku ? `<div class="asin-display-fnsku">FNSKU: ${escapeHtml(String(productInfo.fnsku))}</div>` : ''}
         </div>
 
         <div class="product-image-section">
           ${productInfo.image_url ? `
             <img src="${productInfo.image_url}" alt="Product Image" class="product-image" 
                  onerror="this.style.display='none'; var s=this.nextElementSibling; if(s) s.style.display='block';"
-                 style="image-rendering: -webkit-optimize-contrast; image-rendering: crisp-edges; border: 2px solid #000; outline: 2px solid #000; background: #e0e0e0; filter: contrast(1.35) brightness(0.88); -webkit-print-color-adjust: exact; print-color-adjust: exact;" />
+                 style="image-rendering: auto; border: 2px solid #000; outline: 2px solid #000; background: #d0d0d0; filter: grayscale(1) contrast(1.75) brightness(0.8) drop-shadow(0 0 0.75px rgba(0,0,0,0.4)); -webkit-print-color-adjust: exact; print-color-adjust: exact;" />
             <span class="no-image-text" style="display:none;">Product image</span>
           ` : `
             <span class="no-image-text">Product image</span>
@@ -2738,21 +2778,21 @@ const Scanner = () => {
                 print-color-adjust: exact;
               }
               .product-image-section {
+                isolation: isolate !important;
                 border: 2px solid #000 !important;
-                background: #e5e5e5 !important;
+                background: #c8c8c8 !important;
                 -webkit-print-color-adjust: exact !important;
                 print-color-adjust: exact !important;
               }
               img.product-image {
-                image-rendering: -webkit-optimize-contrast !important;
-                image-rendering: crisp-edges !important;
-                image-rendering: pixelated !important;
+                mix-blend-mode: multiply !important;
+                image-rendering: auto !important;
                 -webkit-print-color-adjust: exact !important;
                 print-color-adjust: exact !important;
-                filter: contrast(1.35) brightness(0.88) !important;
+                filter: grayscale(1) contrast(1.9) brightness(0.76) drop-shadow(0 0 1px rgba(0,0,0,0.5)) !important;
                 border: 2px solid #000 !important;
                 outline: 2px solid #000 !important;
-                background: #e0e0e0 !important;
+                background: #c8c8c8 !important;
               }
             }
             * {
@@ -2836,6 +2876,16 @@ const Scanner = () => {
               border: 1px solid #000;
               flex-shrink: 0;
             }
+            .asin-display-primary {
+              line-height: 1.2;
+            }
+            .asin-display-fnsku {
+              font-size: 8pt;
+              font-weight: bold;
+              margin-top: 0.035in;
+              letter-spacing: 0.03em;
+              font-family: Consolas, "Courier New", monospace;
+            }
             .product-image-section {
               display: flex;
               align-items: center;
@@ -2847,7 +2897,8 @@ const Scanner = () => {
               overflow: hidden;
               padding: 0.05in;
               border: 2px solid #000;
-              background: #e5e5e5;
+              background: #d0d0d0;
+              isolation: isolate;
               -webkit-print-color-adjust: exact;
               print-color-adjust: exact;
             }
@@ -2857,15 +2908,14 @@ const Scanner = () => {
               width: auto;
               height: auto;
               object-fit: contain;
+              mix-blend-mode: multiply;
               border: 2px solid #000;
               outline: 2px solid #000;
-              background: #e0e0e0;
+              background: #d0d0d0;
               box-shadow: 0 0 0 1px #000;
               padding: 0.02in;
-              image-rendering: -webkit-optimize-contrast;
-              image-rendering: crisp-edges;
-              image-rendering: pixelated;
-              filter: contrast(1.35) brightness(0.88);
+              image-rendering: auto;
+              filter: grayscale(1) contrast(1.75) brightness(0.8) drop-shadow(0 0 0.75px rgba(0,0,0,0.4));
               -webkit-print-color-adjust: exact;
               print-color-adjust: exact;
             }

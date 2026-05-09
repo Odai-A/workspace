@@ -4431,10 +4431,22 @@ def scan_product():
                         
                         logger.info(f"📊 Cache completeness check for {code}: ASIN={cached_asin}, has_rainforest={has_rainforest_data}, is_placeholder={is_placeholder}, has_price={has_price}, has_image={has_image}, complete={has_complete_data}")
                         
-                        # If we have ASIN but incomplete data, fetch from Rainforest API to enrich
-                        # force_api_lookup: refresh from Amazon even when cache looked complete (e.g. user wants images)
-                        if cached_asin and len(cached_asin) >= 10 and RAINFOREST_API_KEY and (not has_complete_data or force_api_lookup):
-                            logger.info(f"📦 Cache has ASIN {cached_asin} but incomplete data - fetching from Rainforest API to enrich...")
+                        # Rainforest sync is slow (~3–10s). Only call when cache is incomplete or when the
+                        # client explicitly forces refresh *and* we still have no usable image URLs assembled.
+                        # Old behavior: `or force_api_lookup` re-fetched on every forced lookup even when the
+                        # cache was complete, which exceeded the frontend HTTP timeout (8s) and looked like failures.
+                        has_usable_images = len(all_images) > 0
+                        should_enrich_cache = bool(
+                            cached_asin and len(cached_asin) >= 10 and RAINFOREST_API_KEY and (
+                                not has_complete_data
+                                or (force_api_lookup and not has_usable_images)
+                            )
+                        )
+                        if should_enrich_cache:
+                            logger.info(
+                                f"📦 Rainforest enrich for {code} (asin={cached_asin}, complete={has_complete_data}, "
+                                f"force_api_lookup={force_api_lookup}, usable_images={has_usable_images})"
+                            )
                             try:
                                 rainforest_response = requests.get(
                                     'https://api.rainforestapi.com/request',
@@ -4498,8 +4510,7 @@ def scan_product():
                                                     'updated_at': now_persist,
                                                     'source': 'rainforest_api',
                                                 }
-                                                if enriched_brand:
-                                                    cache_upd['brand'] = enriched_brand[:200] if isinstance(enriched_brand, str) else str(enriched_brand)[:200]
+                                                # No api_lookup_cache.brand column — brand is in rainforest_raw_data->product
                                                 if enriched_category:
                                                     cat_s = enriched_category if isinstance(enriched_category, str) else str(enriched_category)
                                                     cache_upd['category'] = cat_s[:200]
@@ -4988,15 +4999,18 @@ def scan_product():
             )
 
             try:
-                # Legacy api_scan_logs for detailed billing/debug
-                supabase_admin.table('api_scan_logs').insert({
+                # Legacy api_scan_logs for detailed billing/debug (columns match JS apiScanLogService;
+                # timestamp is DB default e.g. lookup_timestamp — do not send created_at).
+                log_payload = {
                     'user_id': user_id,
                     'fnsku_scanned': code,
                     'asin_retrieved': asin,
                     'api_source': 'fnskutoasin.com',
                     'is_charged_call': True,
-                    'created_at': datetime.now(timezone.utc).isoformat()
-                }).execute()
+                }
+                if cache_row_id is not None:
+                    log_payload['api_lookup_cache_id'] = cache_row_id
+                supabase_admin.table('api_scan_logs').insert(log_payload).execute()
             except Exception as log_error:
                 logger.warning(f"Failed to log scan event in api_scan_logs: {log_error}")
         
@@ -5255,14 +5269,14 @@ def scan_product_batch():
                 # Two cheap IN-list queries cover the common code types.
                 try:
                     res_fnsku = supabase_admin.table('api_lookup_cache') \
-                        .select('id,fnsku,asin,product_name,price,image_url,brand,category,description,upc,api_source,updated_at,created_at,lookup_count') \
+                        .select('id,fnsku,asin,product_name,price,image_url,category,description,upc,api_source,updated_at,created_at,lookup_count,rainforest_raw_data') \
                         .in_('fnsku', codes).execute()
                     bulk_rows.extend(getattr(res_fnsku, 'data', None) or [])
                 except Exception as e:
                     logger.warning(f"Bulk cache fnsku prefetch failed: {e}")
                 try:
                     res_asin = supabase_admin.table('api_lookup_cache') \
-                        .select('id,fnsku,asin,product_name,price,image_url,brand,category,description,upc,api_source,updated_at,created_at,lookup_count') \
+                        .select('id,fnsku,asin,product_name,price,image_url,category,description,upc,api_source,updated_at,created_at,lookup_count,rainforest_raw_data') \
                         .in_('asin', codes).execute()
                     bulk_rows.extend(getattr(res_asin, 'data', None) or [])
                 except Exception as e:
@@ -5296,6 +5310,7 @@ def scan_product_batch():
                     except Exception:
                         if image_field:
                             images = [image_field]
+                    rb, rc, rd = _brand_category_description_from_rainforest_raw(cached)
                     results[code] = {
                         'success': True,
                         'asin': cached.get('asin') or '',
@@ -5305,9 +5320,9 @@ def scan_product_batch():
                         'image': images[0] if images else '',
                         'images': images,
                         'images_count': len(images),
-                        'brand': cached.get('brand') or '',
-                        'category': cached.get('category') or '',
-                        'description': cached.get('description') or '',
+                        'brand': rb or (cached.get('brand') or ''),
+                        'category': (cached.get('category') or '') or rc,
+                        'description': (cached.get('description') or '') or rd,
                         'upc': cached.get('upc') or '',
                         'amazon_url': f"https://www.amazon.com/dp/{cached.get('asin')}" if cached.get('asin') else '',
                         'source': 'cache',
