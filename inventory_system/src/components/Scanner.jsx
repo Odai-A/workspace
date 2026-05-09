@@ -1529,11 +1529,14 @@ const Scanner = () => {
       } else {
         setApiEnrichLoading(true);
       }
-    } else if (!posUi) {
+    } else if (!batchMode) {
+      // Single-item scan (including camera / Enter “POS” flow): always show the
+      // Product Information loading state while /api/scan runs — posUi used to
+      // skip this, so the panel stayed on the previous product or looked idle.
       setLoading(true);
     }
-    if (!batchMode && !forceApiLookup && !posUi) {
-      setProductInfo(null); // Clear previous product info only in normal mode
+    if (!batchMode && !forceApiLookup) {
+      setProductInfo(null); // Clear stale product while lookup runs
     }
     if (batchMode && !forceApiLookup) {
       // Reserve queue position immediately so print order matches scan order.
@@ -4937,8 +4940,13 @@ const Scanner = () => {
           </div>
 
           {loading && (
-            <div className="text-center py-10">
-              <p className="text-gray-500 dark:text-gray-400 animate-pulse">Loading product information...</p>
+            <div className="text-center py-10 flex flex-col items-center gap-3" role="status" aria-live="polite">
+              <span className="inline-block h-8 w-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" aria-hidden="true" />
+              <p className="text-gray-800 dark:text-gray-200 font-medium">Looking up product…</p>
+              {lastScannedCode ? (
+                <p className="text-sm font-mono text-gray-500 dark:text-gray-400">{lastScannedCode}</p>
+              ) : null}
+              <p className="text-xs text-gray-500 dark:text-gray-400 max-w-sm">This may take a few seconds while we match your code to catalog data.</p>
             </div>
           )}
 
