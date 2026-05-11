@@ -78,6 +78,33 @@ export const apiCacheService = {
   },
 
   /**
+   * Best-effort category from Rainforest JSONB when the flat `category` column is empty or generic.
+   */
+  _categoryFromRainforestRaw(rainforestRaw) {
+    if (!rainforestRaw) return '';
+    try {
+      const data = typeof rainforestRaw === 'string' ? JSON.parse(rainforestRaw) : rainforestRaw;
+      const product = data?.product && typeof data.product === 'object' ? data.product : null;
+      if (!product) return '';
+      const cat = product.category;
+      if (cat && typeof cat === 'object' && cat.name) return String(cat.name).trim().slice(0, 200);
+      if (typeof cat === 'string' && cat.trim()) return cat.trim().slice(0, 200);
+      const cats = product.categories;
+      if (Array.isArray(cats) && cats.length) {
+        const parts = cats
+          .map((x) => (x && typeof x === 'object' ? x.name : x))
+          .filter(Boolean)
+          .map((s) => String(s).trim())
+          .filter(Boolean);
+        if (parts.length) return parts.join(' > ').slice(0, 200);
+      }
+    } catch {
+      /* ignore */
+    }
+    return '';
+  },
+
+  /**
    * Map an api_lookup_cache row to the productInfo shape used by Scanner (name, description, price, images, etc.)
    */
   mapCacheRowToProductInfo(cacheRow) {
@@ -95,6 +122,12 @@ export const apiCacheService = {
     } else if (imageUrl) {
       images = [imageUrl];
     }
+    let category = cacheRow.category || null;
+    const generic = !category || String(category).trim() === '' || String(category).toLowerCase() === 'external api';
+    if (generic) {
+      const fromRaw = this._categoryFromRainforestRaw(cacheRow.rainforest_raw_data);
+      if (fromRaw) category = fromRaw;
+    }
     return {
       name: cacheRow.product_name || cacheRow.asin || cacheRow.fnsku || 'Product',
       description: cacheRow.description || cacheRow.product_name || '',
@@ -103,7 +136,7 @@ export const apiCacheService = {
       price: cacheRow.price != null ? parseFloat(cacheRow.price) : null,
       image_url: imageUrl || null,
       images: images.length > 0 ? images : null,
-      category: cacheRow.category || null,
+      category,
       upc: cacheRow.upc || null,
       source: 'cache',
       cached: true
@@ -329,6 +362,18 @@ export const apiCacheService = {
       }
     }
     
+    let displayCategory = cacheData.category || '';
+    const genericCat =
+      !displayCategory ||
+      String(displayCategory).trim() === '' ||
+      String(displayCategory).toLowerCase() === 'external api' ||
+      String(displayCategory).toLowerCase() === 'cached data';
+    if (genericCat) {
+      const fromRaw = this._categoryFromRainforestRaw(cacheData.rainforest_raw_data);
+      if (fromRaw) displayCategory = fromRaw;
+    }
+    if (!displayCategory) displayCategory = 'Cached Data';
+
     return {
       id: cacheData.id, // Or whatever primary key is used
       fnsku: cacheData.fnsku,
@@ -336,7 +381,7 @@ export const apiCacheService = {
       name: cacheData.product_name || `Product ${cacheData.fnsku || cacheData.asin}`,
       description: cacheData.description,
       price: cacheData.price != null ? parseFloat(cacheData.price).toFixed(2) : '0.00',
-      category: cacheData.category || 'Cached Data',
+      category: displayCategory,
       upc: cacheData.upc || 'N/A',
       sku: cacheData.fnsku || cacheData.asin, // Prioritize FNSKU as display SKU
       lpn: '', // api_lookup_cache likely doesn't have LPN from manifest
@@ -741,13 +786,18 @@ export const productLookupService = {
 
     query = query.select(selectFragment, { count: 'exact' }).eq('user_id', userId); // Only get current user's manifest data
 
-    if (searchQuery) {
-      const searchTerm = `%${searchQuery}%`;
+    if (searchQuery && String(searchQuery).trim()) {
+      // PostgREST `.or()` requires double-quoted identifiers for spaces / hyphens (e.g. "X-Z ASIN").
+      const inner = String(searchQuery).trim().replace(/\\/g, '\\\\').replace(/"/g, '""');
+      const pat = `"%${inner}%"`;
+      const qCol = (col) => `"${String(col).replace(/"/g, '""')}"`;
       const searchOrConditions = [
-        `${columnMap.lpn}.ilike.${searchTerm}`,
-        `${columnMap.fnsku}.ilike.${searchTerm}`,
-        `${columnMap.asin}.ilike.${searchTerm}`,
-        `${columnMap.name}.ilike.${searchTerm}`,
+        `${qCol(columnMap.lpn)}.ilike.${pat}`,
+        `${qCol(columnMap.fnsku)}.ilike.${pat}`,
+        `${qCol(columnMap.asin)}.ilike.${pat}`,
+        `${qCol(columnMap.name)}.ilike.${pat}`,
+        `${qCol(columnMap.upc)}.ilike.${pat}`,
+        `${qCol('Item Number')}.ilike.${pat}`,
       ].join(',');
       query = query.or(searchOrConditions);
     }
@@ -807,6 +857,61 @@ export const productLookupService = {
    * Delete a single product from manifest_data by ID for the current user.
    * Used by the Inventory page when deleting rows whose source is 'manifest_data'.
    */
+  /**
+   * Update Quantity and/or MSRP on a manifest_data row for the current user.
+   * @param {string|number} id - manifest_data id
+   * @param {{ quantity?: number, price?: number }} fields
+   * @returns {Promise<{ success: boolean, data?: object, error?: string }>}
+   */
+  async updateManifestQuantityAndPrice(id, fields = {}) {
+    if (!id) {
+      return { success: false, error: 'ID is required' };
+    }
+    try {
+      const userId = await getCurrentUserId();
+      if (!userId) {
+        return { success: false, error: 'User must be logged in' };
+      }
+      const updates = {};
+      if (fields.quantity !== undefined) {
+        const q = Number(fields.quantity);
+        if (!Number.isFinite(q) || q < 0) {
+          return { success: false, error: 'Quantity must be a non-negative number' };
+        }
+        updates[columnMap.quantity] = Math.floor(q);
+      }
+      if (fields.price !== undefined) {
+        const p = Number(fields.price);
+        if (!Number.isFinite(p) || p < 0) {
+          return { success: false, error: 'Price must be a non-negative number' };
+        }
+        updates[columnMap.price] = p;
+      }
+      if (Object.keys(updates).length === 0) {
+        return { success: false, error: 'No fields to update' };
+      }
+
+      const { data, error } = await supabase
+        .from(PRODUCT_TABLE)
+        .update(updates)
+        .eq('id', id)
+        .eq('user_id', userId)
+        .select()
+        .maybeSingle();
+
+      if (error) {
+        return { success: false, error: error.message || 'Update failed' };
+      }
+      if (!data) {
+        return { success: false, error: 'Product not found or no permission' };
+      }
+      return { success: true, data };
+    } catch (error) {
+      console.error('Exception in updateManifestQuantityAndPrice:', error);
+      return { success: false, error: error.message || 'Unexpected error' };
+    }
+  },
+
   async deleteProduct(id) {
     if (!id) {
       console.error('deleteProduct: id is required');

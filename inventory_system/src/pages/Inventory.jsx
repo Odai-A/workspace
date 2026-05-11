@@ -1,12 +1,9 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef, startTransition } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
 import {
   MagnifyingGlassIcon,
   FunnelIcon,
   ArrowDownTrayIcon,
-  ChevronDownIcon,
   XMarkIcon,
-  AdjustmentsHorizontalIcon,
   PlusIcon,
   TrashIcon,
 } from '@heroicons/react/24/outline';
@@ -14,7 +11,6 @@ import Card from '../components/ui/Card';
 import Button from '../components/ui/Button';
 import Table from '../components/ui/Table';
 import Pagination from '../components/ui/Pagination';
-import InventoryLevelBadge from '../components/inventory/InventoryLevelBadge';
 import AddStockModal from '../components/inventory/AddStockModal';
 import Modal from '../components/ui/Modal';
 import { useAuth } from '../contexts/AuthContext';
@@ -31,10 +27,20 @@ import {
   isValidLocationCode,
 } from '../utils/warehouseSettings';
 
-const INVENTORY_PAGE_SIZE_OPTIONS = [25, 50, 75, 100];
 const EXPORT_ALL_LIMIT = 10000;
-const ITEMS_PER_PAGE_STORAGE_KEY = 'inventoryItemsPerPage';
+
+const MARKETPLACE_EXPORT_LABELS = {
+  facebook: 'Facebook Marketplace',
+  shopify: 'Shopify',
+  whatnot: 'Whatnot',
+  ebay: 'eBay',
+  commentsold: 'CommentSold',
+  universal: 'Universal',
+};
 const BUCKET_CODE_OPTIONS = Array.from({ length: 10 }, (_, index) => `B${index + 1}`);
+
+const INVENTORY_PAGE_SIZE_OPTIONS = [25, 50, 75, 100];
+const ITEMS_PER_PAGE_STORAGE_KEY = 'inventoryItemsPerPage';
 
 function readStoredItemsPerPage() {
   try {
@@ -45,8 +51,11 @@ function readStoredItemsPerPage() {
   }
   return INVENTORY_PAGE_SIZE_OPTIONS[0];
 }
-/** Load up to this many rows from each source, merge, then paginate in the UI (avoids broken totals from paging two tables separately). */
+
+/** Load up to this many rows from each source, merge (avoids broken totals from paging two tables separately). */
 const INVENTORY_FETCH_LIMIT = 8000;
+/** First paint: load this many rows per source, then optionally fetch up to INVENTORY_FETCH_LIMIT in the background. */
+const INVENTORY_QUICK_FETCH_LIMIT = Math.min(400, INVENTORY_FETCH_LIMIT);
 
 /** Minimal manifest columns for merge / FNSKU enrichment (smaller payload than select('*')). */
 const MANIFEST_MERGE_SELECT = 'id, "B00 Asin", "Fn Sku", "X-Z ASIN", image_url';
@@ -61,6 +70,88 @@ function getInventoryRowKey(item) {
 function getInventoryDisplayName(item) {
   if (!item) return 'Item';
   return item.Description || item['Description'] || item.name || 'Item';
+}
+
+/** Inline quantity + MSRP editor for inventory rows (inventory table or manifest-only). */
+function InventoryQtyPriceEditor({ rowData, patchMetrics }) {
+  const rowKey = getInventoryRowKey(rowData);
+  const curQ = Number(rowData.Quantity ?? 0) || 0;
+  const curP = typeof rowData.MSRP === 'number' ? rowData.MSRP : parseFloat(rowData.MSRP) || 0;
+  const [qtyStr, setQtyStr] = useState(String(curQ));
+  const [priceStr, setPriceStr] = useState(Number.isFinite(curP) ? curP.toFixed(2) : '0.00');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const q = Number(rowData.Quantity ?? 0) || 0;
+    const p = typeof rowData.MSRP === 'number' ? rowData.MSRP : parseFloat(rowData.MSRP) || 0;
+    setQtyStr(String(q));
+    setPriceStr(Number.isFinite(p) ? p.toFixed(2) : '0.00');
+  }, [rowKey, rowData.Quantity, rowData.MSRP]);
+
+  const parsedQ = parseInt(qtyStr, 10);
+  const parsedP = parseFloat(priceStr);
+  const dirty =
+    Number.isFinite(parsedQ) &&
+    Number.isFinite(parsedP) &&
+    (parsedQ !== curQ || Math.round((parsedP - curP) * 100) !== 0);
+
+  const valid =
+    Number.isFinite(parsedQ) &&
+    parsedQ >= 0 &&
+    Number.isFinite(parsedP) &&
+    parsedP >= 0;
+
+  const handleSave = async (e) => {
+    e?.stopPropagation?.();
+    if (!valid || !dirty || !rowKey) return;
+    setSaving(true);
+    try {
+      const result = await patchMetrics(rowData, parsedQ, parsedP);
+      if (!result?.success) {
+        toast.error(result?.error || 'Save failed');
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className="flex flex-col sm:flex-row sm:items-end gap-2 min-w-[10rem]"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <label className="flex flex-col gap-0.5 text-xs text-gray-600 dark:text-gray-400">
+        Qty
+        <input
+          type="number"
+          min={0}
+          step={1}
+          value={qtyStr}
+          onChange={(e) => setQtyStr(e.target.value)}
+          className="w-full sm:w-16 border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+        />
+      </label>
+      <label className="flex flex-col gap-0.5 text-xs text-gray-600 dark:text-gray-400">
+        MSRP
+        <input
+          type="number"
+          min={0}
+          step="0.01"
+          value={priceStr}
+          onChange={(e) => setPriceStr(e.target.value)}
+          className="w-full sm:w-24 border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+        />
+      </label>
+      <button
+        type="button"
+        onClick={handleSave}
+        disabled={!valid || !dirty || saving || !rowKey}
+        className="text-sm px-2 py-1 rounded bg-indigo-600 text-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-indigo-700 shrink-0"
+      >
+        {saving ? '…' : 'Save'}
+      </button>
+    </div>
+  );
 }
 
 function normalizeRemoveError(err) {
@@ -112,15 +203,26 @@ const extractItemSequence = (item) => {
 
 /** PostgREST `in()` batches — avoids huge URLs and keeps latency predictable. */
 const IN_QUERY_CHUNK_SIZE = 120;
+/** Run this many chunk queries in parallel (sequential chunks were the main inventory load bottleneck). */
+const SUPABASE_IN_QUERY_PARALLEL = 8;
 
 async function fetchManifestRowsByIds(ids) {
   const unique = [...new Set((ids || []).filter((id) => id != null).map((id) => String(id)))];
-  const rows = [];
+  if (unique.length === 0) return [];
+  const chunks = [];
   for (let i = 0; i < unique.length; i += IN_QUERY_CHUNK_SIZE) {
-    const chunk = unique.slice(i, i + IN_QUERY_CHUNK_SIZE);
-    const { data, error } = await supabase.from('manifest_data').select(MANIFEST_MERGE_SELECT).in('id', chunk);
-    if (error) console.warn('batch manifest_data by id:', error);
-    if (data?.length) rows.push(...data);
+    chunks.push(unique.slice(i, i + IN_QUERY_CHUNK_SIZE));
+  }
+  const rows = [];
+  for (let w = 0; w < chunks.length; w += SUPABASE_IN_QUERY_PARALLEL) {
+    const slice = chunks.slice(w, w + SUPABASE_IN_QUERY_PARALLEL);
+    const results = await Promise.all(
+      slice.map((chunk) => supabase.from('manifest_data').select(MANIFEST_MERGE_SELECT).in('id', chunk))
+    );
+    for (const { data, error } of results) {
+      if (error) console.warn('batch manifest_data by id:', error);
+      if (data?.length) rows.push(...data);
+    }
   }
   return rows;
 }
@@ -128,16 +230,27 @@ async function fetchManifestRowsByIds(ids) {
 async function fetchManifestRowsByFnsku(userId, fnskuList) {
   if (!userId) return [];
   const unique = [...new Set((fnskuList || []).map((c) => String(c || '').trim()).filter(Boolean))];
-  const rows = [];
+  if (unique.length === 0) return [];
+  const chunks = [];
   for (let i = 0; i < unique.length; i += IN_QUERY_CHUNK_SIZE) {
-    const chunk = unique.slice(i, i + IN_QUERY_CHUNK_SIZE);
-    const { data, error } = await supabase
-      .from('manifest_data')
-      .select(MANIFEST_MERGE_SELECT)
-      .eq('user_id', userId)
-      .in('Fn Sku', chunk);
-    if (error) console.warn('batch manifest_data by Fn Sku:', error);
-    if (data?.length) rows.push(...data);
+    chunks.push(unique.slice(i, i + IN_QUERY_CHUNK_SIZE));
+  }
+  const rows = [];
+  for (let w = 0; w < chunks.length; w += SUPABASE_IN_QUERY_PARALLEL) {
+    const slice = chunks.slice(w, w + SUPABASE_IN_QUERY_PARALLEL);
+    const results = await Promise.all(
+      slice.map((chunk) =>
+        supabase
+          .from('manifest_data')
+          .select(MANIFEST_MERGE_SELECT)
+          .eq('user_id', userId)
+          .in('Fn Sku', chunk)
+      )
+    );
+    for (const { data, error } of results) {
+      if (error) console.warn('batch manifest_data by Fn Sku:', error);
+      if (data?.length) rows.push(...data);
+    }
   }
   return rows;
 }
@@ -150,28 +263,52 @@ async function fetchApiCacheImageMaps(asinSet, fnskuSet) {
   if (asins.length === 0 && fnskus.length === 0) {
     return { imageByAsin, imageByFnsku };
   }
-  for (let i = 0; i < asins.length; i += IN_QUERY_CHUNK_SIZE) {
-    const chunk = asins.slice(i, i + IN_QUERY_CHUNK_SIZE);
-    const { data, error } = await supabase
-      .from('api_lookup_cache')
-      .select('asin, fnsku, image_url')
-      .in('asin', chunk);
-    if (error) console.warn('batch api_lookup_cache by asin:', error);
-    (data || []).forEach((row) => {
-      if (row?.asin && row.image_url && !imageByAsin.has(row.asin)) imageByAsin.set(row.asin, row.image_url);
-    });
+
+  async function fillAsinMap() {
+    if (asins.length === 0) return;
+    const chunks = [];
+    for (let i = 0; i < asins.length; i += IN_QUERY_CHUNK_SIZE) {
+      chunks.push(asins.slice(i, i + IN_QUERY_CHUNK_SIZE));
+    }
+    for (let w = 0; w < chunks.length; w += SUPABASE_IN_QUERY_PARALLEL) {
+      const slice = chunks.slice(w, w + SUPABASE_IN_QUERY_PARALLEL);
+      const results = await Promise.all(
+        slice.map((chunk) =>
+          supabase.from('api_lookup_cache').select('asin, fnsku, image_url').in('asin', chunk)
+        )
+      );
+      for (const { data, error } of results) {
+        if (error) console.warn('batch api_lookup_cache by asin:', error);
+        (data || []).forEach((row) => {
+          if (row?.asin && row.image_url && !imageByAsin.has(row.asin)) imageByAsin.set(row.asin, row.image_url);
+        });
+      }
+    }
   }
-  for (let i = 0; i < fnskus.length; i += IN_QUERY_CHUNK_SIZE) {
-    const chunk = fnskus.slice(i, i + IN_QUERY_CHUNK_SIZE);
-    const { data, error } = await supabase
-      .from('api_lookup_cache')
-      .select('asin, fnsku, image_url')
-      .in('fnsku', chunk);
-    if (error) console.warn('batch api_lookup_cache by fnsku:', error);
-    (data || []).forEach((row) => {
-      if (row?.fnsku && row.image_url && !imageByFnsku.has(row.fnsku)) imageByFnsku.set(row.fnsku, row.image_url);
-    });
+
+  async function fillFnskuMap() {
+    if (fnskus.length === 0) return;
+    const chunks = [];
+    for (let i = 0; i < fnskus.length; i += IN_QUERY_CHUNK_SIZE) {
+      chunks.push(fnskus.slice(i, i + IN_QUERY_CHUNK_SIZE));
+    }
+    for (let w = 0; w < chunks.length; w += SUPABASE_IN_QUERY_PARALLEL) {
+      const slice = chunks.slice(w, w + SUPABASE_IN_QUERY_PARALLEL);
+      const results = await Promise.all(
+        slice.map((chunk) =>
+          supabase.from('api_lookup_cache').select('asin, fnsku, image_url').in('fnsku', chunk)
+        )
+      );
+      for (const { data, error } of results) {
+        if (error) console.warn('batch api_lookup_cache by fnsku:', error);
+        (data || []).forEach((row) => {
+          if (row?.fnsku && row.image_url && !imageByFnsku.has(row.fnsku)) imageByFnsku.set(row.fnsku, row.image_url);
+        });
+      }
+    }
   }
+
+  await Promise.all([fillAsinMap(), fillFnskuMap()]);
   return { imageByAsin, imageByFnsku };
 }
 
@@ -359,17 +496,16 @@ async function combineInventoryAndManifest(inventoryResult, manifestResult, sear
 
 const Inventory = () => {
   const { apiClient } = useAuth();
-  const navigate = useNavigate();
   /** Cancels stale image hydration when a newer load starts. */
   const inventoryLoadGenRef = useRef(0);
   const [loading, setLoading] = useState(true);
-  const [products, setProducts] = useState([]);
+  const [augmentingList, setAugmentingList] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [appliedSearchTerm, setAppliedSearchTerm] = useState('');
+  const searchDebounceRef = useRef(null);
+  const [error, setError] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(readStoredItemsPerPage);
-  const [totalItems, setTotalItems] = useState(0);
-  const [error, setError] = useState(null);
   const [showAddStockModal, setShowAddStockModal] = useState(false);
   const [selectedItems, setSelectedItems] = useState(new Set());
   const [isDeleting, setIsDeleting] = useState(false);
@@ -430,7 +566,7 @@ const Inventory = () => {
     });
   }, [bucketFilter, warehouseLayout]);
 
-  /** Full merged list for current search; UI shows one page via slice (see effect below). */
+  /** Full merged list for current search; UI paginates client-side over filtered results. */
   const [fullCombinedList, setFullCombinedList] = useState([]);
   const filteredInventoryList = useMemo(() => {
     const filtered = applyBucketFilter(applyShelfRowFilters(fullCombinedList));
@@ -454,48 +590,110 @@ const Inventory = () => {
     return map;
   }, [filteredInventoryList]);
 
+  const totalFilteredCount = filteredInventoryList.length;
+  const totalPages = Math.max(1, Math.ceil(totalFilteredCount / itemsPerPage) || 1);
+
+  const paginatedInventoryList = useMemo(() => {
+    const start = (currentPage - 1) * itemsPerPage;
+    return filteredInventoryList.slice(start, start + itemsPerPage);
+  }, [filteredInventoryList, currentPage, itemsPerPage]);
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
   const loadInventoryData = useCallback(async () => {
     const loadGen = ++inventoryLoadGenRef.current;
     setLoading(true);
+    setAugmentingList(false);
     setError(null);
     try {
-      const [inventoryResult, manifestResult, hiddenManifestList] = await Promise.all([
-        inventoryService.getInventory({
-          page: 1,
-          limit: INVENTORY_FETCH_LIMIT,
-          searchQuery: appliedSearchTerm,
-        }),
-        productLookupService.getProducts({
-          page: 1,
-          limit: INVENTORY_FETCH_LIMIT,
-          searchQuery: appliedSearchTerm,
-          listSelect: 'inventory',
-        }),
-        inventoryService.getHiddenManifestIds(),
-      ]);
-      if (loadGen !== inventoryLoadGenRef.current) return;
-      const hiddenManifestIds = new Set(hiddenManifestList);
+      const fetchWave = async (limit) => {
+        const [inventoryResult, manifestResult, hiddenManifestList] = await Promise.all([
+          inventoryService.getInventory({
+            page: 1,
+            limit,
+            searchQuery: appliedSearchTerm,
+          }),
+          productLookupService.getProducts({
+            page: 1,
+            limit,
+            searchQuery: appliedSearchTerm,
+            listSelect: 'inventory',
+          }),
+          inventoryService.getHiddenManifestIds(),
+        ]);
+        if (loadGen !== inventoryLoadGenRef.current) return null;
+        const hiddenManifestIds = new Set(hiddenManifestList);
+        const combined = await combineInventoryAndManifest(
+          inventoryResult,
+          manifestResult,
+          appliedSearchTerm,
+          hiddenManifestIds
+        );
+        if (loadGen !== inventoryLoadGenRef.current) return null;
+        return { inventoryResult, manifestResult, combined };
+      };
 
-      const combined = await combineInventoryAndManifest(
-        inventoryResult,
-        manifestResult,
-        appliedSearchTerm,
-        hiddenManifestIds
-      );
-      if (loadGen !== inventoryLoadGenRef.current) return;
+      const quickLimit = INVENTORY_QUICK_FETCH_LIMIT;
+      const quickWave = await fetchWave(quickLimit);
+      if (!quickWave) return;
 
+      let { inventoryResult, manifestResult, combined } = quickWave;
       setFullCombinedList(combined);
       setLoading(false);
 
-      try {
-        const withImages = await hydrateInventoryListImages(combined);
-        if (loadGen === inventoryLoadGenRef.current) {
-          startTransition(() => {
-            setFullCombinedList(withImages);
-          });
-        }
-      } catch (imgErr) {
-        console.warn('Inventory image hydrate failed:', imgErr);
+      /** Merge image URLs by row key so a slow quick-wave hydrate cannot overwrite a newer full list. */
+      const runImageHydrate = (rowsSnapshot) => {
+        void (async () => {
+          try {
+            const withImages = await hydrateInventoryListImages(rowsSnapshot);
+            if (loadGen !== inventoryLoadGenRef.current) return;
+            const urlByKey = new Map();
+            withImages.forEach((r) => {
+              const k = getInventoryRowKey(r);
+              if (k && r.image_url) urlByKey.set(k, r.image_url);
+            });
+            if (urlByKey.size === 0) return;
+            startTransition(() => {
+              setFullCombinedList((prev) =>
+                prev.map((row) => {
+                  const k = getInventoryRowKey(row);
+                  const u = urlByKey.get(k);
+                  if (!u) return row;
+                  const has =
+                    (row.image_url && String(row.image_url).trim()) ||
+                    (row['Image URL'] && String(row['Image URL']).trim());
+                  if (has) return row;
+                  return { ...row, image_url: u };
+                })
+              );
+            });
+          } catch (imgErr) {
+            console.warn('Inventory image hydrate failed:', imgErr);
+          }
+        })();
+      };
+      runImageHydrate(combined);
+
+      const invLen = (inventoryResult.data || []).length;
+      const manLen = (manifestResult.data || []).length;
+      const needFullBackground =
+        quickLimit < INVENTORY_FETCH_LIMIT && (invLen >= quickLimit || manLen >= quickLimit);
+
+      if (needFullBackground) {
+        setAugmentingList(true);
+        const fullWave = await fetchWave(INVENTORY_FETCH_LIMIT);
+        setAugmentingList(false);
+        if (!fullWave) return;
+        inventoryResult = fullWave.inventoryResult;
+        manifestResult = fullWave.manifestResult;
+        combined = fullWave.combined;
+        if (loadGen !== inventoryLoadGenRef.current) return;
+        setFullCombinedList(combined);
+        runImageHydrate(combined);
       }
 
       const invCap = (inventoryResult.data || []).length >= INVENTORY_FETCH_LIMIT;
@@ -511,11 +709,10 @@ const Inventory = () => {
       setError('Failed to load inventory data');
       toast.error('Failed to load inventory data. Please try again.');
       setFullCombinedList([]);
-      setProducts([]);
-      setTotalItems(0);
     } finally {
       if (loadGen === inventoryLoadGenRef.current) {
         setLoading(false);
+        setAugmentingList(false);
       }
     }
   }, [appliedSearchTerm]);
@@ -524,33 +721,22 @@ const Inventory = () => {
     void loadInventoryData();
   }, [loadInventoryData]);
 
+  /** Apply search after typing pauses (PostgREST queries run on applied term). Enter still flushes immediately. */
   useEffect(() => {
-    const total = filteredInventoryList.length;
-    const totalPages = Math.max(1, Math.ceil(total / itemsPerPage) || 1);
-    if (total > 0 && currentPage > totalPages) {
-      setCurrentPage(totalPages);
-      return;
-    }
-    const start = (currentPage - 1) * itemsPerPage;
-    setProducts(filteredInventoryList.slice(start, start + itemsPerPage));
-    setTotalItems(total);
-  }, [filteredInventoryList, currentPage, itemsPerPage]);
-
-  const handleItemsPerPageChange = (e) => {
-    const next = Number(e.target.value);
-    if (!INVENTORY_PAGE_SIZE_OPTIONS.includes(next)) return;
-    try {
-      localStorage.setItem(ITEMS_PER_PAGE_STORAGE_KEY, String(next));
-    } catch {
-      /* ignore */
-    }
-    setItemsPerPage(next);
-    setCurrentPage(1);
-  };
+    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    searchDebounceRef.current = setTimeout(() => {
+      searchDebounceRef.current = null;
+      setAppliedSearchTerm(searchTerm.trim());
+    }, 400);
+    return () => {
+      if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+    };
+  }, [searchTerm]);
 
   useEffect(() => {
     setSelectedItems(new Set());
-  }, [currentPage, appliedSearchTerm, itemsPerPage, shelfFilter, rowFilter, bucketFilter]);
+    setCurrentPage(1);
+  }, [appliedSearchTerm, shelfFilter, rowFilter, bucketFilter]);
 
   useEffect(() => {
     if (marketplaceExportScope === 'selected' && selectedItems.size === 0) {
@@ -601,6 +787,15 @@ const Inventory = () => {
     div.textContent = String(text);
     return div.innerHTML;
   };
+
+  /** Same shape as the per-row green print button — ensures Code128 uses FNSKU and layout matches. */
+  const inventoryRowToLabelProductInfo = (rowData) => ({
+    name: rowData?.['Description'] || rowData?.Description || 'Unknown Product',
+    fnsku: rowData?.['Fn Sku'] || rowData?.['FNSKU'] || rowData?.FNSKU || rowData?._rawData?.fnsku || '',
+    location: rowData?.['Location'] || rowData?._rawData?.location || 'UNASSIGNED',
+    item_number: rowData?.['Item Number'] || rowData?._rawData?.item_number || '',
+    asin: rowData?.['B00 Asin'] || rowData?._rawData?.asin || '',
+  });
 
   const getPrimaryProductCode = (productInfo) =>
     productInfo?.asin || productInfo?.upc || productInfo?.fnsku || productInfo?.code || productInfo?.item_number || '';
@@ -1317,24 +1512,31 @@ const Inventory = () => {
     setSearchTerm(event.target.value);
   };
 
-  const handleSearchSubmit = () => {
+  const flushAppliedSearch = useCallback(() => {
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
     setAppliedSearchTerm(searchTerm.trim());
-    setCurrentPage(1);
+  }, [searchTerm]);
+
+  const handleSearchSubmit = () => {
+    flushAppliedSearch();
   };
 
   const handleSearchKeyDown = (event) => {
     if (event.key === 'Enter') {
       event.preventDefault();
-      handleSearchSubmit();
+      flushAppliedSearch();
     }
-  };
-
-  const handlePageChange = (newPage) => {
-    setCurrentPage(newPage);
   };
 
   // Reset filters
   const handleResetFilters = () => {
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
     setSearchTerm('');
     setAppliedSearchTerm('');
     setShelfFilter('all');
@@ -1344,8 +1546,26 @@ const Inventory = () => {
     toast.info('Filters have been reset to default values.');
   };
 
+  const handleItemsPerPageChange = (e) => {
+    const next = Number(e.target.value);
+    if (!INVENTORY_PAGE_SIZE_OPTIONS.includes(next)) return;
+    try {
+      localStorage.setItem(ITEMS_PER_PAGE_STORAGE_KEY, String(next));
+    } catch {
+      /* ignore */
+    }
+    setItemsPerPage(next);
+    setCurrentPage(1);
+  };
+
+  const handlePageChange = (page) => {
+    const p = Number(page);
+    if (!Number.isFinite(p) || p < 1 || p > totalPages) return;
+    setCurrentPage(p);
+  };
+
   const getSelectedProductRows = () =>
-    products
+    filteredInventoryList
       .filter((p) => selectedItems.has(getInventoryRowKey(p)))
       .sort((a, b) => {
         const seqA = extractItemSequence(a);
@@ -1360,130 +1580,18 @@ const Inventory = () => {
         return idxA - idxB;
       });
 
-  const getFilteredInventoryRows = () =>
-    [...filteredInventoryList].sort((a, b) => {
-      const seqA = extractItemSequence(a);
-      const seqB = extractItemSequence(b);
-      if (seqA != null || seqB != null) {
-        if (seqA == null) return 1;
-        if (seqB == null) return -1;
-        return seqA - seqB;
-      }
-      const idxA = filteredOrderIndexMap.get(getInventoryRowKey(a)) ?? Number.MAX_SAFE_INTEGER;
-      const idxB = filteredOrderIndexMap.get(getInventoryRowKey(b)) ?? Number.MAX_SAFE_INTEGER;
-      return idxA - idxB;
-    });
-
   const handlePrintSelectedBasicLabels = () => {
     const rows = getSelectedProductRows();
     if (rows.length === 0) {
       toast.warning('Select at least one row to print labels.');
       return;
     }
-    const printWindow = openPrintWindow(createBasicInventoryLabelHTML(rows));
+    const labelItems = rows.map((row) => inventoryRowToLabelProductInfo(row));
+    const printWindow = openPrintWindow(createBasicInventoryLabelHTML(labelItems));
     if (printWindow) {
       printWindow.onload = () => {
         printWindow.print();
       };
-    }
-  };
-
-  const handlePrintFilteredBasicLabels = () => {
-    const rows = getFilteredInventoryRows();
-    if (rows.length === 0) {
-      toast.warning('No items match the selected shelf/row filters.');
-      return;
-    }
-    const printWindow = openPrintWindow(createBasicInventoryLabelHTML(rows));
-    if (printWindow) {
-      printWindow.onload = () => {
-        printWindow.print();
-      };
-    }
-  };
-
-  // Export to CSV (current page / current list)
-  const handleExport = () => {
-    try {
-      const dataToExport = products;
-      
-      // Convert data to CSV format
-      const headers = ['Product Description', 'LPN', 'ASIN', 'Quantity', 'MSRP', 'Category', 'Location', 'Item Number'];
-      
-      const csvRows = [
-        headers.join(','),
-        ...dataToExport.map(item => [
-          `"${(item.Description || '').replace(/"/g, '""')}"`,
-          `"${(item['X-Z ASIN'] || '').replace(/"/g, '""')}"`,
-          `"${(item['B00 Asin'] || '').replace(/"/g, '""')}"`,
-          item.Quantity !== null && item.Quantity !== undefined ? item.Quantity.toString() : 'N/A',
-          item.MSRP !== null && item.MSRP !== undefined ? `$${item.MSRP.toFixed(2)}` : 'N/A',
-          `"${(item.Category || '').replace(/"/g, '""')}"`,
-          `"${(item.Location || '').replace(/"/g, '""')}"`,
-          `"${(item['Item Number'] || '').replace(/"/g, '""')}"`
-        ].join(','))
-      ];
-      
-      const csvString = csvRows.join('\n');
-      
-      // Create a download link
-      const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      
-      // Set up CSV file for download
-      link.setAttribute('href', url);
-      link.setAttribute('download', `inventory_export_${new Date().toISOString().split('T')[0]}.csv`);
-      link.style.visibility = 'hidden';
-      
-      // Append to document, trigger download and clean up
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      
-      toast.success('Inventory data has been exported to CSV successfully.');
-    } catch (error) {
-      console.error('Error exporting inventory:', error);
-      toast.error('Failed to export inventory data. Please try again.');
-    }
-  };
-
-  const handleExportSelected = () => {
-    const rows = getSelectedProductRows();
-    if (rows.length === 0) {
-      toast.warning('Select at least one row to export.');
-      return;
-    }
-    try {
-      const headers = ['Product Description', 'LPN', 'ASIN', 'Quantity', 'MSRP', 'Category', 'Location', 'Item Number'];
-      const csvRows = [
-        headers.join(','),
-        ...rows.map((item) => [
-          `"${(item.Description || '').replace(/"/g, '""')}"`,
-          `"${(item['X-Z ASIN'] || '').replace(/"/g, '""')}"`,
-          `"${(item['B00 Asin'] || '').replace(/"/g, '""')}"`,
-          item.Quantity !== null && item.Quantity !== undefined ? item.Quantity.toString() : 'N/A',
-          item.MSRP !== null && item.MSRP !== undefined ? `$${item.MSRP.toFixed(2)}` : 'N/A',
-          `"${(item.Category || '').replace(/"/g, '""')}"`,
-          `"${(item.Location || '').replace(/"/g, '""')}"`,
-          `"${(item['Item Number'] || '').replace(/"/g, '""')}"`,
-        ].join(',')),
-      ];
-      const csvString = csvRows.join('\n');
-      const blob = new Blob([csvString], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.setAttribute('href', url);
-      link.setAttribute('download', `inventory_selected_${new Date().toISOString().split('T')[0]}.csv`);
-      link.style.visibility = 'hidden';
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-      toast.success(`Exported ${rows.length} selected row(s) to CSV.`);
-    } catch (error) {
-      console.error('Error exporting selected inventory:', error);
-      toast.error('Failed to export selected rows.');
     }
   };
 
@@ -1522,14 +1630,16 @@ const Inventory = () => {
       } else if (marketplaceExportScope === 'selected') {
         list = getSelectedProductRows();
       } else {
-        list = products;
+        list = paginatedInventoryList;
       }
       if (!list || list.length === 0) {
         toast.warning('No products to export.');
         return;
       }
       await exportMarketplace(list, marketplaceExportFormat, marketplaceUniversalFormat);
-      toast.success(`Exported ${list.length} product(s) for ${marketplaceExportFormat}.`);
+      toast.success(
+        `Exported ${list.length} product(s) for ${MARKETPLACE_EXPORT_LABELS[marketplaceExportFormat] || marketplaceExportFormat}.`
+      );
       setShowMarketplaceExportModal(false);
     } catch (err) {
       console.error('Marketplace export failed:', err);
@@ -1637,21 +1747,6 @@ const Inventory = () => {
     }
   };
 
-  // Handle adjust stock for a specific item
-  const handleAdjustStock = (item) => {
-    toast.info(`Adjust stock for ${item.Description} (ID: ${item.id}) - Rework needed for Supabase.`);
-    // TODO: Implement modal and call productLookupService.saveProductLookup with updated quantity
-  };
-
-  // Handle viewing item details
-  const handleViewDetails = (item) => {
-    if (item["X-Z ASIN"]) {
-        navigate(`/scanner?code=${item["X-Z ASIN"]}&type=lpn`); // Example redirect to scanner
-    } else {
-        toast.info('No LPN to view details with on scanner page.');
-    }
-  };
-
   // Remove from inventory list only (no DELETE of inventory or manifest_data rows in Supabase)
   const handleDeleteItem = async (item) => {
     const rowKey = getInventoryRowKey(item);
@@ -1679,7 +1774,7 @@ const Inventory = () => {
       }
 
       if (result?.success === true) {
-        setProducts((prev) => prev.filter((i) => getInventoryRowKey(i) !== rowKey));
+        setFullCombinedList((prev) => prev.filter((i) => getInventoryRowKey(i) !== rowKey));
         setSelectedItems((prev) => {
           const next = new Set(prev);
           next.delete(rowKey);
@@ -1707,7 +1802,7 @@ const Inventory = () => {
     }
 
     const selectedArray = Array.from(selectedItems);
-    const selectedProducts = products.filter((p) => selectedArray.includes(getInventoryRowKey(p)));
+    const selectedProducts = filteredInventoryList.filter((p) => selectedArray.includes(getInventoryRowKey(p)));
     const itemNames = selectedProducts.map(p => p.Description || 'Unknown').join(', ');
     
     if (!window.confirm(
@@ -1823,7 +1918,6 @@ const Inventory = () => {
       if (removedCount > 0) {
         toast.success(`Removed ${removedCount} item(s) from the list. Catalog and scan data were not deleted.`);
         setSelectedItems(new Set());
-        setCurrentPage(1);
         loadInventoryData();
       }
 
@@ -1852,57 +1946,74 @@ const Inventory = () => {
     setSelectedItems(newSelected);
   };
 
-  // Handle select all (current page only)
+  // Select all rows on the current page (pagination).
   const handleSelectAll = () => {
-    const keysOnPage = products.map(getInventoryRowKey).filter(Boolean);
-    const allSelected = keysOnPage.length > 0 && keysOnPage.every((k) => selectedItems.has(k));
+    const keysOnPage = paginatedInventoryList.map(getInventoryRowKey).filter(Boolean);
+    const allSelected =
+      keysOnPage.length > 0 && keysOnPage.every((k) => selectedItems.has(k));
     if (allSelected) {
-      setSelectedItems(new Set());
-    } else {
-      setSelectedItems(new Set(keysOnPage));
+      const next = new Set(selectedItems);
+      keysOnPage.forEach((k) => next.delete(k));
+      setSelectedItems(next);
+      return;
     }
+    const next = new Set(selectedItems);
+    keysOnPage.forEach((k) => next.add(k));
+    setSelectedItems(next);
   };
 
-  const selectedOnPageCount = products.filter((p) => selectedItems.has(getInventoryRowKey(p))).length;
-  const allOnPageSelected = products.length > 0 && selectedOnPageCount === products.length;
-  const someOnPageSelected = selectedOnPageCount > 0 && selectedOnPageCount < products.length;
+  const selectedOnPageCount = paginatedInventoryList.filter((p) =>
+    selectedItems.has(getInventoryRowKey(p))
+  ).length;
+  const allOnPageSelected =
+    paginatedInventoryList.length > 0 && selectedOnPageCount === paginatedInventoryList.length;
+  const someOnPageSelected =
+    selectedOnPageCount > 0 && selectedOnPageCount < paginatedInventoryList.length;
 
-  // Get inventory status based on quantity vs min quantity
-  const getInventoryStatus = (quantity, minQuantity) => {
-    if (quantity <= 0) return 'Out of Stock';
-    if (quantity < minQuantity) return 'Low Stock';
-    return 'In Stock';
-  };
-
-  // Filter inventory based on search and filters
-  const getFilteredInventory = () => {
-    return products.filter(item => {
-      // Search term filter
-      if (searchTerm && !JSON.stringify(item).toLowerCase().includes(searchTerm.toLowerCase())) {
-        return false;
+  const patchInventoryMetrics = useCallback(async (rowData, quantity, price) => {
+    const key = getInventoryRowKey(rowData);
+    if (!key || rowData.id == null) {
+      return { success: false, error: 'Cannot save this row' };
+    }
+    if (rowData.source === 'inventory_table') {
+      const r = await inventoryService.patchInventoryItem(rowData.id, { quantity, price });
+      if (r.success) {
+        setFullCombinedList((prev) =>
+          prev.map((row) => {
+            if (getInventoryRowKey(row) !== key) return row;
+            const next = {
+              ...row,
+              Quantity: quantity,
+              MSRP: price,
+            };
+            if (row._rawData && typeof row._rawData === 'object') {
+              next._rawData = { ...row._rawData, quantity, price };
+            }
+            return next;
+          })
+        );
+        toast.success('Saved quantity and price');
       }
-      
-      // Location filter
-      if (filters.location && filters.location !== 'All Locations' && item.location !== filters.location) {
-        return false;
+      return r.success ? { success: true } : { success: false, error: r.error || 'Update failed' };
+    }
+    if (rowData.source === 'manifest_data') {
+      const r = await productLookupService.updateManifestQuantityAndPrice(rowData.id, {
+        quantity,
+        price,
+      });
+      if (r.success) {
+        setFullCombinedList((prev) =>
+          prev.map((row) => {
+            if (getInventoryRowKey(row) !== key) return row;
+            return { ...row, Quantity: quantity, MSRP: price };
+          })
+        );
+        toast.success('Saved quantity and price');
       }
-      
-      // Category filter
-      if (filters.category && filters.category !== 'All Categories' && item.category !== filters.category) {
-        return false;
-      }
-      
-      // Status filter
-      if (filters.status && filters.status !== 'All') {
-        const itemStatus = getInventoryStatus(item.quantity, item.min_quantity);
-        if (itemStatus !== filters.status) {
-          return false;
-        }
-      }
-      
-      return true;
-    });
-  };
+      return r.success ? { success: true } : { success: false, error: r.error || 'Update failed' };
+    }
+    return { success: false, error: 'This row cannot be edited here' };
+  }, []);
 
   // Define table columns
   const columns = [
@@ -1912,7 +2023,7 @@ const Inventory = () => {
         <div className="flex items-center">
           <input
             type="checkbox"
-            aria-label="Select all on this page"
+            aria-label="Select all rows on this page"
             checked={allOnPageSelected}
             ref={(el) => {
               if (el) el.indeterminate = someOnPageSelected;
@@ -1955,9 +2066,14 @@ const Inventory = () => {
           <div className="flex items-start space-x-3">
             {imageUrl && (
               <div className="flex-shrink-0">
-                <img 
-                  src={imageUrl} 
-                  alt={rowData.Description || 'Product'} 
+                <img
+                  src={imageUrl}
+                  alt={rowData.Description || 'Product'}
+                  width={64}
+                  height={64}
+                  loading="lazy"
+                  decoding="async"
+                  fetchPriority="low"
                   className="w-16 h-16 object-contain border border-gray-200 rounded bg-white"
                   onError={(e) => {
                     e.target.style.display = 'none';
@@ -1985,26 +2101,14 @@ const Inventory = () => {
       },
     },
     {
-      header: 'Qty',
+      header: 'Qty / MSRP',
       accessor: 'Quantity',
-      cell: (props) => {
-        const rowData = props.row.original;
-        // console.log("[Inventory.jsx Cell] Qty Data:", rowData.Quantity);
-        return (
-          <div className="text-center">{rowData.Quantity !== null && rowData.Quantity !== undefined ? rowData.Quantity : 'N/A'}</div>
-        );
-      },
-    },
-    {
-      header: 'MSRP',
-      accessor: 'MSRP',
-      cell: (props) => {
-        const rowData = props.row.original;
-        // console.log("[Inventory.jsx Cell] MSRP Data:", rowData.MSRP);
-        return (
-          <div className="text-right">{typeof rowData.MSRP === 'number' ? `$${rowData.MSRP.toFixed(2)}` : 'N/A'}</div>
-        );
-      },
+      cell: (props) => (
+        <InventoryQtyPriceEditor
+          rowData={props.row.original}
+          patchMetrics={patchInventoryMetrics}
+        />
+      ),
     },
     {
       header: 'Category',
@@ -2020,14 +2124,7 @@ const Inventory = () => {
         const handlePrintLabel = (e) => {
           e.stopPropagation();
 
-          // Create basic product info object for label printing
-          const productInfo = {
-            name: rowData['Description'] || 'Unknown Product',
-            fnsku: rowData['Fn Sku'] || rowData['FNSKU'] || rowData._rawData?.fnsku || '',
-            location: rowData['Location'] || rowData._rawData?.location || 'UNASSIGNED',
-            item_number: rowData['Item Number'] || rowData._rawData?.item_number || ''
-          };
-
+          const productInfo = inventoryRowToLabelProductInfo(rowData);
           const printLabelHTML = createPrintLabelHTML(productInfo);
           const printWindow = openPrintWindow(printLabelHTML);
           if (printWindow) {
@@ -2064,20 +2161,6 @@ const Inventory = () => {
               </svg>
             </button>
             <button
-                onClick={(e) => { e.stopPropagation(); handleAdjustStock(rowData); }}
-                className="p-1 text-blue-600 hover:text-blue-800"
-                title="Adjust Stock"
-            >
-                <AdjustmentsHorizontalIcon className="h-5 w-5" />
-            </button>
-            <button
-                onClick={(e) => { e.stopPropagation(); handleViewDetails(rowData); }}
-                className="p-1 text-indigo-600 hover:text-indigo-800"
-                title="View Details"
-            >
-                <ChevronDownIcon className="h-5 w-5" />
-            </button>
-            <button
                 onClick={(e) => { 
                   e.stopPropagation(); 
                   handleDeleteItem(rowData); 
@@ -2094,29 +2177,30 @@ const Inventory = () => {
     },
   ];
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="text-center text-red-500 p-4">
-        {error}
-      </div>
-    );
-  }
-
   return (
     <div>
+      {error && (
+        <div
+          className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-800 dark:bg-red-950/40 dark:text-red-200"
+          role="alert"
+        >
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <span>{error}</span>
+            <Button variant="outline" className="shrink-0 self-start sm:self-auto" onClick={() => void loadInventoryData()}>
+              Retry
+            </Button>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-col md:flex-row items-start md:items-center justify-between mb-6 gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900 dark:text-white">Inventory</h1>
           <p className="text-gray-600 dark:text-gray-400">
             Track and manage stock levels across all locations
+            {augmentingList && (
+              <span className="ml-2 text-blue-600 dark:text-blue-400">Loading additional rows…</span>
+            )}
           </p>
         </div>
         
@@ -2143,28 +2227,10 @@ const Inventory = () => {
               className="flex items-center"
               onClick={handleDeleteAllFromInventoryList}
               disabled={isDeleting}
-              title="Hides every row in the current list from this page only. Does not delete products or scan cache."
+              title="Hides every row in the current loaded list (respects search). Does not delete products or scan cache."
             >
               <TrashIcon className="h-5 w-5 mr-2" />
               Remove all from list ({fullCombinedList.length})
-            </Button>
-          )}
-          <Button 
-            variant="outline" 
-            className="flex items-center"
-            onClick={handleExport}
-          >
-            <ArrowDownTrayIcon className="h-5 w-5 mr-2" />
-            Export page (CSV)
-          </Button>
-          {selectedItems.size > 0 && (
-            <Button 
-              variant="outline" 
-              className="flex items-center"
-              onClick={handleExportSelected}
-            >
-              <ArrowDownTrayIcon className="h-5 w-5 mr-2" />
-              Export selected (CSV)
             </Button>
           )}
           {selectedItems.size > 0 && (
@@ -2208,12 +2274,11 @@ const Inventory = () => {
             />
             <MagnifyingGlassIcon className="h-5 w-5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-2">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-2">
             <select
               value={shelfFilter}
               onChange={(e) => {
                 setShelfFilter(e.target.value);
-                setCurrentPage(1);
               }}
               className="px-3 py-2 border border-gray-300 rounded-md bg-white dark:bg-gray-800 dark:border-gray-600"
             >
@@ -2228,7 +2293,6 @@ const Inventory = () => {
               value={rowFilter}
               onChange={(e) => {
                 setRowFilter(e.target.value);
-                setCurrentPage(1);
               }}
               className="px-3 py-2 border border-gray-300 rounded-md bg-white dark:bg-gray-800 dark:border-gray-600"
             >
@@ -2243,7 +2307,6 @@ const Inventory = () => {
               value={bucketFilter}
               onChange={(e) => {
                 setBucketFilter(e.target.value);
-                setCurrentPage(1);
               }}
               className="px-3 py-2 border border-gray-300 rounded-md bg-white dark:bg-gray-800 dark:border-gray-600"
             >
@@ -2259,39 +2322,35 @@ const Inventory = () => {
             <Button variant="outline" onClick={handleResetFilters}>
               Reset filters
             </Button>
-            <Button
-              variant="outline"
-              onClick={handlePrintFilteredBasicLabels}
-              disabled={filteredInventoryList.length === 0}
-            >
-              Print filtered labels ({filteredInventoryList.length})
-            </Button>
           </div>
         </div>
         
-        {loading && products.length === 0 ? (
+        {loading && filteredInventoryList.length === 0 ? (
             <div className="flex items-center justify-center h-64">
                 <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
             </div>
-        ) : !loading && products.length === 0 && !error ? (
+        ) : !loading && filteredInventoryList.length === 0 && !error ? (
             <div className="text-center py-8 text-gray-500 dark:text-gray-400">
                 No inventory items found. Try a different search.
             </div>
         ) : (
             <>
               <Table 
-                  data={products}
+                  data={paginatedInventoryList}
                   columns={columns}
-                  loading={loading} 
-                  pagination={false} 
+                  loading={loading && filteredInventoryList.length === 0}
+                  pagination={false}
+                  virtualized
+                  getRowId={(row) => getInventoryRowKey(row)}
+                  estimatedRowHeight={176}
+                  virtualOverscan={10}
                   noDataMessage="No inventory items found. Try a different search."
-                  onRowClick={handleViewDetails}
               />
             </>
         )}
 
-        {!loading && totalItems > 0 && (
-          <div className="p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-t border-gray-200 dark:border-gray-700">
+        {!loading && filteredInventoryList.length > 0 && (
+          <div className="p-4 flex flex-col gap-4 border-t border-gray-200 dark:border-gray-700 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
             <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
               <label htmlFor="inventory-items-per-page" className="font-medium text-gray-700 dark:text-gray-300">
                 Rows per page
@@ -2300,7 +2359,7 @@ const Inventory = () => {
                 id="inventory-items-per-page"
                 value={itemsPerPage}
                 onChange={handleItemsPerPageChange}
-                className="border border-gray-300 dark:border-gray-600 rounded-md px-2 py-1.5 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 text-sm focus:ring-blue-500 focus:border-blue-500"
+                className="rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm text-gray-900 focus:border-blue-500 focus:ring-blue-500 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100"
               >
                 {INVENTORY_PAGE_SIZE_OPTIONS.map((n) => (
                   <option key={n} value={n}>
@@ -2309,16 +2368,24 @@ const Inventory = () => {
                 ))}
               </select>
               <span className="text-gray-500 dark:text-gray-500">
-                Showing {(currentPage - 1) * itemsPerPage + 1}–
-                {Math.min(currentPage * itemsPerPage, totalItems)} of {totalItems}
+                Showing{' '}
+                {totalFilteredCount === 0
+                  ? '0'
+                  : `${((currentPage - 1) * itemsPerPage + 1).toLocaleString()}–${Math.min(
+                      currentPage * itemsPerPage,
+                      totalFilteredCount
+                    ).toLocaleString()}`}{' '}
+                of {totalFilteredCount.toLocaleString()}
+                {augmentingList ? ' · updating list…' : ''}
               </span>
             </div>
             <Pagination
               currentPage={currentPage}
-              totalPages={Math.ceil(totalItems / itemsPerPage)}
+              totalPages={totalPages}
               onPageChange={handlePageChange}
-              totalItems={totalItems}
+              totalItems={totalFilteredCount}
               itemsPerPage={itemsPerPage}
+              className="mt-0"
             />
           </div>
         )}
@@ -2343,9 +2410,38 @@ const Inventory = () => {
               <option value="shopify">Shopify</option>
               <option value="whatnot">Whatnot</option>
               <option value="ebay">eBay (Product feed)</option>
+              <option value="commentsold">CommentSold (CSV, classic product import)</option>
               <option value="universal">Universal (all columns)</option>
             </select>
           </div>
+          {marketplaceExportFormat === 'commentsold' && (
+            <p className="text-xs text-gray-600 dark:text-gray-400 leading-relaxed">
+              Matches CommentSold&apos;s classic CSV import: public image URLs (comma-separated in{' '}
+              <span className="font-medium">Product Images</span>), no duplicate SKUs, and text fields
+              stripped of quotes, slashes, and commas. Required columns are included;{' '}
+              <span className="font-medium">Inventory Cost</span> uses your product cost when present,
+              otherwise 60% of retail as a placeholder—edit before import if needed. Official templates
+              and &quot;new product screen&quot; column names:{' '}
+              <a
+                href="https://help.commentsold.com/hc/en-us/articles/4403921966612-Import-Products-Using-CSV-Files-on-Classic-Product-Screens"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 dark:text-blue-400 underline"
+              >
+                Classic import help
+              </a>
+              {' · '}
+              <a
+                href="https://help.commentsold.com/hc/en-us/articles/43440522690452-Import-Products-Using-a-CSV-File-on-New-Product-Screens"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 dark:text-blue-400 underline"
+              >
+                New product screens
+              </a>
+              .
+            </p>
+          )}
           {marketplaceExportFormat === 'universal' && (
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">File type</label>
@@ -2383,7 +2479,7 @@ const Inventory = () => {
                   className="rounded border-gray-300"
                 />
                 <span className="text-gray-700 dark:text-gray-300">
-                  Current page ({products.length} of {itemsPerPage} rows shown)
+                  Current page ({paginatedInventoryList.length} of {itemsPerPage} rows on this page)
                 </span>
               </label>
               <label className="flex items-center gap-2 cursor-pointer">

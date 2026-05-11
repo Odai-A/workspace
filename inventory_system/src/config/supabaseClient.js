@@ -102,8 +102,10 @@ export const inventoryService = {
     }
     const tenantIdForDebug = await getCurrentTenantId();
     const inventoryRunId = `inv-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    // #region agent log
-    fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:inventoryRunId,hypothesisId:'H3',location:'supabaseClient.js:getInventory:start',message:'Inventory fetch started',data:{userId,tenantId:tenantIdForDebug,page:options.page||1,limit:options.limit||25},timestamp:Date.now()})}).catch(()=>{});
+    // #region agent log (localhost ingest only — skip in prod to avoid slow failed network calls)
+    if (import.meta.env.DEV) {
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:inventoryRunId,hypothesisId:'H3',location:'supabaseClient.js:getInventory:start',message:'Inventory fetch started',data:{userId,tenantId:tenantIdForDebug,page:options.page||1,limit:options.limit||25},timestamp:Date.now()})}).catch(()=>{});
+    }
     // #endregion
     
     const { 
@@ -123,23 +125,17 @@ export const inventoryService = {
     // even if RLS/policies are temporarily misconfigured.
     query = query.eq('user_id', userId);
     // #region agent log
-    fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:inventoryRunId,hypothesisId:'H8',location:'supabaseClient.js:getInventory:scope',message:'Inventory query scope before execution',data:{scopeMode:'explicit_user_id_filter',expectsRlsIsolation:true,userId},timestamp:Date.now()})}).catch(()=>{});
+    if (import.meta.env.DEV) {
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:inventoryRunId,hypothesisId:'H8',location:'supabaseClient.js:getInventory:scope',message:'Inventory query scope before execution',data:{scopeMode:'explicit_user_id_filter',expectsRlsIsolation:true,userId},timestamp:Date.now()})}).catch(()=>{});
+    }
     // #endregion
 
-    // Add search functionality
+    // PostgREST: quote ilike patterns and only use columns that exist on `inventory`
+    // (unquoted `X-Z ASIN`-style names break `.or()` parsing; `asin` may be absent on inventory.)
     if (searchQuery && searchQuery.trim()) {
-      const searchTerm = `%${searchQuery.trim()}%`;
-      // Search in name, sku, asin, and other relevant fields
-      // Build OR conditions for all searchable fields
-      const searchConditions = [
-        `name.ilike.${searchTerm}`,
-        `sku.ilike.${searchTerm}`
-      ];
-      
-      // Add ASIN search if the column exists (try-catch won't work here, so we'll include it)
-      // If ASIN column doesn't exist, Supabase will ignore it or we can handle the error
-      searchConditions.push(`asin.ilike.${searchTerm}`);
-      
+      const inner = String(searchQuery.trim()).replace(/\\/g, '\\\\').replace(/"/g, '""');
+      const pat = `"%${inner}%"`;
+      const searchConditions = [`name.ilike.${pat}`, `sku.ilike.${pat}`];
       query = query.or(searchConditions.join(','));
     }
     
@@ -151,14 +147,18 @@ export const inventoryService = {
     if (error) {
       console.error('Error fetching inventory:', error);
       // #region agent log
-      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:inventoryRunId,hypothesisId:'H4',location:'supabaseClient.js:getInventory:error',message:'Inventory fetch failed',data:{message:(error?.message||'').slice(0,180),code:error?.code||''},timestamp:Date.now()})}).catch(()=>{});
+      if (import.meta.env.DEV) {
+        fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:inventoryRunId,hypothesisId:'H4',location:'supabaseClient.js:getInventory:error',message:'Inventory fetch failed',data:{message:(error?.message||'').slice(0,180),code:error?.code||''},timestamp:Date.now()})}).catch(()=>{});
+      }
       // #endregion
       return { data: [], totalCount: 0 };
     }
     const ownerSample = [...new Set((data || []).map((row) => row?.user_id || 'null'))].slice(0, 5);
     const tenantSample = [...new Set((data || []).map((row) => row?.tenant_id || 'null'))].slice(0, 5);
     // #region agent log
-    fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:inventoryRunId,hypothesisId:'H5',location:'supabaseClient.js:getInventory:result',message:'Inventory fetch completed',data:{returnedRows:(data||[]).length,totalCount:count||0,ownerSample,tenantSample},timestamp:Date.now()})}).catch(()=>{});
+    if (import.meta.env.DEV) {
+      fetch('http://127.0.0.1:7401/ingest/d9ae4633-7ca7-4e61-9841-2769087dbd8c',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'bff232'},body:JSON.stringify({sessionId:'bff232',runId:inventoryRunId,hypothesisId:'H5',location:'supabaseClient.js:getInventory:result',message:'Inventory fetch completed',data:{returnedRows:(data||[]).length,totalCount:count||0,ownerSample,tenantSample},timestamp:Date.now()})}).catch(()=>{});
+    }
     // #endregion
     
     return { 
@@ -171,6 +171,79 @@ export const inventoryService = {
    * Get inventory item by SKU for the current user
    * Automatically filters by current user's ID
    */
+  /**
+   * Set absolute quantity and/or price on an inventory row (no add-to-quantity merge).
+   * @param {string|number} id - inventory.id
+   * @param {{ quantity?: number, price?: number }} fields
+   * @returns {Promise<{ success: boolean, data?: object, error?: string }>}
+   */
+  async patchInventoryItem(id, fields = {}) {
+    if (!supabaseUrl || !supabaseAnonKey) {
+      return { success: false, error: 'Supabase not initialized' };
+    }
+    const userId = await getCurrentUserId();
+    if (!userId) {
+      return { success: false, error: 'User must be logged in' };
+    }
+    let rowId = id != null ? String(id).trim() : '';
+    if (!rowId) {
+      return { success: false, error: 'Invalid inventory id' };
+    }
+    if (rowId.length === 36 && rowId.includes('-')) {
+      rowId = rowId.toLowerCase();
+    }
+    const updates = {};
+    if (fields.quantity !== undefined) {
+      const q = Number(fields.quantity);
+      if (!Number.isFinite(q) || q < 0) {
+        return { success: false, error: 'Quantity must be a non-negative number' };
+      }
+      updates.quantity = Math.floor(q);
+    }
+    if (fields.price !== undefined) {
+      const p = Number(fields.price);
+      if (!Number.isFinite(p) || p < 0) {
+        return { success: false, error: 'Price must be a non-negative number' };
+      }
+      updates.price = p;
+    }
+    if (Object.keys(updates).length === 0) {
+      return { success: false, error: 'No fields to update' };
+    }
+    try {
+      let { data, error } = await supabase
+        .from('inventory')
+        .update(updates)
+        .eq('id', rowId)
+        .select()
+        .maybeSingle();
+
+      if (error) {
+        return { success: false, error: formatSupabaseError(error) };
+      }
+      if (data) {
+        return { success: true, data };
+      }
+      ({ data, error } = await supabase
+        .from('inventory')
+        .update(updates)
+        .eq('id', rowId)
+        .eq('user_id', userId)
+        .select()
+        .maybeSingle());
+
+      if (error) {
+        return { success: false, error: formatSupabaseError(error) };
+      }
+      if (data) {
+        return { success: true, data };
+      }
+      return { success: false, error: 'Could not update this inventory row (not found or no permission).' };
+    } catch (e) {
+      return { success: false, error: formatSupabaseError(e) };
+    }
+  },
+
   async getInventoryBySku(skuValue) {
     if (!supabaseUrl || !supabaseAnonKey) {
       console.error("Supabase client not initialized.");

@@ -64,10 +64,10 @@ const Pagination = ({
         <button
           onClick={handlePrevious}
           disabled={currentPage <= 1}
-          className={`relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium ${
+          className={`relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium dark:border-gray-600 dark:bg-gray-800 ${
             currentPage <= 1 
-              ? 'text-gray-300 cursor-not-allowed' 
-              : 'text-gray-500 hover:bg-gray-50'
+              ? 'text-gray-300 cursor-not-allowed dark:text-gray-600' 
+              : 'text-gray-500 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700'
           }`}
         >
           <span className="sr-only">Previous</span>
@@ -79,12 +79,12 @@ const Pagination = ({
             key={index}
             onClick={() => handlePageClick(page)}
             disabled={page === '...'}
-            className={`relative inline-flex items-center px-4 py-2 border text-sm font-medium ${
+            className={`relative inline-flex items-center px-4 py-2 border text-sm font-medium dark:border-gray-600 ${
               page === currentPage
-                ? 'z-10 bg-blue-50 border-blue-500 text-blue-600'
+                ? 'z-10 border-blue-500 bg-blue-50 text-blue-600 dark:bg-blue-950/50 dark:text-blue-300'
                 : page === '...'
-                ? 'bg-white border-gray-300 text-gray-500 cursor-default'
-                : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50'
+                ? 'cursor-default border-gray-300 bg-white text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+                : 'border-gray-300 bg-white text-gray-500 hover:bg-gray-50 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700'
             }`}
           >
             {page}
@@ -94,10 +94,10 @@ const Pagination = ({
         <button
           onClick={handleNext}
           disabled={currentPage >= totalPages}
-          className={`relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium ${
+          className={`relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium dark:border-gray-600 dark:bg-gray-800 ${
             currentPage >= totalPages 
-              ? 'text-gray-300 cursor-not-allowed' 
-              : 'text-gray-500 hover:bg-gray-50'
+              ? 'cursor-not-allowed text-gray-300 dark:text-gray-600' 
+              : 'text-gray-500 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700'
           }`}
         >
           <span className="sr-only">Next</span>

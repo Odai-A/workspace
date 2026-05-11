@@ -440,7 +440,7 @@ export const externalApiService = {
     console.log('🚀 [DEBUG] Extracted ASIN:', asin);
     
     // Attempt to extract richer data from scanData, with fallbacks
-    const price = parseFloat(scanData?.price || scanData?.listPrice || scanData?.msrp || 0).toFixed(2);
+    const price = parseFloat(scanData?.listPrice || scanData?.msrp || scanData?.price || 0).toFixed(2);
     const category = scanData?.category || scanData?.categories?.[0]?.name || 'External API';
     const imageUrl = scanData?.imageUrl || scanData?.image || scanData?.mainImage?.url || scanData?.images?.[0]?.src || '';
     const upc = scanData?.upc || '';

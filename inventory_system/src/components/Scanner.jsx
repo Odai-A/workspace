@@ -15,6 +15,7 @@ import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, C
 import { mockService } from '../services/mockData';
 import { useAuth } from '../contexts/AuthContext';
 import { getApiUrl, getApiEndpoint } from '../utils/apiConfig';
+import { rainforestRetailPriceFromProduct } from '../utils/amazonRetailPrice';
 import {
   addShelvesToArea,
   getLocationOptions,
@@ -117,6 +118,55 @@ const clearNegativeCache = (code) => {
   if (!key) return;
   __negativeLookupCache.delete(key);
 };
+
+/**
+ * Prefer `/api/scan` top-level `category`; if empty or generic, read Rainforest `product` from `raw`
+ * or category / categories[] on `raw.scan_data` (FNSKU queue payloads).
+ */
+function categoryFromScanApiPayload(r) {
+  if (!r || typeof r !== 'object') return '';
+  const top = String(r.category || '').trim();
+  if (top && top.toLowerCase() !== 'external api') return top.slice(0, 200);
+  const raw = r.raw && typeof r.raw === 'object' ? r.raw : null;
+  const rf = raw?.rainforest_data && typeof raw.rainforest_data === 'object' ? raw.rainforest_data : null;
+  let product = null;
+  if (rf) {
+    const fr = rf.full_response;
+    if (fr && typeof fr === 'object' && fr.product && typeof fr.product === 'object') {
+      product = fr.product;
+    }
+  }
+  if (product) {
+    const cat = product.category;
+    if (cat && typeof cat === 'object' && cat.name) return String(cat.name).trim().slice(0, 200);
+    if (typeof cat === 'string' && cat.trim()) return cat.trim().slice(0, 200);
+    const cats = product.categories;
+    if (Array.isArray(cats) && cats.length) {
+      const parts = cats
+        .map((x) => (x && typeof x === 'object' ? x.name : x))
+        .filter(Boolean)
+        .map((s) => String(s).trim())
+        .filter(Boolean);
+      if (parts.length) return parts.join(' > ').slice(0, 200);
+    }
+  }
+  const sd = raw?.scan_data && typeof raw.scan_data === 'object' ? raw.scan_data : null;
+  if (sd) {
+    let v = sd.category;
+    if (v && typeof v === 'object' && v.name) v = v.name;
+    if (typeof v === 'string' && v.trim()) return v.trim().slice(0, 200);
+    const sc = sd.categories;
+    if (Array.isArray(sc) && sc.length) {
+      const parts = sc
+        .map((c) => (c && typeof c === 'object' ? c.name : c))
+        .filter(Boolean)
+        .map((s) => String(s).trim())
+        .filter(Boolean);
+      if (parts.length) return parts.join(' > ').slice(0, 200);
+    }
+  }
+  return top;
+}
 
 const dbgIngestScan = (hypothesisId, location, message, data = {}) => {
   // #region agent log
@@ -923,7 +973,7 @@ const Scanner = () => {
           videos_count: videosCount,
           price: apiResult.price || '',
           brand: apiResult.brand || '',
-          category: apiResult.category || '',
+          category: categoryFromScanApiPayload(apiResult),
           description: apiResult.description || '',
           upc: apiResult.upc || '',
           amazon_url: apiResult.amazon_url || '',
@@ -1199,7 +1249,7 @@ const Scanner = () => {
       videos_count: apiResult?.videos_count || allVideos.length,
       price: apiResult?.price || '',
       brand: apiResult?.brand || '',
-      category: apiResult?.category || '',
+      category: categoryFromScanApiPayload(apiResult),
       description: apiResult?.description || '',
       upc: apiResult?.upc || '',
       amazon_url: apiResult?.amazon_url || '',
@@ -1702,7 +1752,7 @@ const Scanner = () => {
               videos_count: apiResult.videos_count || 0,
               price: apiResult.price || '',
               brand: apiResult.brand || '',
-              category: apiResult.category || '',
+              category: categoryFromScanApiPayload(apiResult),
               description: apiResult.description || '',
               upc: apiResult.upc || '',
               amazon_url: apiResult.amazon_url || '',
@@ -2115,12 +2165,13 @@ const Scanner = () => {
         // Primary image for backward compatibility
         const primaryImage = allImages[0] || '';
         
+        const retailPrice = rainforestRetailPriceFromProduct(product);
         return {
           title: product.title || '',
           image: primaryImage,  // Primary image for backward compatibility
           images: allImages,  // ALL images array
           images_count: allImages.length,
-          price: product.buybox_winner?.price?.value || product.price?.value || null,
+          price: retailPrice ?? product.buybox_winner?.price?.value ?? product.price?.value ?? null,
           rating: product.rating || null,
           reviews_count: product.reviews_total || null,
           brand: product.brand || '',
@@ -2200,9 +2251,6 @@ const Scanner = () => {
     toast.success("🖨️ Opening print dialog for 4x6 label");
   };
 
-  const BASIC_INVENTORY_LABEL_WIDTH = '1.59in';
-  const BASIC_INVENTORY_LABEL_HEIGHT = '1in';
-
   const stripLocationPrefixFromItemNumber = (itemNumber, location) => {
     const rawItem = String(itemNumber || '').trim();
     const rawLocation = String(location || '').trim();
@@ -2252,12 +2300,32 @@ const Scanner = () => {
           </div>`;
   };
 
+  /** Same destination logic as the 4×6 label: product page when ASIN exists, else Amazon search. */
+  const getAmazonProductUrlForQr = (p) => {
+    if (!p || typeof p !== 'object') return '';
+    if (p.asin) {
+      return `https://www.amazon.com/dp/${String(p.asin).trim()}`;
+    }
+    if (p.upc) return `https://www.amazon.com/s?k=${encodeURIComponent(String(p.upc).trim())}`;
+    if (p.fnsku) return `https://www.amazon.com/s?k=${encodeURIComponent(String(p.fnsku).trim())}`;
+    const fallback = String(getProductCodeForLabel(p) || '').trim();
+    if (fallback) return `https://www.amazon.com/s?k=${encodeURIComponent(fallback)}`;
+    return '';
+  };
+
   const createBarcodeLabelHTML = (product) => {
     const scanValue = getBarcodePayloadForPrint(product);
     const hasFnsku = !!getFnskuForBarcodeLabel(product);
     const productName = escapeHtml(product?.name || 'Product');
     const codeLabel = escapeHtml(scanValue || 'N/A');
     const barcodeValue = JSON.stringify(String(scanValue || ''));
+    const amazonUrl = getAmazonProductUrlForQr(product);
+    const qrSrc = amazonUrl
+      ? `https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(amazonUrl)}`
+      : '';
+    const qrBlock = qrSrc
+      ? `<div class="qr-wrap" title="Open on Amazon"><img class="label-qr" src="${qrSrc}" alt="Amazon product" /></div>`
+      : '';
     return `
       <!DOCTYPE html>
       <html>
@@ -2294,16 +2362,45 @@ const Scanner = () => {
               border: 1px solid #111827;
               overflow: hidden;
             }
+            .top-row {
+              display: flex;
+              flex-direction: row;
+              align-items: flex-start;
+              justify-content: space-between;
+              gap: 0.04in;
+              flex: 0 0 auto;
+              min-height: 0;
+              max-height: 0.28in;
+            }
             .title {
-              font-size: 7pt;
-              line-height: 1.1;
+              flex: 1;
+              min-width: 0;
+              font-size: 6.5pt;
+              line-height: 1.12;
               font-weight: 700;
-              white-space: nowrap;
               overflow: hidden;
-              text-overflow: ellipsis;
+              display: -webkit-box;
+              -webkit-line-clamp: 2;
+              -webkit-box-orient: vertical;
+              word-break: break-word;
+            }
+            .qr-wrap {
+              flex-shrink: 0;
+              width: 0.34in;
+              height: 0.34in;
+            }
+            .label-qr {
+              width: 0.34in;
+              height: 0.34in;
+              display: block;
+              object-fit: contain;
+              border: 1px solid #111827;
+              background: #fff;
             }
             .barcode-wrap {
-              height: 0.42in;
+              flex: 1 1 auto;
+              min-height: 0.28in;
+              max-height: 0.38in;
               display: flex;
               align-items: center;
               justify-content: center;
@@ -2314,7 +2411,7 @@ const Scanner = () => {
               height: 100%;
             }
             .code {
-              font-size: 8pt;
+              font-size: 7.5pt;
               font-weight: 700;
               text-align: center;
               line-height: 1;
@@ -2324,11 +2421,11 @@ const Scanner = () => {
               font-family: Consolas, "Courier New", monospace;
             }
             .fnsku-note {
-              font-size: 6pt;
+              font-size: 5.5pt;
               text-align: center;
               color: #374151;
-              margin-top: 0.02in;
-              line-height: 1.1;
+              margin-top: 0.01in;
+              line-height: 1.05;
             }
             .print-button {
               position: fixed;
@@ -2357,12 +2454,15 @@ const Scanner = () => {
             <button class="print-button" onclick="window.print()">Print Label</button>
           </div>
           <div class="label">
-            <div class="title">${productName}</div>
+            <div class="top-row">
+              <div class="title">${productName}</div>
+              ${qrBlock}
+            </div>
             <div class="barcode-wrap">
               <svg id="barcode"></svg>
             </div>
             <div class="code">${codeLabel}</div>
-            <div class="fnsku-note">${hasFnsku ? 'Barcode = FNSKU (scan to look up)' : 'Barcode = scan code (look up product)'}</div>
+            <div class="fnsku-note">${hasFnsku ? 'Barcode = FNSKU · QR = Amazon' : 'Barcode = scan code · QR = Amazon'}</div>
           </div>
           <script>
             (function () {
@@ -2373,8 +2473,8 @@ const Scanner = () => {
                   format: "CODE128",
                   displayValue: false,
                   margin: 0,
-                  height: 34,
-                  width: 1.2
+                  height: 28,
+                  width: 1.15
                 });
               } catch (e) {
                 const el = document.getElementById("barcode");
@@ -3133,184 +3233,218 @@ const Scanner = () => {
     `;
   };
 
+  /** Same visual layout as {@link createBarcodeLabelHTML} (title, Code128, human-readable code, Amazon QR, footer note), one page per queue item. */
   const createBatchBarcodeLabelHTML = (batchItems) => {
-    const fallbackLocation = composeStorageLocation(batchInventoryLocation, batchInventoryBucket) || 'UNASSIGNED';
-    const normalizedItems = (batchItems || []).map((item) => ({
-      name: item?.product?.name || 'Unknown Product',
-      fnsku: item?.product?.fnsku || item?.product?.code || item?.code || '',
-      location: item?.product?.location || fallbackLocation,
-      item_number: item?.product?.item_number || item?.product?.itemNumber || '',
-    }));
-    const labels = normalizedItems.map((item) => {
-      const fnskuRaw = String(item?.fnsku || '').trim().toUpperCase();
-      return {
-        name: escapeHtml(truncateToWordCount(item?.name || item?.Description || 'Unknown Product', 5)),
-        fnskuRaw,
-        fnskuLine: escapeHtml(fnskuRaw || 'N/A'),
-        location: escapeHtml(item?.location || item?.Location || item?._rawData?.location || 'UNASSIGNED'),
-        itemNumber: escapeHtml(
-          stripLocationPrefixFromItemNumber(
-            item?.item_number || item?.itemNumber || item?.['Item Number'] || item?._rawData?.item_number || 'N/A',
-            item?.location || item?.Location || item?._rawData?.location || ''
-          ) || 'N/A'
-        ),
-      };
-    });
+    const barcodeSpecs = [];
+    const pages = [];
+    let barcodeIndex = 0;
+    for (const item of batchItems || []) {
+      const p = item?.product || {};
+      const scanValue =
+        getBarcodePayloadForPrint(p) || String(item?.code || '').trim().toUpperCase();
+      if (!scanValue) continue;
 
-    if (labels.length === 0) {
+      const hasFnsku = !!getFnskuForBarcodeLabel(p);
+      const productName = escapeHtml(p?.name || 'Product');
+      const codeLabel = escapeHtml(scanValue);
+      const amazonUrl = getAmazonProductUrlForQr(p);
+      const qrSrc = amazonUrl
+        ? `https://api.qrserver.com/v1/create-qr-code/?size=120x120&data=${encodeURIComponent(amazonUrl)}`
+        : '';
+      const qrBlock = qrSrc
+        ? `<div class="qr-wrap" title="Open on Amazon"><img class="label-qr" src="${qrSrc}" alt="Amazon product" /></div>`
+        : '';
+
+      const id = `batch-barcode-${barcodeIndex}`;
+      barcodeIndex += 1;
+      barcodeSpecs.push({ id, value: String(scanValue) });
+
+      pages.push(`
+      <div class="label-page">
+        <div class="label">
+          <div class="top-row">
+            <div class="title">${productName}</div>
+            ${qrBlock}
+          </div>
+          <div class="barcode-wrap">
+            <svg id="${id}"></svg>
+          </div>
+          <div class="code">${codeLabel}</div>
+          <div class="fnsku-note">${hasFnsku ? 'Barcode = FNSKU · QR = Amazon' : 'Barcode = scan code · QR = Amazon'}</div>
+        </div>
+      </div>`);
+    }
+
+    if (pages.length === 0) {
       return '<html><body><p>No labels to print.</p></body></html>';
     }
 
-    const pages = labels.map((label) => `
-      <div class="label-root">
-        <div class="label-frame">
-          <div class="label-title">${label.name}</div>
-          <div class="label-meta">FNSKU: ${label.fnskuLine}</div>
-          ${label.fnskuRaw ? `<div class="inv-barcode-wrap"><svg class="inv-fnsku-barcode" data-bc="${escapeHtml(label.fnskuRaw)}"></svg></div>` : ''}
-          <div class="label-meta label-meta-strong">LOC: ${label.location}</div>
-          <div class="label-meta label-meta-strong">ITEM: ${label.itemNumber}</div>
-        </div>
-      </div>
-    `).join('');
+    const specsJson = JSON.stringify(barcodeSpecs);
 
     return `
       <!DOCTYPE html>
       <html>
         <head>
-          <title>Inventory Labels</title>
+          <title>Barcode Labels</title>
           <style>
             @page {
-              size: ${BASIC_INVENTORY_LABEL_WIDTH} ${BASIC_INVENTORY_LABEL_HEIGHT};
+              size: 2in 1in;
               margin: 0;
             }
-
-            * { box-sizing: border-box; font-family: Arial, sans-serif; }
+            * {
+              box-sizing: border-box;
+              font-family: Arial, sans-serif;
+            }
             html, body {
               margin: 0;
               padding: 0;
+              width: 2in;
               background: #fff;
             }
-
-            .label-root {
-              width: ${BASIC_INVENTORY_LABEL_WIDTH};
-              height: ${BASIC_INVENTORY_LABEL_HEIGHT};
+            .label-page {
+              width: 2in;
+              height: 1in;
               margin: 0;
               padding: 0;
               overflow: hidden;
               page-break-after: always;
               break-after: page;
-              position: relative;
             }
-
-            .label-root:last-child {
+            .label-page:last-child {
               page-break-after: auto;
               break-after: auto;
             }
-
-            .label-frame {
-              position: absolute;
-              inset: 0;
-              padding: 0.045in 0.04in 0.035in 0.025in;
+            .label {
+              width: 2in;
+              height: 1in;
+              padding: 0.04in;
               display: flex;
               flex-direction: column;
-              justify-content: flex-start;
-              align-items: stretch;
-              text-align: left;
-              gap: 0.012in;
+              justify-content: space-between;
+              border: 1px solid #111827;
               overflow: hidden;
             }
-
-            .label-title {
-              font-size: 7.75pt;
-              line-height: 1.38;
-              font-weight: 600;
-              margin: 0;
+            .top-row {
+              display: flex;
+              flex-direction: row;
+              align-items: flex-start;
+              justify-content: space-between;
+              gap: 0.04in;
               flex: 0 0 auto;
+              min-height: 0;
+              max-height: 0.28in;
+            }
+            .title {
+              flex: 1;
+              min-width: 0;
+              font-size: 6.5pt;
+              line-height: 1.12;
+              font-weight: 700;
+              overflow: hidden;
               display: -webkit-box;
               -webkit-line-clamp: 2;
               -webkit-box-orient: vertical;
-              overflow: hidden;
               word-break: break-word;
-              min-height: calc(2 * 1.38em);
-              max-height: calc(2 * 1.38em);
             }
-
-            .label-meta {
-              font-size: 8.5pt;
-              line-height: 1.15;
-              margin: 0;
+            .qr-wrap {
+              flex-shrink: 0;
+              width: 0.34in;
+              height: 0.34in;
+            }
+            .label-qr {
+              width: 0.34in;
+              height: 0.34in;
+              display: block;
+              object-fit: contain;
+              border: 1px solid #111827;
+              background: #fff;
+            }
+            .barcode-wrap {
+              flex: 1 1 auto;
+              min-height: 0.28in;
+              max-height: 0.38in;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              overflow: hidden;
+            }
+            .barcode-wrap svg {
+              width: 100%;
+              height: 100%;
+            }
+            .code {
+              font-size: 7.5pt;
+              font-weight: 700;
+              text-align: center;
+              line-height: 1;
               white-space: nowrap;
               overflow: hidden;
               text-overflow: ellipsis;
-              font-weight: 500;
+              font-family: Consolas, "Courier New", monospace;
             }
-
-            .label-meta-strong {
-              font-size: 10.4pt;
-              line-height: 1.16;
-              font-weight: 600;
+            .fnsku-note {
+              font-size: 5.5pt;
+              text-align: center;
+              color: #374151;
+              margin-top: 0.01in;
+              line-height: 1.05;
             }
-
-            .inv-barcode-wrap {
-              flex: 0 0 auto;
-              display: flex;
-              justify-content: flex-start;
-              align-items: center;
-              max-height: 0.24in;
-              min-height: 0.16in;
-              overflow: hidden;
-              margin: 0.008in 0;
+            .print-button {
+              position: fixed;
+              top: 12px;
+              right: 12px;
+              padding: 8px 12px;
+              border: none;
+              border-radius: 6px;
+              background: #2563eb;
+              color: #fff;
+              cursor: pointer;
+              z-index: 1000;
             }
-            .inv-barcode-wrap svg {
-              max-width: 100%;
-              height: auto;
-              display: block;
-            }
-
             @media print {
+              .no-print { display: none; }
               html, body {
-                width: ${BASIC_INVENTORY_LABEL_WIDTH} !important;
+                width: 2in !important;
                 margin: 0 !important;
                 padding: 0 !important;
-                overflow: visible !important;
               }
-
-              body {
-                width: auto !important;
-                height: auto !important;
-              }
-
-              .label-root {
-                transform: none !important;
-                zoom: 1 !important;
-                page-break-inside: avoid !important;
-                break-inside: avoid !important;
+              .label-page {
+                page-break-inside: avoid;
+                break-inside: avoid;
               }
             }
           </style>
           <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
         </head>
         <body>
-          ${pages}
+          <div class="no-print">
+            <button class="print-button" type="button" onclick="window.print()">Print Label</button>
+          </div>
+          ${pages.join('')}
           <script>
             (function () {
+              var specs = ${specsJson};
               function init() {
                 if (typeof JsBarcode === 'undefined') {
                   setTimeout(init, 40);
                   return;
                 }
-                document.querySelectorAll('.inv-fnsku-barcode').forEach(function (svg) {
-                  var v = svg.getAttribute('data-bc');
-                  if (!v) return;
+                specs.forEach(function (s) {
+                  if (!s || !s.value) return;
                   try {
-                    JsBarcode(svg, v, {
+                    JsBarcode('#' + s.id, s.value, {
                       format: 'CODE128',
                       displayValue: false,
                       margin: 0,
-                      height: 18,
-                      width: 0.92
+                      height: 28,
+                      width: 1.15
                     });
-                  } catch (e) {}
+                  } catch (e) {
+                    var el = document.getElementById(s.id);
+                    if (el) {
+                      el.outerHTML = '<div style="font-size:8pt;color:#b91c1c;text-align:center;">Invalid barcode value</div>';
+                    }
+                  }
                 });
               }
               init();
@@ -4227,7 +4361,9 @@ const Scanner = () => {
     const validItems = batchQueue.filter(item => {
       if (!item.product) return false;
       if (item.isProcessing || item.hasFailed) return false;
-      return getProductCodeForLabel(item.product) || item.code;
+      const scan =
+        getBarcodePayloadForPrint(item.product) || String(item?.code || '').trim();
+      return !!scan;
     }).sort((a, b) => (a.sequence || 0) - (b.sequence || 0));
 
     if (validItems.length === 0) {
@@ -4750,10 +4886,11 @@ const Scanner = () => {
               type="button"
               onClick={handlePrintAllBatchBarcode}
               disabled={isPrintingBatchBarcode || isPrintingBatch || isBulkAddingBatchToInventory || batchEnrichAllRunning}
-              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50"
+              title="Code128 + Amazon QR for each ready item in the queue"
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-2 text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <PrinterIcon className="-ml-1 mr-2 h-5 w-5" />
-              {isPrintingBatchBarcode ? 'Printing barcodes...' : `Print Barcode Labels (${batchQueue.length})`}
+              <PrinterIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
+              {isPrintingBatchBarcode ? 'Opening print…' : 'Print barcode label'}
             </button>
             <button
               type="button"
@@ -4871,7 +5008,9 @@ const Scanner = () => {
       {/* Batch Queue Display */}
       {batchMode && batchQueue.length > 0 && (
         <div className="mb-6 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-md p-4">
-          <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-3">Batch Queue ({batchQueue.length} items)</h3>
+          <h3 className="text-lg font-semibold text-gray-800 dark:text-gray-200 mb-3">
+            Batch Queue ({batchQueue.length} items)
+          </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-64 overflow-y-auto">
             {batchQueue.map((item) => (
               <div 
@@ -4967,6 +5106,18 @@ const Scanner = () => {
                     ) : (
                       'Fetch images & details (Amazon API)'
                     )}
+                  </button>
+                )}
+                {item.product && !item.isProcessing && !item.hasFailed && (
+                  <button
+                    type="button"
+                    onClick={() => handlePrintBarcodeLabel(item.product)}
+                    disabled={!getBarcodePayloadForPrint(item.product)}
+                    title="Same small label as single scan: Code128 + Amazon QR"
+                    className="mt-2 w-full inline-flex items-center justify-center gap-1.5 px-2 py-1.5 text-xs font-medium rounded-md text-white bg-green-600 hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <PrinterIcon className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    Print barcode label
                   </button>
                 )}
               </div>

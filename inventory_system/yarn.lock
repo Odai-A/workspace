@@ -966,22 +966,22 @@
   dependencies:
     "@tanstack/table-core" "8.21.3"
 
-"@tanstack/react-virtual@^3.13.6":
-  version "3.13.8"
-  resolved "https://registry.npmjs.org/@tanstack/react-virtual/-/react-virtual-3.13.8.tgz"
-  integrity sha512-meS2AanUg50f3FBSNoAdBSRAh8uS0ue01qm7zrw65KGJtiXB9QXfybqZwkh4uFpRv2iX/eu5tjcH5wqUpwYLPg==
+"@tanstack/react-virtual@^3.13.24", "@tanstack/react-virtual@^3.13.6":
+  version "3.13.24"
+  resolved "https://registry.npmjs.org/@tanstack/react-virtual/-/react-virtual-3.13.24.tgz"
+  integrity sha512-aIJvz5OSkhNIhZIpYivrxrPTKYsjW9Uzy+sP/mx0S3sev2HyvPb7xmjbYvokzEpfgYHy/HjzJ2zFAETuUfgCpg==
   dependencies:
-    "@tanstack/virtual-core" "3.13.8"
+    "@tanstack/virtual-core" "3.14.0"
 
 "@tanstack/table-core@8.21.3":
   version "8.21.3"
   resolved "https://registry.npmjs.org/@tanstack/table-core/-/table-core-8.21.3.tgz"
   integrity sha512-ldZXEhOBb8Is7xLs01fR3YEc3DERiz5silj8tnGkFZytt1abEvl/GhUmCE0PMLaMPTa3Jk4HbKmRlHmu+gCftg==
 
-"@tanstack/virtual-core@3.13.8":
-  version "3.13.8"
-  resolved "https://registry.npmjs.org/@tanstack/virtual-core/-/virtual-core-3.13.8.tgz"
-  integrity sha512-BT6w89Hqy7YKaWewYzmecXQzcJh6HTBbKYJIIkMaNU49DZ06LoTV3z32DWWEdUsgW6n1xTmwTLs4GtWrZC261w==
+"@tanstack/virtual-core@3.14.0":
+  version "3.14.0"
+  resolved "https://registry.npmjs.org/@tanstack/virtual-core/-/virtual-core-3.14.0.tgz"
+  integrity sha512-JLANqGy/D6k4Ujmh8Tr25lGimuOXNiaVyXaCAZS0W+1390sADdGnyUdSWNIfd49gebtIxGMij4IktRVzrdr12Q==
 
 "@types/babel__core@^7.20.5":
   version "7.20.5"

@@ -1,6 +1,6 @@
 /**
  * Marketplace export: normalize inventory/manifest products and export as
- * Facebook, Shopify, Whatnot, or Universal CSV/XLSX for bulk upload.
+ * Facebook, Shopify, Whatnot, CommentSold, eBay, or Universal CSV/XLSX for bulk upload.
  */
 
 import * as XLSX from 'xlsx';
@@ -116,7 +116,7 @@ export function collectProductMediaUrls(item) {
 /**
  * Normalize a product row from Inventory page (inventory + manifest shape) to canonical fields.
  * @param {Object} item - Row from combined products list (Description, Fn Sku, B00 Asin, MSRP, etc.)
- * @returns {Object} Canonical row: id, title, description, sku, asin, fnsku, upc, price, quantity, category, condition, availability, image_url, brand, location, images
+ * @returns {Object} Canonical row: id, title, description, sku, asin, fnsku, upc, price, cost, quantity, category, condition, availability, image_url, brand, location, images
  */
 export function normalizeProductRow(item) {
   const title = (item.name ?? item.title ?? item['Description'] ?? '').trim() || 'Untitled Product';
@@ -127,6 +127,9 @@ export function normalizeProductRow(item) {
   const quantity = typeof item.Quantity === 'number' ? item.Quantity : (item.quantity != null ? Number(item.quantity) : 0);
   const priceNum = typeof item.MSRP === 'number' ? item.MSRP : (item.price != null ? parseFloat(item.price) : 0);
   const price = Number.isFinite(priceNum) ? priceNum : 0;
+  const costRaw = item.cost ?? item.Cost ?? item._rawData?.cost;
+  const costNum = costRaw != null && costRaw !== '' ? parseFloat(costRaw) : NaN;
+  const cost = Number.isFinite(costNum) ? costNum : null;
   const category = (item.Category ?? item.category ?? '').trim() || 'Uncategorized';
   const rawCondition = (item._rawData?.condition ?? item.condition ?? '').toString().toLowerCase();
   const location = (item.Location ?? item.location ?? '').trim() || '';
@@ -160,6 +163,7 @@ export function normalizeProductRow(item) {
     images: images.map(coalesceMediaUrl).filter(Boolean),
     brand: (item.brand ?? '').trim() || '',
     location,
+    cost,
   };
 }
 
@@ -182,6 +186,104 @@ function escapeCsvCell(value) {
     return `"${s.replace(/"/g, '""')}"`;
   }
   return s;
+}
+
+/**
+ * CommentSold warns that names/descriptions should avoid characters like quotes and slashes.
+ * Image URLs are left unchanged.
+ */
+function sanitizeCommentSoldText(value, maxLen) {
+  if (value == null) return '';
+  let s = String(value)
+    .replace(/\r\n|\r|\n/g, ' ')
+    .replace(/["'`]/g, '')
+    .replace(/[/\\]/g, '-')
+    .replace(/,/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (maxLen != null && s.length > maxLen) s = s.slice(0, maxLen);
+  return s;
+}
+
+function sanitizeCommentSoldSku(value) {
+  if (value == null) return '';
+  return String(value)
+    .replace(/["'\r\n]/g, '')
+    .replace(/\s+/g, '')
+    .slice(0, 80);
+}
+
+function takeUniqueSku(base, used) {
+  let s = (base || 'item').trim() || 'item';
+  if (!used.has(s)) {
+    used.add(s);
+    return s;
+  }
+  let n = 1;
+  let candidate;
+  do {
+    n += 1;
+    candidate = `${s}-${n}`;
+  } while (used.has(candidate));
+  used.add(candidate);
+  return candidate;
+}
+
+/**
+ * CommentSold classic product screen CSV import.
+ * @see https://help.commentsold.com/hc/en-us/articles/4403921966612-Import-Products-Using-CSV-Files-on-Classic-Product-Screens
+ *
+ * Requirements (per CommentSold): public image URLs (comma-separated for multiple images),
+ * no duplicate SKUs in the file, avoid special characters in text fields, mandatory columns
+ * include Product Name, Product SKU/Style #, Product Charge Tax (1/0), Product Received (1/0),
+ * Product Best Selling (1/0), Inventory Quantity, Inventory Retail Price, Inventory Cost.
+ * Headings may be in any order; this export uses a fixed column order for readability.
+ *
+ * If your account uses new product screens, use CommentSold's CSV converter or headers
+ * SKU/Style, Retail, Cost instead — see new product import article.
+ */
+export function toCommentSoldCSV(canonicalRows) {
+  const headers = [
+    'Product Name',
+    'Product Description',
+    'Product SKU/Style #',
+    'Product Brand',
+    'Product Charge Tax',
+    'Product Received',
+    'Product Best Selling',
+    'Product Categories',
+    'Product Images',
+    'Inventory Quantity',
+    'Inventory Retail Price',
+    'Inventory Cost',
+  ];
+  const usedSku = new Set();
+  const rows = canonicalRows.map((r) => {
+    const skuBase = sanitizeCommentSoldSku(r.sku || r.id || r.asin || 'item') || 'item';
+    const sku = takeUniqueSku(skuBase, usedSku);
+    const retail = Number.isFinite(r.price) ? Math.max(0, Number(r.price)) : 0;
+    const costFromRow = r.cost != null && Number.isFinite(r.cost) ? Math.max(0, Number(r.cost)) : null;
+    const cost = costFromRow != null ? costFromRow : Math.round(retail * 0.6 * 100) / 100;
+    const allImages = (r.images || []).map(coalesceMediaUrl).filter(Boolean);
+    const qty = Math.max(0, Math.floor(Number(r.quantity) || 0));
+    return {
+      'Product Name': sanitizeCommentSoldText(r.title, 500) || 'Product',
+      'Product Description': sanitizeCommentSoldText(r.description || r.title, 5000),
+      'Product SKU/Style #': sku,
+      'Product Brand': sanitizeCommentSoldText(r.brand, 200),
+      'Product Charge Tax': '1',
+      'Product Received': '1',
+      'Product Best Selling': '0',
+      'Product Categories': sanitizeCommentSoldText(r.category, 200),
+      'Product Images': allImages.join(','),
+      'Inventory Quantity': String(qty),
+      'Inventory Retail Price': retail.toFixed(2),
+      'Inventory Cost': cost.toFixed(2),
+    };
+  });
+  const headerLine = headers.join(',');
+  const dataLines = rows.map((row) => csvRow(row, headers));
+  return UTF8_BOM + [headerLine, ...dataLines].join('\r\n');
 }
 
 function csvRow(row, headerOrder) {
@@ -648,7 +750,7 @@ export function downloadBlob(blob, filename) {
 /**
  * Export products in the chosen format and trigger download
  * @param {Array<Object>} products - Combined products from Inventory page
- * @param {'facebook'|'shopify'|'whatnot'|'ebay'|'universal'} format
+ * @param {'facebook'|'shopify'|'whatnot'|'ebay'|'commentsold'|'universal'} format
  * @param {'csv'|'xlsx'} universalFormat - For 'universal', use 'csv' or 'xlsx'
  */
 export async function exportMarketplace(products, format, universalFormat = 'xlsx') {
@@ -675,6 +777,12 @@ export async function exportMarketplace(products, format, universalFormat = 'xls
     const csv = toEbayCSV(rows);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     downloadBlob(blob, `inventory_ebay_${date}.csv`);
+    return;
+  }
+  if (format === 'commentsold') {
+    const csv = toCommentSoldCSV(rows);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    downloadBlob(blob, `inventory_commentsold_${date}.csv`);
     return;
   }
   if (format === 'universal') {

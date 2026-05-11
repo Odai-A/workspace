@@ -2506,7 +2506,7 @@ def external_lookup():
                                     
                                     # Use Rainforest data to enrich cached response
                                     enriched_title = product.get('title', '') or cached.get('product_name', '')
-                                    enriched_price = product.get('buybox_winner', {}).get('price', {}).get('value') or product.get('price', {}).get('value') or cached.get('price', 0)
+                                    enriched_price = _merge_rainforest_price_with_cache(_rainforest_retail_price_from_product(product), cached)
                                     enriched_brand = product.get('brand', '') or ''
                                     enriched_category = product.get('category', {}).get('name', '') if isinstance(product.get('category'), dict) else (product.get('category') or cached.get('category', ''))
                                     enriched_description = product.get('description', '') or cached.get('description', '')
@@ -2652,10 +2652,10 @@ def external_lookup():
                         scan_data.get('images', [{}])[0].get('src') if scan_data.get('images') else '' or
                         '')
             
-            # Extract price from various possible fields
-            price = (scan_data.get('price') or 
-                    scan_data.get('listPrice') or 
-                    scan_data.get('msrp') or 
+            # Prefer list/MSRP over discounted offer price when the payload distinguishes them
+            price = (scan_data.get('listPrice') or
+                    scan_data.get('msrp') or
+                    scan_data.get('price') or
                     0)
             
             # Extract product name/title
@@ -3044,6 +3044,79 @@ def _all_image_urls_from_rainforest_raw(cached_row):
     return urls
 
 
+def _rainforest_category_from_product(product):
+    """
+    Rainforest `product.category` is usually { name, link }; some listings use `categories` (breadcrumb list).
+    """
+    if not product or not isinstance(product, dict):
+        return ''
+    try:
+        cat = product.get('category')
+        if isinstance(cat, list):
+            parts = []
+            for it in cat:
+                if isinstance(it, dict):
+                    n = (it.get('name') or '').strip()
+                    if n:
+                        parts.append(n)
+                elif isinstance(it, str) and it.strip():
+                    parts.append(it.strip())
+            if parts:
+                return ' > '.join(parts)[:200]
+        if isinstance(cat, dict):
+            name = (cat.get('name') or '').strip()
+            if name:
+                return name[:200]
+        if isinstance(cat, str) and cat.strip():
+            return cat.strip()[:200]
+        cats = product.get('categories')
+        if isinstance(cats, list) and cats:
+            parts = []
+            for it in cats:
+                if isinstance(it, dict):
+                    n = (it.get('name') or '').strip()
+                    if n:
+                        parts.append(n)
+                elif isinstance(it, str) and it.strip():
+                    parts.append(it.strip())
+            if parts:
+                return ' > '.join(parts)[:200]
+    except Exception:
+        pass
+    return ''
+
+
+def _category_from_scan_queue_row(scan_data):
+    """FNSKU scan task / queue rows: category string, {name}, or categories[]."""
+    if not scan_data or not isinstance(scan_data, dict):
+        return ''
+    try:
+        v = scan_data.get('category')
+        if isinstance(v, dict):
+            v = (v.get('name') or '').strip()
+        elif v is not None and not isinstance(v, str):
+            v = str(v).strip()
+        else:
+            v = (v or '').strip()
+        if v:
+            return v[:200]
+        cats = scan_data.get('categories')
+        if isinstance(cats, list) and cats:
+            parts = []
+            for it in cats:
+                if isinstance(it, dict):
+                    n = (it.get('name') or '').strip()
+                    if n:
+                        parts.append(n)
+                elif isinstance(it, str) and it.strip():
+                    parts.append(it.strip())
+            if parts:
+                return ' > '.join(parts)[:200]
+    except Exception:
+        pass
+    return ''
+
+
 def _brand_category_description_from_rainforest_raw(cached_row):
     """Extract brand, category, description from cached rainforest_raw_data (table has no brand column)."""
     brand = category = description = ''
@@ -3056,12 +3129,107 @@ def _brand_category_description_from_rainforest_raw(cached_row):
         if raw and isinstance(raw, dict) and raw.get('product'):
             p = raw['product']
             brand = (p.get('brand') or '')[:200] if p.get('brand') else ''
-            cat = p.get('category')
-            category = (cat.get('name', '') if isinstance(cat, dict) else (cat or ''))[:200] if cat else ''
+            category = _rainforest_category_from_product(p)
             description = (p.get('description') or '')[:2000] if p.get('description') else ''
     except Exception:
         pass
     return brand, category, description
+
+
+def _rainforest_price_obj_value(price_obj):
+    """Extract numeric `value` from a Rainforest price dict, or coerce a bare number. Treat 0 as missing (unpriced / discontinued)."""
+    if price_obj is None:
+        return None
+    if isinstance(price_obj, dict):
+        v = price_obj.get('value')
+        if v is None or v == '':
+            return None
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None
+    else:
+        try:
+            x = float(price_obj)
+        except (TypeError, ValueError):
+            return None
+    if x <= 0:
+        return None
+    return x
+
+
+def _rainforest_auxiliary_offer_prices(product):
+    """
+    When the main buy-box price is missing (e.g. discontinued), Amazon often still shows
+    'New from $X', 'More buying choices', or secondary buy-box — Rainforest exposes these on buybox_winner.
+    """
+    if not product or not isinstance(product, dict):
+        return []
+    bb = product.get('buybox_winner')
+    bb = bb if isinstance(bb, dict) else {}
+    vals = []
+    for key in ('new_offers_from', 'used_offers_from', 'mixed_offers_from'):
+        v = _rainforest_price_obj_value(bb.get(key))
+        if v is not None:
+            vals.append(v)
+    sec = bb.get('secondary_buybox')
+    if isinstance(sec, dict):
+        for k in ('price', 'rrp'):
+            v = _rainforest_price_obj_value(sec.get(k))
+            if v is not None:
+                vals.append(v)
+    for choice in (product.get('more_buying_choices') or []):
+        if not isinstance(choice, dict):
+            continue
+        v = _rainforest_price_obj_value(choice.get('price'))
+        if v is not None:
+            vals.append(v)
+    return vals
+
+
+def _rainforest_retail_price_from_product(product):
+    """
+    Prefer Amazon list/RRP (strikethrough price) over the discounted buy-box price when Rainforest exposes it.
+    See Rainforest product docs: buybox_winner.rrp is the recommended retail for the winning offer.
+    If the primary offer has no price (discontinued), fall back to other on-page prices (new from / more choices).
+    """
+    if not product or not isinstance(product, dict):
+        return None
+    bb = product.get('buybox_winner')
+    bb = bb if isinstance(bb, dict) else {}
+    sale = _rainforest_price_obj_value(bb.get('price')) or _rainforest_price_obj_value(product.get('price'))
+    rrp = _rainforest_price_obj_value(bb.get('rrp'))
+    list_p = _rainforest_price_obj_value(product.get('list_price'))
+    list_candidates = [x for x in (rrp, list_p) if x is not None and x > 0]
+    if list_candidates:
+        retail = max(list_candidates)
+        if sale is not None:
+            if retail < sale:
+                return sale
+            return retail
+        return retail
+    if sale is not None:
+        return sale
+    aux = _rainforest_auxiliary_offer_prices(product)
+    if aux:
+        return max(aux)
+    return None
+
+
+def _merge_rainforest_price_with_cache(rf_price, cached_row):
+    """Prefer a positive Rainforest-derived price; if missing or $0, keep last cached price (discontinued listings)."""
+    try:
+        if rf_price is not None and float(rf_price) > 0:
+            return float(rf_price)
+    except (TypeError, ValueError):
+        pass
+    if not cached_row:
+        return 0
+    try:
+        c = float(cached_row.get('price') or 0)
+        return c if c > 0 else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def _build_fnsku_scan_response_and_save(code, asin, scan_data, rainforest_data, supabase_admin):
@@ -3084,9 +3252,44 @@ def _build_fnsku_scan_response_and_save(code, asin, scan_data, rainforest_data, 
                 all_images.append(url)
     image_url = all_images[0] if all_images else ''
     image_url_json = json.dumps(all_images) if all_images else None
-    price = (rainforest_data.get('price') if rainforest_data else None) or (scan_data.get('price') if scan_data else None) or (scan_data.get('listPrice') if scan_data else None) or 0
+
+    def _positive_price_scalar(val):
+        if val is None or val == '':
+            return None
+        try:
+            x = float(str(val).strip())
+            return x if x > 0 else None
+        except (ValueError, TypeError):
+            return None
+
+    price = _positive_price_scalar(rainforest_data.get('price') if rainforest_data else None)
+    if price is None and rainforest_data:
+        fr = rainforest_data.get('full_response')
+        if isinstance(fr, dict) and fr.get('product'):
+            price = _positive_price_scalar(_rainforest_retail_price_from_product(fr.get('product')))
+    if price is None and scan_data:
+        price = (
+            _positive_price_scalar(scan_data.get('listPrice'))
+            or _positive_price_scalar(scan_data.get('msrp'))
+            or _positive_price_scalar(scan_data.get('price'))
+        )
+    if price is None:
+        price = 0
+
     description = (rainforest_data.get('description') if rainforest_data else '') or (scan_data.get('description') if scan_data else '') or product_name
-    category = (rainforest_data.get('category') if rainforest_data else '') or (scan_data.get('category') if scan_data else '') or 'External API'
+    category = ''
+    if rainforest_data:
+        c0 = str(rainforest_data.get('category') or '').strip()
+        if c0 and c0.lower() != 'external api':
+            category = c0[:200]
+    if not category and rainforest_data:
+        fr = rainforest_data.get('full_response')
+        if isinstance(fr, dict) and fr.get('product'):
+            category = _rainforest_category_from_product(fr['product'])
+    if not category and scan_data:
+        category = _category_from_scan_queue_row(scan_data)
+    if not category:
+        category = 'External API'
     brand = (rainforest_data.get('brand') if rainforest_data else '') or (scan_data.get('brand') if scan_data else '') or ''
     videos = []
     videos_count = 0
@@ -3094,25 +3297,41 @@ def _build_fnsku_scan_response_and_save(code, asin, scan_data, rainforest_data, 
         videos = rainforest_data.get('videos', [])
         videos_count = rainforest_data.get('videos_count', len(videos))
     task_id = scan_data.get('id') if scan_data else None
-    response_data = {
-        "success": True, "fnsku": code, "asin": asin, "title": product_name,
-        "price": str(price) if price else '', "image": image_url, "images": all_images, "images_count": len(all_images),
-        "videos": videos, "videos_count": videos_count, "brand": brand, "category": category, "description": description,
-        "upc": scan_data.get('upc', '') if scan_data else '', "amazon_url": f"https://www.amazon.com/dp/{asin}" if asin else '',
-        "source": "api", "cost_status": "charged", "cached": False, "saved_to_cache": False,
-        "raw": {"scan_data": scan_data, "rainforest_data": rainforest_data}
-    }
     cache_row_id = None
     if not supabase_admin or not asin or len(asin) < 10:
+        response_data = {
+            "success": True, "fnsku": code, "asin": asin, "title": product_name,
+            "price": str(price) if price else '', "image": image_url, "images": all_images, "images_count": len(all_images),
+            "videos": videos, "videos_count": videos_count, "brand": brand, "category": category, "description": description,
+            "upc": scan_data.get('upc', '') if scan_data else '', "amazon_url": f"https://www.amazon.com/dp/{asin}" if asin else '',
+            "source": "api", "cost_status": "charged", "cached": False, "saved_to_cache": False,
+            "raw": {"scan_data": scan_data, "rainforest_data": rainforest_data}
+        }
         return response_data, cache_row_id
     try:
         now = datetime.now(timezone.utc).isoformat()
-        existing = supabase_admin.table('api_lookup_cache').select('id, lookup_count').eq('fnsku', code).limit(1).execute()
+        existing = supabase_admin.table('api_lookup_cache').select('id, lookup_count, price').eq('fnsku', code).limit(1).execute()
         existing_data = (existing.data[0] if (existing and getattr(existing, 'data', None) and len(existing.data) > 0) else None)
         try:
             price_float = float(str(price).strip()) if price else 0
         except (ValueError, TypeError):
             price_float = 0
+        if price_float <= 0 and existing_data:
+            try:
+                prev = float(existing_data.get('price') or 0)
+                if prev > 0:
+                    price_float = prev
+                    price = prev
+            except (ValueError, TypeError):
+                pass
+        response_data = {
+            "success": True, "fnsku": code, "asin": asin, "title": product_name,
+            "price": str(price) if price else '', "image": image_url, "images": all_images, "images_count": len(all_images),
+            "videos": videos, "videos_count": videos_count, "brand": brand, "category": category, "description": description,
+            "upc": scan_data.get('upc', '') if scan_data else '', "amazon_url": f"https://www.amazon.com/dp/{asin}" if asin else '',
+            "source": "api", "cost_status": "charged", "cached": False, "saved_to_cache": False,
+            "raw": {"scan_data": scan_data, "rainforest_data": rainforest_data}
+        }
         image_url_to_save = image_url_json if image_url_json else (image_url[:500] if image_url else None)
         # Store full Rainforest response so future scans get all data without paying again
         rainforest_raw_data_to_save = rainforest_data.get('full_response') if (rainforest_data and rainforest_data.get('full_response')) else None
@@ -3285,15 +3504,11 @@ def import_save_rainforest_to_cache(supabase_admin, cache_fnsku, asin, rf_full_j
     image_url_json = json.dumps(all_images) if all_images else None
     title = (product.get('title') or '')[:500]
     try:
-        price_v = (
-            product.get('buybox_winner', {}).get('price', {}).get('value')
-            if isinstance(product.get('buybox_winner'), dict) else None
-        ) or (product.get('price', {}).get('value') if isinstance(product.get('price'), dict) else None) or 0
+        price_v = _rainforest_retail_price_from_product(product) or 0
         price_float = float(price_v) if price_v else 0
     except (ValueError, TypeError):
         price_float = 0
-    cat = product.get('category')
-    category = ((cat.get('name') if isinstance(cat, dict) else (cat or '')) or '')[:200]
+    category = _rainforest_category_from_product(product)
     description = (product.get('description') or title or '')[:2000]
 
     try:
@@ -3728,10 +3943,9 @@ def scan_product():
                             if img_link and img_link not in all_images:
                                 all_images.append(img_link)
                         
-                        # Extract product data
+                        # Extract product data (prefer list/RRP over discounted buy-box price)
                         title = product.get('title', '')
-                        price_obj = product.get('buybox_winner', {}).get('price', {}) or product.get('price', {})
-                        price = price_obj.get('value') if isinstance(price_obj, dict) else price_obj
+                        price = _rainforest_retail_price_from_product(product)
                         brand = product.get('brand', '')
                         category_obj = product.get('category', {})
                         category = category_obj.get('name') if isinstance(category_obj, dict) else (category_obj or '')
@@ -3781,6 +3995,13 @@ def scan_product():
                         if supabase_admin:
                             try:
                                 now = datetime.now(timezone.utc).isoformat()
+                                existing_asin_cache = supabase_admin.table('api_lookup_cache').select('id, price').eq('asin', asin).limit(1).execute()
+                                existing_asin_row = (
+                                    existing_asin_cache.data[0]
+                                    if (existing_asin_cache and getattr(existing_asin_cache, 'data', None) and len(existing_asin_cache.data) > 0)
+                                    else None
+                                )
+                                price = _merge_rainforest_price_with_cache(price, existing_asin_row)
                                 
                                 # Save to products table (ON CONFLICT DO NOTHING)
                                 product_data = {
@@ -3828,8 +4049,7 @@ def scan_product():
                                 }
                                 
                                 # Check if entry already exists (limit(1) avoids 406)
-                                existing = supabase_admin.table('api_lookup_cache').select('id').eq('asin', asin).limit(1).execute()
-                                existing_row = (existing.data[0] if (existing and getattr(existing, 'data', None) and len(existing.data) > 0) else None)
+                                existing_row = existing_asin_row
                                 if existing_row:
                                     supabase_admin.table('api_lookup_cache').update(cache_data).eq('id', existing_row['id']).execute()
                                     logger.info(f"✅ Updated api_lookup_cache entry for ASIN {asin}")
@@ -3934,13 +4154,11 @@ def scan_product():
                                         rainforest_json = rainforest_response.json()
                                         if rainforest_json.get('product'):
                                             product = rainforest_json['product']
-                                            buybox_price = product.get('buybox_winner', {}).get('price', {})
-                                            if buybox_price:
-                                                amazon_price = buybox_price.get('value')
-                                                if amazon_price:
-                                                    cached_price = amazon_price
-                                                    price_source = 'amazon_rainforest'
-                                                    logger.info(f"✅ Updated price from Amazon: ${cached_price}")
+                                            amazon_price = _rainforest_retail_price_from_product(product)
+                                            if amazon_price:
+                                                cached_price = amazon_price
+                                                price_source = 'amazon_rainforest'
+                                                logger.info(f"✅ Updated price from Amazon (list price when available): ${cached_price}")
                                 except Exception as rainforest_error:
                                     logger.warning(f"⚠️ Could not fetch Amazon price for cached UPC: {rainforest_error}")
                             
@@ -4115,13 +4333,10 @@ def scan_product():
                             rainforest_json = rainforest_response.json()
                             if rainforest_json.get('product'):
                                 product = rainforest_json['product']
-                                # Get buybox price (actual Amazon price)
-                                buybox_price = product.get('buybox_winner', {}).get('price', {})
-                                if buybox_price:
-                                    amazon_price = buybox_price.get('value')
-                                    if amazon_price:
-                                        price_source = 'amazon_rainforest'
-                                        logger.info(f"✅ Got Amazon price from Rainforest: ${amazon_price}")
+                                amazon_price = _rainforest_retail_price_from_product(product)
+                                if amazon_price:
+                                    price_source = 'amazon_rainforest'
+                                    logger.info(f"✅ Got Amazon price from Rainforest (list when available): ${amazon_price}")
                                 # Also update ASIN if we got it from Rainforest
                                 if product.get('asin'):
                                     potential_asin = product.get('asin')
@@ -4477,7 +4692,7 @@ def scan_product():
                                         
                                         # Use Rainforest data to enrich cached response
                                         enriched_title = product.get('title', '') or cached.get('product_name', '')
-                                        enriched_price = product.get('buybox_winner', {}).get('price', {}).get('value') or product.get('price', {}).get('value') or cached.get('price', 0)
+                                        enriched_price = _merge_rainforest_price_with_cache(_rainforest_retail_price_from_product(product), cached)
                                         enriched_brand = product.get('brand', '') or ''
                                         enriched_category = product.get('category', {}).get('name', '') if isinstance(product.get('category'), dict) else (product.get('category') or cached.get('category', ''))
                                         enriched_description = product.get('description', '') or cached.get('description', '')
@@ -4923,11 +5138,11 @@ def scan_product():
                                 'images_count': len(all_images),
                                 'videos': videos_additional,  # ALL videos as array
                                 'videos_count': videos_count,
-                                'price': product.get('buybox_winner', {}).get('price', {}).get('value') or product.get('price', {}).get('value'),
+                                'price': _rainforest_retail_price_from_product(product),
                                 'rating': product.get('rating'),
                                 'reviews_count': product.get('reviews_total'),
                                 'brand': product.get('brand', ''),
-                                'category': product.get('category', {}).get('name', '') if isinstance(product.get('category'), dict) else '',
+                                'category': _rainforest_category_from_product(product),
                                 'description': product.get('description', ''),
                                 # Store the FULL response for access to everything
                                 'full_response': rainforest_full_response  # Complete response with all data
@@ -5641,7 +5856,7 @@ def scan_status():
                             'title': product.get('title', ''), 'image': all_imgs[0] if all_imgs else '',
                             'images': all_imgs, 'images_count': len(all_imgs), 'videos': v_additional,
                             'videos_count': product.get('videos_count', len(v_additional)),
-                            'price': product.get('buybox_winner', {}).get('price', {}).get('value') or product.get('price', {}).get('value'),
+                            'price': _rainforest_retail_price_from_product(product),
                             'brand': product.get('brand', ''), 'category': product.get('category', {}).get('name', '') if isinstance(product.get('category'), dict) else '',
                             'description': product.get('description', ''), 'full_response': rainforest_full_response
                         }
