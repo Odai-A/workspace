@@ -1,15 +1,21 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { toast } from 'react-toastify';
 import Button from '../components/ui/Button';
 import Card from '../components/ui/Card';
 import { ArrowUpTrayIcon, CheckCircleIcon, XCircleIcon, InformationCircleIcon } from '@heroicons/react/24/outline';
 import { supabase } from '../config/supabaseClient';
 import { getApiEndpoint } from '../utils/apiConfig';
+import {
+  findManifestHeaderRowIndex as findManifestHeaderRowIndexHeuristic,
+  buildAdaptiveColumnMappings,
+} from '../utils/manifestImportHeuristics';
 
 // Comprehensive column mapping - maps common variations to standard field names
 const COLUMN_MAPPINGS = {
   fnsku: [
     'fnsku', 'fn sku', 'fn-sku', 'fnsku #', 'fnsku#', 'fnsku number',
+    'fulfillment sku', 'fulfillment-sku', 'fba fn sku', 'fn_sku',
     'sku', 'skus', 'sku #', 'sku#', 'sku number', 'sku id', 'sku id #',
     'fba sku', 'fba-sku', 'amazon sku', 'amazon-sku',
     'product sku', 'product-sku', 'item sku', 'item-sku',
@@ -18,8 +24,8 @@ const COLUMN_MAPPINGS = {
   asin: [
     'asin', 'asins', 'asin #', 'asin#', 'asin number',
     'b00 asin', 'b00-asin', 'b00asin',
-    'amazon asin', 'amazon-asin', 'amazon product id',
-    'product asin', 'product-asin'
+    'amazon id', 'amazon-id', 'amazon product', 'child asin', 'child-asin',
+    'parent asin', 'parent-asin', 'asin1', 'asin 1', 'prod asin', 'prod-asin'
   ],
   lpn: [
     'lpn', 'lpns', 'lpn #', 'lpn#', 'lpn number',
@@ -54,11 +60,18 @@ const COLUMN_MAPPINGS = {
     'amount', 'amounts', 'value', 'values'
   ],
   category: [
-    'category', 'categories', 'product category', 'product-category',
+    'category', 'categories', 'Category', 'CATEGORY',
+    'product category', 'product-category',
     'item category', 'item-category', 'itemcategory',
     'type', 'types', 'product type', 'product-type',
     'department', 'departments', 'dept', 'depts',
-    'classification', 'classifications', 'class', 'classes'
+    'classification', 'classifications', 'class', 'classes',
+    'merch category', 'gl category', 'commodity category',
+  ],
+  subcategory: [
+    'sub-category', 'sub category', 'subcategory', 'subcategories',
+    'sub cat', 'sub-cat', 'product subcategory', 'product-subcategory',
+    'item subcategory', 'gl subcategory', 'gl-subcategory'
   ],
   quantity: [
     'quantity', 'quantities', 'qty', 'qtys', 'qty.', 'qty #', 'qty#',
@@ -137,48 +150,42 @@ const normalizeForComparison = (str) => {
     .trim();
 };
 
-// Find matching column in headers
-const findMatchingColumn = (headers, acceptedVariations) => {
-  // First, try exact matches (case-insensitive)
-  for (const acceptedCol of acceptedVariations) {
-    for (const header of headers) {
-      if (normalizeForComparison(header) === normalizeForComparison(acceptedCol)) {
-        return header;
-      }
+/** 0-based index of header row in raw \n-split lines (may include blank lines). */
+const resolveHeaderRowIndex0 = (rawLines, headerRowMode) => {
+  if (headerRowMode && headerRowMode !== 'auto') {
+    const n = parseInt(String(headerRowMode), 10);
+    if (!Number.isNaN(n) && n >= 1) {
+      return Math.min(rawLines.length - 1, Math.max(0, n - 1));
     }
   }
-  
-  // Then try partial matches (one contains the other)
-  for (const acceptedCol of acceptedVariations) {
-    const normalizedAccepted = normalizeForComparison(acceptedCol);
-    for (const header of headers) {
-      const normalizedHeader = normalizeForComparison(header);
-      
-      // Check if one contains the other (for variations like "Product Name" vs "Name")
-      if (normalizedAccepted.length >= 3 && normalizedHeader.length >= 3) {
-        if (normalizedHeader.includes(normalizedAccepted) || 
-            normalizedAccepted.includes(normalizedHeader)) {
-          return header;
-        }
-      }
-    }
-  }
-  
-  return null;
+  return findManifestHeaderRowIndexHeuristic(rawLines, COLUMN_MAPPINGS);
 };
 
-// Auto-detect column mappings from CSV headers
-const detectColumnMappings = (headers) => {
-  const mappings = {};
-  
-  for (const [fieldName, variations] of Object.entries(COLUMN_MAPPINGS)) {
-    const matchedColumn = findMatchingColumn(headers, variations);
-    if (matchedColumn) {
-      mappings[fieldName] = matchedColumn;
-    }
+// Canonical keys for truckload metadata stored in manifest_data.manifest_extras (JSONB)
+const TRUCKLOAD_MANIFEST_EXTRA_LABELS = [
+  'Seller',
+  'Task ID',
+  'Listing ID',
+  'Sub-Category',
+  'Pallet ID',
+  'Package ID',
+  'Warehouse',
+  'Transaction ID',
+  'EXT MSRP',
+  'Quantity',
+];
+
+const collectTruckloadManifestExtras = (csvRow) => {
+  if (!csvRow || typeof csvRow !== 'object') return null;
+  const out = {};
+  const keys = Object.keys(csvRow);
+  for (const label of TRUCKLOAD_MANIFEST_EXTRA_LABELS) {
+    const hit = keys.find((k) => normalizeForComparison(k) === normalizeForComparison(label));
+    if (!hit) continue;
+    const v = String(csvRow[hit] ?? '').trim();
+    if (v) out[label] = v;
   }
-  
-  return mappings;
+  return Object.keys(out).length ? out : null;
 };
 
 // Clean and normalize data values
@@ -215,11 +222,31 @@ const cleanValue = (value, fieldType = 'text') => {
       cleaned = cleaned.replace(/\s+/g, ' ').trim();
       return cleaned === '' ? null : cleaned;
     
+    case 'upc': {
+      // Excel often saves long UPCs as scientific notation (e.g. 7.24129E+11); do not strip E/+ or digits break.
+      let u = String(value).trim().replace(/^["']|["']$/g, '');
+      if (u === '' || u.toLowerCase() === 'n/a' || u.toLowerCase() === 'na') return null;
+      const numish = u.replace(/,/g, '');
+      if (/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(numish)) {
+        if (/[eE]/.test(numish) || numish.includes('.')) {
+          const n = parseFloat(numish);
+          if (Number.isFinite(n)) {
+            const r = Math.round(n);
+            if (Math.abs(n - r) < 1e-9 || /[eE]/.test(numish) || Math.abs(n) >= 1e6) {
+              return String(r);
+            }
+          }
+        } else if (/^\d+$/.test(numish)) {
+          return numish;
+        }
+      }
+      cleaned = u.toUpperCase().replace(/\s+/g, '').replace(/[^A-Z0-9]/g, '');
+      return cleaned === '' ? null : cleaned;
+    }
     case 'identifier':
     case 'fnsku':
     case 'asin':
     case 'lpn':
-    case 'upc':
       // Clean identifiers: uppercase, remove spaces and special chars
       cleaned = cleaned.toUpperCase().replace(/\s+/g, '').replace(/[^A-Z0-9]/g, '');
       return cleaned === '' ? null : cleaned;
@@ -244,10 +271,11 @@ const mapRowToNormalized = (csvRow, columnMappings) => {
     fnsku: 'identifier',
     asin: 'identifier',
     lpn: 'identifier',
-    upc: 'identifier',
+    upc: 'upc',
     name: 'text',
     price: 'price',
     category: 'text',
+    subcategory: 'text',
     quantity: 'quantity',
     brand: 'text'
   };
@@ -259,7 +287,17 @@ const mapRowToNormalized = (csvRow, columnMappings) => {
     const fieldType = fieldTypes[fieldName] || 'text';
     normalized[fieldName] = cleanValue(value, fieldType);
   }
-  
+
+  const sub = normalized.subcategory;
+  if (sub) {
+    if (normalized.category) {
+      normalized.category = `${normalized.category} — ${sub}`;
+    } else {
+      normalized.category = sub;
+    }
+  }
+  delete normalized.subcategory;
+
   return normalized;
 };
 
@@ -268,15 +306,69 @@ const ProductImport = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [importProgress, setImportProgress] = useState(0);
   const [totalRows, setTotalRows] = useState(0);
+  const [importStatusHint, setImportStatusHint] = useState('');
   const [showPreview, setShowPreview] = useState(false);
   const [csvHeaders, setCsvHeaders] = useState([]);
   const [csvRows, setCsvRows] = useState([]);
   const [columnMappings, setColumnMappings] = useState({});
   const [previewData, setPreviewData] = useState([]);
   const [includeInInventory, setIncludeInInventory] = useState(false);
-  const [enrichmentMode, setEnrichmentMode] = useState('missing_only');
-  const [maxEnrichmentCalls, setMaxEnrichmentCalls] = useState(100);
+  const [enrichmentMode, setEnrichmentMode] = useState('none');
+  const [maxEnrichmentCalls, setMaxEnrichmentCalls] = useState(0);
+  const [headerRowMode, setHeaderRowMode] = useState('auto');
+  const [resolvedHeaderRow1Based, setResolvedHeaderRow1Based] = useState(null);
   const fileInputRef = useRef(null);
+  const lastCsvTextRef = useRef('');
+
+  const applyCsvText = useCallback(
+    (csvText, mode) => {
+      const rawLines = csvText.split(/\r\n|\n/);
+      const headerIdx0 = resolveHeaderRowIndex0(rawLines, mode);
+
+      if (rawLines.length < headerIdx0 + 2) {
+        toast.error('The CSV file must contain a header row and at least one data row.');
+        return false;
+      }
+
+      const headerLine = rawLines[headerIdx0];
+      const delimiter = detectDelimiter(headerLine);
+      const headers = parseCSVLine(headerLine, delimiter).map((h) =>
+        h.trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1')
+      );
+      const validHeaders = headers.filter((h) => h && h.trim() !== '');
+
+      if (validHeaders.length === 0) {
+        toast.error('No valid columns detected in the CSV file. Please check the file format.');
+        return false;
+      }
+
+      const sampleLines = [];
+      for (let i = headerIdx0 + 1; i < rawLines.length && sampleLines.length < 24; i++) {
+        if (!rawLines[i].trim()) continue;
+        sampleLines.push(rawLines[i]);
+      }
+
+      const sampleRows = sampleLines.map((line) => {
+        const values = parseCSVLine(line, delimiter);
+        const row = {};
+        validHeaders.forEach((header, index) => {
+          row[header] = (values[index] || '').trim();
+        });
+        return row;
+      });
+
+      const previewRows = sampleRows.slice(0, 10);
+      const adaptiveMappings = buildAdaptiveColumnMappings(validHeaders, sampleRows, COLUMN_MAPPINGS);
+
+      setCsvHeaders(validHeaders);
+      setCsvRows(previewRows);
+      setColumnMappings(adaptiveMappings);
+      setPreviewData(previewRows.map((row) => mapRowToNormalized(row, adaptiveMappings)));
+      setResolvedHeaderRow1Based(headerIdx0 + 1);
+      return { ok: true, columnCount: validHeaders.length, header1Based: headerIdx0 + 1 };
+    },
+    []
+  );
 
   const handleFileChange = (event) => {
     const file = event.target.files[0];
@@ -290,68 +382,30 @@ const ProductImport = () => {
     setCsvRows([]);
     setColumnMappings({});
     setPreviewData([]);
-    
+    setHeaderRowMode('auto');
+    setResolvedHeaderRow1Based(null);
+
     // Auto-parse and show preview
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
         let csvText = e.target.result;
-        
+
         // Remove BOM if present (common in Excel exports)
         if (csvText.charCodeAt(0) === 0xFEFF) {
           csvText = csvText.slice(1);
         }
-        
-        const lines = csvText.split(/\r\n|\n/).filter(line => line.trim() !== '');
-        
-        if (lines.length < 2) {
-          toast.error('The CSV file must contain a header row and at least one data row.');
+
+        lastCsvTextRef.current = csvText;
+        const applied = applyCsvText(csvText, 'auto');
+        if (!applied?.ok) {
           return;
         }
-        
-        const headerLine = lines[0];
-        
-        // Detect delimiter from the header line
-        const delimiter = detectDelimiter(headerLine);
-        console.log('Detected CSV delimiter:', delimiter === '\t' ? 'TAB' : delimiter);
-        
-        const headers = parseCSVLine(headerLine, delimiter).map(h => h.trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1'));
-        
-        // Filter out empty headers
-        const validHeaders = headers.filter(h => h && h.trim() !== '');
-        
-        if (validHeaders.length === 0) {
-          toast.error('No valid columns detected in the CSV file. Please check the file format.');
-          return;
-        }
-        
-        console.log('Parsed headers:', validHeaders);
-        console.log('Total columns detected:', validHeaders.length);
-        
-        const dataLines = lines.slice(1, 11); // Preview first 10 rows
-        
-        const rows = dataLines.map(line => {
-          const values = parseCSVLine(line, delimiter);
-          const row = {};
-          validHeaders.forEach((header, index) => {
-            row[header] = (values[index] || '').trim();
-          });
-          return row;
-        });
-        
-        // Auto-detect column mappings
-        const detectedMappings = detectColumnMappings(validHeaders);
-        
-        setCsvHeaders(validHeaders);
-        setCsvRows(rows);
-        setColumnMappings(detectedMappings);
-        
-        // Generate preview data
-        const preview = rows.map(row => mapRowToNormalized(row, detectedMappings));
-        setPreviewData(preview);
+
         setShowPreview(true);
-        
-        toast.success(`File loaded successfully. Detected ${validHeaders.length} columns. Please review the column mapping below.`);
+        toast.success(
+          `Loaded ${applied.columnCount} columns; header row ${applied.header1Based} (auto-detected). Adjust the header row or mappings if anything looks wrong.`
+        );
       } catch (error) {
         console.error('Error parsing file:', error);
         toast.error(`Failed to parse the CSV file: ${error.message || 'Please verify the file format and try again.'}`);
@@ -362,17 +416,26 @@ const ProductImport = () => {
   };
 
   const handleMappingChange = (fieldName, csvColumn) => {
-    setColumnMappings(prev => ({
-      ...prev,
-      [fieldName]: csvColumn || null
-    }));
-    
-    // Update preview
-    const preview = csvRows.map(row => mapRowToNormalized(row, {
-      ...columnMappings,
-      [fieldName]: csvColumn || null
-    }));
-    setPreviewData(preview);
+    setColumnMappings((prev) => {
+      const next = { ...prev, [fieldName]: csvColumn || null };
+      setPreviewData(csvRows.map((row) => mapRowToNormalized(row, next)));
+      return next;
+    });
+  };
+
+  const handleHeaderRowModeChange = (value) => {
+    setHeaderRowMode(value);
+    const text = lastCsvTextRef.current;
+    if (!text) return;
+    const applied = applyCsvText(text, value);
+    if (applied?.ok) {
+      setShowPreview(true);
+      toast.info(
+        value === 'auto'
+          ? `Using header row ${applied.header1Based} (auto).`
+          : `Using header row ${applied.header1Based} (manual).`
+      );
+    }
   };
 
   const handleImport = async () => {
@@ -384,6 +447,7 @@ const ProductImport = () => {
     setIsLoading(true);
     setImportProgress(0);
     setTotalRows(0);
+    setImportStatusHint('');
     toast.info('Product import process initiated. This may take a moment.');
 
     const reader = new FileReader();
@@ -396,16 +460,22 @@ const ProductImport = () => {
         csvText = csvText.slice(1);
       }
       
-      const lines = csvText.split(/\r\n|\n/).filter(line => line.trim() !== '');
+      const lines = csvText.split(/\r\n|\n/);
 
-      if (lines.length < 2) {
+      const headerIdx0 = resolveHeaderRowIndex0(lines, headerRowMode);
+      if (lines.length < headerIdx0 + 2) {
         toast.error('The CSV file must contain a header row and at least one data row.');
+        setImportStatusHint('');
         setIsLoading(false);
         return;
       }
 
-      const headerLine = lines[0];
-      const dataLines = lines.slice(1);
+      const headerLine = lines[headerIdx0];
+      const dataLines = [];
+      for (let i = headerIdx0 + 1; i < lines.length; i++) {
+        dataLines.push(lines[i]);
+      }
+      // Denominator = every data line we scan (including blanks) so % never hits 100% before parse finishes
       setTotalRows(dataLines.length);
 
       // Detect delimiter from the header line
@@ -415,14 +485,28 @@ const ProductImport = () => {
       // Filter out empty headers
       const validHeaders = headers.filter(h => h && h.trim() !== '');
       
-      // Use detected mappings or fallback to auto-detection
-      const mappings = Object.keys(columnMappings).length > 0 
-        ? columnMappings 
-        : detectColumnMappings(validHeaders);
+      // Prefer mappings from preview; if missing identifiers, re-run adaptive inference on file samples
+      let mappings = columnMappings;
+      if (!mappings.fnsku && !mappings.asin && !mappings.lpn) {
+        const sampleRows = [];
+        for (let i = 0; i < dataLines.length && sampleRows.length < 24; i++) {
+          const ln = dataLines[i];
+          if (!ln.trim()) continue;
+          const rowValues = parseCSVLine(ln, delimiter);
+          while (rowValues.length < validHeaders.length) rowValues.push('');
+          const row = {};
+          validHeaders.forEach((header, index) => {
+            row[header] = (rowValues[index] || '').trim();
+          });
+          sampleRows.push(row);
+        }
+        mappings = buildAdaptiveColumnMappings(validHeaders, sampleRows, COLUMN_MAPPINGS);
+      }
 
       // Validate that we have at least one identifier column
       if (!mappings.fnsku && !mappings.asin && !mappings.lpn) {
         toast.error('Unable to detect FNSKU, ASIN, or LPN columns. Please map at least one identifier column before proceeding.');
+        setImportStatusHint('');
         setIsLoading(false);
         return;
       }
@@ -446,7 +530,7 @@ const ProductImport = () => {
       for (let i = 0; i < dataLines.length; i++) {
         const line = dataLines[i];
         if (!line.trim()) {
-          setImportProgress(prev => prev + 1);
+          setImportProgress((prev) => prev + 1);
           continue;
         }
         
@@ -463,19 +547,36 @@ const ProductImport = () => {
           csvRow[header] = (rowValues[index] || '').trim();
         });
         
-        // Map to normalized format
+        // Map to normalized format + preserve truckload-only columns for manifest_extras
         const normalized = mapRowToNormalized(csvRow, mappings);
-        
+        const withExtras = {
+          ...normalized,
+          manifest_extras: collectTruckloadManifestExtras(csvRow),
+        };
+
         // Validate row has at least one identifier
-        if (!normalized.fnsku && !normalized.asin && !normalized.lpn) {
+        if (!withExtras.fnsku && !withExtras.asin && !withExtras.lpn) {
           errorCount++;
-          setImportProgress(prev => prev + 1);
+          setImportProgress((prev) => prev + 1);
           continue;
         }
-        
-        allRows.push(normalized);
-        setImportProgress(prev => prev + 1);
+
+        allRows.push(withExtras);
+        setImportProgress((prev) => prev + 1);
       }
+
+      const numBatches = allRows.length ? Math.ceil(allRows.length / BATCH_SIZE) : 0;
+      setTotalRows(dataLines.length + Math.max(numBatches, 1));
+      setImportProgress(dataLines.length);
+      setImportStatusHint(
+        numBatches > 0
+          ? `Saving ${allRows.length} row(s) in ${numBatches} server batch(es).${
+              enrichmentMode !== 'none'
+                ? ' Rainforest enrichment can add several seconds per batch.'
+                : ' No external product APIs will be called.'
+            }`
+          : 'No valid rows to upload.'
+      );
 
       // Send batches to backend
       const sendBatch = async (batchToSend, batchNum) => {
@@ -493,7 +594,8 @@ const ProductImport = () => {
             price: item.price,
             category: item.category,
             quantity: item.quantity,
-            brand: item.brand
+            brand: item.brand,
+            manifest_extras: item.manifest_extras || null,
           }));
 
           const response = await fetch(getApiEndpoint('/import/batch'), {
@@ -539,13 +641,16 @@ const ProductImport = () => {
       for (let i = 0; i < allRows.length; i += BATCH_SIZE) {
         batchNumber++;
         const batch = allRows.slice(i, i + BATCH_SIZE);
+        setImportStatusHint(
+          `Saving batch ${batchNumber} of ${numBatches} (${batch.length} rows)…`
+        );
         await sendBatch(batch, batchNumber);
-        
-        const processedSoFar = Math.min(i + BATCH_SIZE, allRows.length);
-        setImportProgress(processedSoFar);
+
+        setImportProgress(dataLines.length + batchNumber);
       }
 
-      setImportProgress(dataLines.length);
+      setImportProgress(dataLines.length + Math.max(numBatches, 1));
+      setImportStatusHint('');
 
       let summaryMessage = `Import completed. ${successCount} catalog/manifest rows processed.`;
       if (includeInInventory) {
@@ -569,6 +674,7 @@ const ProductImport = () => {
       }
       
       setIsLoading(false);
+      setImportStatusHint('');
       setSelectedFile(null);
       setShowPreview(false);
       if (fileInputRef.current) {
@@ -577,7 +683,8 @@ const ProductImport = () => {
     };
 
     reader.onerror = () => {
-      toast.error('Failed to read the selected file. Please ensure the file is not corrupted and try again.');
+      toast.error('Failed to read the selected file. Please ensure it is not corrupted and try again.');
+      setImportStatusHint('');
       setIsLoading(false);
     };
 
@@ -587,16 +694,23 @@ const ProductImport = () => {
   return (
     <div className="container mx-auto px-4 py-8">
       <h1 className="text-2xl font-bold mb-6 text-gray-900 dark:text-white">Import Products from CSV</h1>
+      <p className="text-sm text-gray-600 dark:text-gray-400 -mt-4 mb-6">
+        After import, open{' '}
+        <Link to="/manifests" className="text-indigo-600 dark:text-indigo-400 hover:underline font-medium">
+          Manifests
+        </Link>{' '}
+        to search that upload, print labels, or scan-lookup within the file.
+      </p>
       
       <Card className="max-w-4xl mx-auto">
         <div className="p-6">
           <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Upload manifest (CSV)</h2>
 
           <div className="mb-6 p-4 rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-950/30">
-            <p className="text-sm text-amber-900 dark:text-amber-200 font-medium">API cost control</p>
+            <p className="text-sm text-amber-900 dark:text-amber-200 font-medium">Manifest import (default: no paid APIs)</p>
             <p className="text-xs text-amber-800 dark:text-amber-300/90 mt-1">
-              Product images and details from Rainforest are billed per request. Rows with an ASIN may trigger lookups until your cap is reached.
-              Global cache is shared across all businesses so the same ASIN is only enriched once.
+              By default, imports only write your CSV to the database and use the existing global cache if present.
+              If you turn on Rainforest enrichment below, lookups are billed per request and can slow large imports.
             </p>
             <div className="mt-4 space-y-3">
               <label className="flex items-start gap-2 cursor-pointer">
@@ -612,16 +726,16 @@ const ProductImport = () => {
               </label>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Enrichment (Rainforest)
+                  Enrichment (Rainforest) — optional
                 </label>
                 <select
                   value={enrichmentMode}
                   onChange={(e) => setEnrichmentMode(e.target.value)}
                   className="w-full md:w-auto px-3 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-md text-sm"
                 >
-                  <option value="none">Cache only — never call Rainforest on import</option>
-                  <option value="missing_only">Fetch missing product data (recommended)</option>
-                  <option value="full">Re-fetch all ASINs (uses cap; highest cost)</option>
+                  <option value="none">Off — do not call Rainforest or other enrichment APIs on import (default)</option>
+                  <option value="missing_only">On — fetch missing product data from Rainforest (paid; slower)</option>
+                  <option value="full">On — re-fetch all ASINs (highest cost)</option>
                 </select>
               </div>
               <div>
@@ -667,6 +781,33 @@ const ProductImport = () => {
             </div>
           </div>
 
+          {showPreview && lastCsvTextRef.current && (
+            <div className="mb-6 p-4 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/40">
+              <h3 className="text-sm font-medium text-gray-900 dark:text-white mb-1">Messy or non-standard files</h3>
+              <p className="text-xs text-gray-600 dark:text-gray-400 mb-3">
+                We scan the first lines for a plausible header (keywords like SKU, ASIN, Qty), use fuzzy header names,
+                and infer ASIN / FNSKU / LPN from sample cell patterns when headers are vague. Pick the exact header line
+                if auto-detect is wrong (same line number as in Excel or a text editor).
+              </p>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Header row</label>
+              <select
+                value={headerRowMode}
+                onChange={(e) => handleHeaderRowModeChange(e.target.value)}
+                className="w-full max-w-md px-3 py-2 border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white rounded-md text-sm"
+              >
+                <option value="auto">
+                  Auto-detect
+                  {resolvedHeaderRow1Based != null ? ` (currently row ${resolvedHeaderRow1Based})` : ''}
+                </option>
+                {Array.from({ length: 80 }, (_, i) => i + 1).map((n) => (
+                  <option key={n} value={String(n)}>
+                    Row {n} (manual)
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Column Mapping Preview */}
           {showPreview && csvHeaders.length > 0 && (
             <div className="mb-6 p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
@@ -675,7 +816,9 @@ const ProductImport = () => {
                 <div>
                   <h3 className="text-sm font-medium text-blue-900 dark:text-blue-200">Column Mapping Detected</h3>
                   <p className="text-xs text-blue-700 dark:text-blue-300 mt-1">
-                    Review and adjust the column mappings below. The system will automatically clean and normalize your data.
+                    Headers are matched with fuzzy text similarity and a large synonym list; ASIN / FNSKU / LPN can also
+                    be inferred from the first rows of data when column titles are wrong or missing. Adjust any field
+                    below if a column was mis-assigned.
                   </p>
                 </div>
               </div>
@@ -743,15 +886,18 @@ const ProductImport = () => {
               <div className="flex justify-between mb-1">
                 <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Progress</span>
                 <span className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                  {Math.round((importProgress / totalRows) * 100)}% ({importProgress}/{totalRows})
+                  {Math.min(100, Math.round((importProgress / totalRows) * 100))}% ({importProgress}/{totalRows})
                 </span>
               </div>
               <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2.5">
                 <div 
                   className="bg-blue-600 h-2.5 rounded-full transition-all duration-300" 
-                  style={{ width: `${(importProgress / totalRows) * 100}%` }}
+                  style={{ width: `${Math.min(100, (importProgress / totalRows) * 100)}%` }}
                 ></div>
               </div>
+              {importStatusHint && (
+                <p className="text-xs text-gray-600 dark:text-gray-400 mt-2">{importStatusHint}</p>
+              )}
             </div>
           )}
 

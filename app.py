@@ -4,6 +4,7 @@ import threading as _threading
 import requests
 import json
 import base64
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 
@@ -1502,17 +1503,19 @@ def normalize_identifiers(fnsku=None, asin=None, lpn=None, upc=None):
     def normalize_upc(value):
         if not value:
             return None
-        value = str(value).strip()
+        value = str(value).strip().replace(',', '')
         if not value:
             return None
-        # Fix scientific notation (e.g., "12345.0" -> "12345")
-        if '.' in value:
-            try:
-                float_val = float(value)
-                if float_val.is_integer():
-                    value = str(int(float_val))
-            except ValueError:
-                pass
+        # Excel: plain numbers, trailing .0, or scientific notation (e.g. 7.24129E+11)
+        try:
+            if re.fullmatch(r'-?\d+(\.\d+)?([eE][+-]?\d+)?', value):
+                # Only coerce float/scientific forms; plain digit strings keep leading zeros (UPC/GTIN)
+                if 'e' in value.lower() or '.' in value:
+                    float_val = float(value)
+                    if 'e' in value.lower() or abs(float_val) >= 1e6 or float_val.is_integer():
+                        return str(int(round(float_val)))
+        except (ValueError, OverflowError):
+            pass
         return value
     
     normalized = {
@@ -1658,9 +1661,9 @@ def batch_import():
         csv_headers = data.get('headers', [])
 
         include_in_inventory = bool(data.get('include_in_inventory', False))
-        enrichment_mode = (data.get('enrichment_mode') or 'missing_only').strip().lower()
+        enrichment_mode = (data.get('enrichment_mode') or 'none').strip().lower()
         if enrichment_mode not in ('none', 'missing_only', 'full'):
-            enrichment_mode = 'missing_only'
+            enrichment_mode = 'none'
         try:
             max_enrichment_calls = int(data.get('max_enrichment_calls', 100))
         except (ValueError, TypeError):
@@ -1710,13 +1713,17 @@ def batch_import():
                 return row[key.title()]
             # Try common variations
             variations = {
-                'fnsku': ['fnsku', 'fn_sku', 'fn-sku', 'sku'],
-                'asin': ['asin', 'b00_asin', 'b00-asin'],
-                'lpn': ['lpn', 'x-z_asin', 'x-z-asin', 'xz_asin'],
+                'fnsku': ['fnsku', 'fn_sku', 'fn-sku', 'fn sku', 'Fn Sku', 'sku'],
+                'asin': ['asin', 'b00_asin', 'b00-asin', 'b00 asin', 'B00 ASIN', 'B00 Asin'],
+                'lpn': ['lpn', 'x-z_asin', 'x-z-asin', 'x-z asin', 'X-Z ASIN', 'xz_asin'],
                 'upc': ['upc', 'barcode', 'ean', 'gtin'],
-                'product_name': ['product_name', 'name', 'title', 'description', 'item_name', 'item_desc'],
+                'product_name': ['product_name', 'name', 'title', 'description', 'item_name', 'item_desc', 'Description'],
                 'price': ['price', 'retail', 'msrp', 'cost', 'unit_price'],
-                'category': ['category', 'type', 'department'],
+                'category': [
+                    'category', 'type', 'department',
+                    'Category', 'CATEGORY', 'product category', 'Product Category',
+                    'item category', 'merch category', 'gl category', 'commodity category',
+                ],
                 'quantity': ['quantity', 'qty', 'units', 'count'],
                 'brand': ['brand', 'manufacturer', 'vendor']
             }
@@ -1746,6 +1753,7 @@ def batch_import():
                 raw_category = get_value(csv_row, 'category')
                 raw_brand = get_value(csv_row, 'brand')
                 raw_quantity = get_value(csv_row, 'quantity')
+                raw_manifest_extras = csv_row.get('manifest_extras') if isinstance(csv_row, dict) else None
                 
                 # Normalize identifiers
                 normalized = normalize_identifiers(
@@ -1846,6 +1854,13 @@ def batch_import():
                         'UPC': upc,
                         'user_id': user_id  # Required for RLS
                     }
+                    if isinstance(raw_manifest_extras, dict) and raw_manifest_extras:
+                        # JSONB: string values only for predictable PostgREST serialization
+                        manifest_row['manifest_extras'] = {
+                            str(k): (v if v is None else str(v))
+                            for k, v in raw_manifest_extras.items()
+                            if k is not None and str(k).strip() != ''
+                        }
                     # Only include tenant_id if it exists
                     if tenant_id:
                         manifest_row['tenant_id'] = tenant_id

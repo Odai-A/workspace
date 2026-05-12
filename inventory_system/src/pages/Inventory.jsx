@@ -25,6 +25,7 @@ import {
   getNextItemNumber,
   getWarehouseLayoutSettings,
   isValidLocationCode,
+  formatLocationDisplayForUi,
 } from '../utils/warehouseSettings';
 
 const EXPORT_ALL_LIMIT = 10000;
@@ -897,7 +898,7 @@ const Inventory = () => {
               <div class="title-wrap">
                 <div class="label-title">${escapeHtml(productInfo.name || 'Product')}</div>
                 <div class="label-meta">${escapeHtml(productInfo.asin ? `ASIN: ${productInfo.asin}` : (productInfo.fnsku ? `FNSKU: ${productInfo.fnsku}` : (productInfo.upc ? `UPC: ${productInfo.upc}` : 'CODE')))}</div>
-                <div class="label-meta">LOC: ${escapeHtml(productInfo.location || 'UNASSIGNED')}</div>
+                <div class="label-meta">LOC: ${escapeHtml(formatLocationDisplayForUi(productInfo.location || 'UNASSIGNED'))}</div>
                 <div class="label-meta">ITEM: ${escapeHtml(productInfo.item_number || 'N/A')}</div>
               </div>
               <img class="qr" src="${qrCodeUrl}" alt="QR" />
@@ -929,7 +930,7 @@ const Inventory = () => {
               <div class="zebra-main">
                 <div class="zebra-title">${escapeHtml(productInfo.name || 'Product')}</div>
                 <div class="zebra-meta">${escapeHtml(productInfo.asin ? `ASIN: ${productInfo.asin}` : (productInfo.fnsku ? `FNSKU: ${productInfo.fnsku}` : (productInfo.upc ? `UPC: ${productInfo.upc}` : 'CODE')))}</div>
-                <div class="zebra-meta">LOC: ${escapeHtml(productInfo.location || 'UNASSIGNED')}</div>
+                <div class="zebra-meta">LOC: ${escapeHtml(formatLocationDisplayForUi(productInfo.location || 'UNASSIGNED'))}</div>
                 <div class="zebra-meta">ITEM: ${escapeHtml(productInfo.item_number || 'N/A')}</div>
                 ${zebraBarcode}
                 <div class="zebra-retail">Retail: $${retailPrice.toFixed(2)}</div>
@@ -1309,15 +1310,16 @@ const Inventory = () => {
         item?.fnsku || item?.['Fn Sku'] || item?.FNSKU || item?._rawData?.fnsku || ''
       ).trim();
       const barcodeRaw = getBarcodePayloadForPrint(item);
+      const rawLoc = item?.location || item?.Location || item?._rawData?.location || 'UNASSIGNED';
       return {
         name: escapeHtml(truncateToWordCount(item?.name || item?.Description || 'Unknown Product', 5)),
         barcodeRaw,
         fnskuLine: escapeHtml(fnskuDisplay || 'N/A'),
-        location: escapeHtml(item?.location || item?.Location || item?._rawData?.location || 'UNASSIGNED'),
+        location: escapeHtml(formatLocationDisplayForUi(rawLoc)),
         itemNumber: escapeHtml(
           stripLocationPrefixFromItemNumber(
             item?.item_number || item?.itemNumber || item?.['Item Number'] || item?._rawData?.item_number || 'N/A',
-            item?.location || item?.Location || item?._rawData?.location || ''
+            rawLoc
           ) || 'N/A'
         ),
       };
@@ -2086,7 +2088,7 @@ const Inventory = () => {
               <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">LPN: {rowData['X-Z ASIN'] || 'N/A'}</div>
               <div className="text-xs text-gray-500 dark:text-gray-400">FNSKU: {rowData['Fn Sku'] || 'N/A'}</div>
               <div className="text-xs text-gray-500 dark:text-gray-400">ASIN: {rowData['B00 Asin'] || 'N/A'}</div>
-              <div className="text-xs text-gray-500 dark:text-gray-400">Location: {rowData['Location'] || rowData._rawData?.location || 'N/A'}</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">Location: {formatLocationDisplayForUi(rowData['Location'] || rowData._rawData?.location || 'N/A')}</div>
               <div className="text-xs text-gray-500 dark:text-gray-400">
                 Item #: {
                   stripLocationPrefixFromItemNumber(

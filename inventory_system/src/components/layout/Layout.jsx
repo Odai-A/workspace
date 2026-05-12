@@ -13,10 +13,17 @@ import {
   Cog6ToothIcon,
   CurrencyDollarIcon,
   XMarkIcon,
+  ClipboardDocumentListIcon,
 } from '@heroicons/react/24/outline';
 import { FiUser, FiLogOut } from 'react-icons/fi';
 import { BRAND_NAME } from '../../config/brand';
 import { getApiEndpoint } from '../../utils/apiConfig';
+
+function isNavActive(pathname, itemPath) {
+  if (pathname === itemPath) return true;
+  if (!itemPath || itemPath === '/') return false;
+  return pathname.startsWith(`${itemPath}/`);
+}
 
 // Map for icon components
 const iconMap = {
@@ -29,6 +36,7 @@ const iconMap = {
   UsersIcon,
   Cog6ToothIcon,
   CurrencyDollarIcon,
+  ClipboardDocumentListIcon,
 };
 
 const Layout = () => {
@@ -152,7 +160,7 @@ const Layout = () => {
             <ul className="space-y-2">
               {navigationItems.map((item) => {
                 const Icon = iconMap[item.icon];
-                const isActive = location.pathname === item.path;
+                const isActive = isNavActive(location.pathname, item.path);
                 
                 return (
                   <li key={item.path}>
@@ -230,7 +238,7 @@ const Layout = () => {
             <ul className="space-y-2">
               {navigationItems.map((item) => {
                 const Icon = iconMap[item.icon];
-                const isActive = location.pathname === item.path;
+                const isActive = isNavActive(location.pathname, item.path);
                 return (
                   <li key={item.path}>
                     <Link
@@ -289,7 +297,7 @@ const Layout = () => {
               </svg>
             </button>
             <h1 className="ml-4 text-lg font-semibold text-gray-800 dark:text-gray-200 truncate">
-              {navigationItems.find(item => location.pathname === item.path)?.name || 'Dashboard'}
+              {navigationItems.find((item) => isNavActive(location.pathname, item.path))?.name || 'Dashboard'}
             </h1>
           </div>
           <div className="flex items-center gap-3">

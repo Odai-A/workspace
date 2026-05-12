@@ -24,6 +24,7 @@ import { FiPackage, FiDatabase, FiBarChart2, FiUsers, FiActivity, FiSearch, FiSh
 import { useAuth } from '../contexts/AuthContext';
 import { productLookupService } from '../services/databaseService';
 import { inventoryService } from '../config/supabaseClient';
+import { formatLocationDisplayForUi } from '../utils/warehouseSettings';
 import { toast } from 'react-toastify';
 
 // Reusable StatCard component (can be moved to ui components if used elsewhere)
@@ -352,7 +353,7 @@ const Dashboard = () => {
                           {item.name || 'Unknown Product'}
                         </p>
                         <p className="text-xs text-gray-500 dark:text-gray-400">
-                          Qty: {item.quantity || 0} • Location: {item.location || 'Default'}
+                          Qty: {item.quantity || 0} • Location: {formatLocationDisplayForUi(item.location || 'Default')}
                         </p>
                       </div>
                     </div>

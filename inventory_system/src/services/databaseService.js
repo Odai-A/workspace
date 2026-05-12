@@ -571,44 +571,122 @@ export const productLookupService = {
       console.warn('getProductByLpn: No user ID found - cannot fetch manifest data');
       return null;
     }
-    
+
     const lpnColumn = columnMap['lpn'];
     if (!lpnColumn) {
       console.error('getProductByLpn: LPN column name is not mapped correctly.');
       return null;
     }
-    const { data, error } = await supabase
-      .from(PRODUCT_TABLE) // PRODUCT_TABLE is 'manifest_data'
-      .select('*')
-      .eq(lpnColumn, lpnValue)
-      .eq('user_id', userId) // Only get current user's manifest data
-      .maybeSingle();
-    if (error) {
-      console.error('Error fetching product by LPN from manifest_data:', error);
-      return null;
+
+    const rawIn = String(lpnValue || '').trim();
+    if (!rawIn) return null;
+
+    const normalizeLpn = (s) => String(s || '')
+      .trim()
+      .toUpperCase()
+      .replace(/\s+/g, '')
+      .replace(/[^A-Z0-9]/g, '');
+
+    const normalized = normalizeLpn(rawIn);
+    if (!normalized) return null;
+
+    /** ILIKE exact match: escape % and _ so they are literal. */
+    const escapeIlikeExact = (s) => String(s)
+      .replace(/\\/g, '\\\\')
+      .replace(/%/g, '\\%')
+      .replace(/_/g, '\\_');
+
+    const mapManifestRow = (item) => ({
+      id: item.id,
+      fnsku: item[columnMap.fnsku],
+      asin: item[columnMap.asin],
+      name: item[columnMap.name],
+      description: item[columnMap.description],
+      price: item[columnMap.price] != null ? parseFloat(item[columnMap.price]).toFixed(2) : '0.00',
+      category: item[columnMap.category],
+      upc: item[columnMap.upc],
+      sku: item[columnMap.lpn],
+      lpn: item[columnMap.lpn],
+      quantity: item[columnMap.quantity],
+      source: 'local_database',
+      cost_status: 'no_charge',
+      asin_found: !!item[columnMap.asin],
+      rawSupabase: item,
+      code_type: 'LPN',
+    });
+
+    const fetchOne = async (applyFilter) => {
+      let q = supabase
+        .from(PRODUCT_TABLE)
+        .select('*')
+        .eq('user_id', userId);
+      q = applyFilter(q);
+      const { data, error } = await q.limit(1);
+      if (error) {
+        console.error('getProductByLpn query error:', error);
+        return null;
+      }
+      const row = Array.isArray(data) && data.length > 0 ? data[0] : null;
+      return row;
+    };
+
+    // 1) Exact match (normalized like import pipeline)
+    let item = await fetchOne((q) => q.eq(lpnColumn, normalized));
+    if (!item) {
+      // 2) Exact as scanned (trim only) — handles legacy rows before uppercase normalization
+      item = await fetchOne((q) => q.eq(lpnColumn, rawIn));
     }
-    if (data) {
-        console.log('✅ Found by LPN in manifest_data, mapping to display format...');
-        const item = data;
-        return {
-            id: item.id,
-            fnsku: item[columnMap.fnsku],
-            asin: item[columnMap.asin],
-            name: item[columnMap.name],
-            description: item[columnMap.description],
-            price: item[columnMap.price] != null ? parseFloat(item[columnMap.price]).toFixed(2) : '0.00',
-            category: item[columnMap.category],
-            upc: item[columnMap.upc],
-            sku: item[columnMap.lpn], // For LPN lookups, LPN itself is the primary identifier
-            lpn: item[columnMap.lpn],
-            quantity: item[columnMap.quantity],
-            source: 'local_database', // Clearly mark as from local manifest
-            cost_status: 'no_charge',
-            asin_found: !!item[columnMap.asin],
-            rawSupabase: item,
-            code_type: 'LPN',
-        };
+    if (!item) {
+      // 3) Case-insensitive exact match (Postgres ILIKE without wildcards)
+      item = await fetchOne((q) => q.ilike(lpnColumn, escapeIlikeExact(normalized)));
     }
+
+    // 4) LPN stored only in manifest_extras (unmapped CSV column on import)
+    if (!item) {
+      const extrasContainsAttempts = [
+        { LPN: normalized },
+        { lpn: normalized },
+        { 'X-Z ASIN': normalized },
+      ];
+      const extraRows = await Promise.all(
+        extrasContainsAttempts.map((needle) => fetchOne((q) => q.contains('manifest_extras', needle)))
+      );
+      item = extraRows.find(Boolean) || null;
+    }
+
+    if (!item) {
+      const { data: wide, error: wideErr } = await supabase
+        .from(PRODUCT_TABLE)
+        .select('*')
+        .eq('user_id', userId)
+        .filter('manifest_extras::text', 'ilike', `%${normalized}%`)
+        .limit(30);
+      if (!wideErr && Array.isArray(wide) && wide.length) {
+        for (const row of wide) {
+          const xz = row[lpnColumn];
+          if (xz != null && normalizeLpn(xz) === normalized) {
+            item = row;
+            break;
+          }
+          const ex = row.manifest_extras;
+          if (ex && typeof ex === 'object') {
+            for (const v of Object.values(ex)) {
+              if (v != null && normalizeLpn(String(v)) === normalized) {
+                item = row;
+                break;
+              }
+            }
+          }
+          if (item) break;
+        }
+      }
+    }
+
+    if (item) {
+      console.log('✅ Found by LPN in manifest_data, mapping to display format...');
+      return mapManifestRow(item);
+    }
+
     return null;
   },
 

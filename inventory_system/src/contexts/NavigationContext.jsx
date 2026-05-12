@@ -174,6 +174,13 @@ export const NavigationProvider = ({ children }) => {
       roles: ['ceo', 'admin', 'manager'] // CEO, admin and manager can import
     },
     {
+      name: 'Manifests',
+      path: '/manifests',
+      icon: 'ClipboardDocumentListIcon',
+      permission: 'view_inventory',
+      roles: ['ceo', 'admin', 'manager', 'employee']
+    },
+    {
       name: 'Reports',
       path: '/reports',
       icon: 'ChartBarIcon',

@@ -19,6 +19,7 @@ import Login from './pages/Login';
 import Register from './pages/Register';
 import Users from './pages/Users';
 import ProductImport from './pages/ProductImport';
+import Manifests from './pages/Manifests';
 import PricingPage from './pages/PricingPage';
 import CustomerDashboardPage from './pages/CustomerDashboardPage';
 import SuccessPage from './pages/SuccessPage';
@@ -77,6 +78,8 @@ function App() {
               <Route path="users" element={<Users />} />
               <Route path="pricing" element={<PricingPage />} />
               <Route path="product-import" element={<ProductImport />} />
+              <Route path="manifests" element={<Manifests />} />
+              <Route path="manifests/:sessionKey" element={<Manifests />} />
             </Route>
             
             {/* Fallback for unknown routes */}

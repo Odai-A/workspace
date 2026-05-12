@@ -193,6 +193,9 @@ export const isValidLocationCode = (code, layout = getWarehouseLayoutSettings())
   return getLocationOptions(layout).some((option) => option.toUpperCase() === normalized);
 };
 
+/** UI / printed LOC line: hide default `STORAGE-` prefix (stored location is unchanged). */
+export const formatLocationDisplayForUi = (code) => String(code || '').trim().replace(/^STORAGE-/i, '');
+
 export const getNextItemNumber = (locationCode) => {
   const normalizedLocation = String(locationCode || 'UNASSIGNED')
     .trim()

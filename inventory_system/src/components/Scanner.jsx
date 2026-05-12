@@ -11,7 +11,7 @@ import ShopifyListing from './ShopifyListing';
 // All API calls now go through backend /api/scan endpoint
 import { productLookupService as dbProductLookupService, apiCacheService } from '../services/databaseService';
 import { inventoryService, supabase } from '../config/supabaseClient';
-import { XMarkIcon, ArrowUpTrayIcon, ShoppingBagIcon, ExclamationTriangleIcon, CheckCircleIcon, ArrowTopRightOnSquareIcon, PrinterIcon, QrCodeIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, ShoppingBagIcon, ExclamationTriangleIcon, CheckCircleIcon, ArrowTopRightOnSquareIcon, PrinterIcon, QrCodeIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
 import { mockService } from '../services/mockData';
 import { useAuth } from '../contexts/AuthContext';
 import { getApiUrl, getApiEndpoint } from '../utils/apiConfig';
@@ -81,6 +81,12 @@ const getCachedLocalLookup = (code) => {
   const entry = __localLookupCache.get(key);
   if (!entry) return undefined;
   if (entry.expiresAt < Date.now()) {
+    __localLookupCache.delete(key);
+    return undefined;
+  }
+  // Do not treat a cached "miss" as authoritative — manifest/import can change,
+  // and LPN resolution was improved over time; always re-query after TTL or when null.
+  if (entry.value === null) {
     __localLookupCache.delete(key);
     return undefined;
   }
@@ -333,6 +339,18 @@ const Scanner = () => {
   // Add states for manual database check and processing status
   const [isCheckingDatabase, setIsCheckingDatabase] = useState(false);
   const [apiEnrichLoading, setApiEnrichLoading] = useState(false);
+  const [rainforestFetchLoading, setRainforestFetchLoading] = useState(false);
+  const [manifestAutoRainforestLoading, setManifestAutoRainforestLoading] = useState(false);
+  const [autoRainforestManifest, setAutoRainforestManifest] = useState(() => {
+    try {
+      return typeof localStorage !== 'undefined' && localStorage.getItem('scanner_auto_rainforest_manifest') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const autoRainforestManifestRef = useRef(autoRainforestManifest);
+  autoRainforestManifestRef.current = autoRainforestManifest;
+  const [batchRainforestCode, setBatchRainforestCode] = useState(null);
   const [batchForceLookupCode, setBatchForceLookupCode] = useState(null);
   const [batchEnrichAllRunning, setBatchEnrichAllRunning] = useState(false);
   const [lastScannedCode, setLastScannedCode] = useState('');
@@ -353,6 +371,9 @@ const Scanner = () => {
   const activeRetryCodesRef = useRef(new Set());
   /** Avoid parallel image-only enrich / force lookups for the same code. */
   const imageEnrichPendingRef = useRef(new Set());
+  /** Avoid duplicate manifest → Rainforest auto merges for the same scan code. */
+  const rainforestManifestAutoPendingRef = useRef(new Set());
+  const manifestRainforestAutoInFlightRef = useRef(0);
   const forceApiLookupInFlightRef = useRef(new Set());
   const productInfoSectionRef = useRef(null);
   const scanTimingStartRef = useRef(0);
@@ -1190,8 +1211,11 @@ const Scanner = () => {
     imageUrl = images[0] || '';
 
     return {
-      fnsku: manifestProduct?.fnsku || fallbackCode,
+      fnsku: manifestProduct?.fnsku || '',
+      lpn: manifestProduct?.lpn || '',
       asin: manifestProduct?.asin || '',
+      code_type: manifestProduct?.code_type || '',
+      quantity: manifestProduct?.quantity,
       name: manifestProduct?.name || manifestProduct?.description || fallbackCode,
       image_url: imageUrl,
       images,
@@ -1200,7 +1224,7 @@ const Scanner = () => {
       category: manifestProduct?.category || '',
       description: manifestProduct?.description || manifestProduct?.name || '',
       upc: manifestProduct?.upc || '',
-      source: manifestProduct?.source || 'local_database',
+      source: 'manifest_data',
       cost_status: 'no_charge',
     };
   };
@@ -1278,6 +1302,9 @@ const Scanner = () => {
           { source: localMatch.source, recovered: true },
           { skipAutoInventory }
         );
+        if (localMatch.source === 'manifest_data') {
+          scheduleAutoRainforestForManifestProduct(localMatch.product, normalizedCode);
+        }
         return true;
       }
 
@@ -1356,6 +1383,9 @@ const Scanner = () => {
     if (localMatch?.product && (!requireImages || hasProductImages(localMatch.product))) {
       await handleProductFound(localMatch.product, normalizedCode, { source: localMatch.source }, { skipAutoInventory });
       completeScanTimer('DB_RECOVERY', normalizedCode);
+      if (localMatch.source === 'manifest_data') {
+        scheduleAutoRainforestForManifestProduct(localMatch.product, normalizedCode);
+      }
       return true;
     }
 
@@ -1406,6 +1436,9 @@ const Scanner = () => {
     if (finalLocalMatch?.product) {
       await handleProductFound(finalLocalMatch.product, normalizedCode, { source: finalLocalMatch.source }, { skipAutoInventory });
       completeScanTimer('DB_RECOVERY', normalizedCode);
+      if (finalLocalMatch.source === 'manifest_data') {
+        scheduleAutoRainforestForManifestProduct(finalLocalMatch.product, normalizedCode);
+      }
       return true;
     }
 
@@ -1441,7 +1474,16 @@ const Scanner = () => {
       return result;
     }
 
-    setCachedLocalLookup(normalizedCode, null);
+    const manifestByLpn = await dbProductLookupService.getProductByLpn(normalizedCode);
+    if (manifestByLpn) {
+      const result = {
+        product: buildDisplayableManifestProduct(manifestByLpn, normalizedCode),
+        source: 'manifest_data',
+      };
+      setCachedLocalLookup(normalizedCode, result);
+      return result;
+    }
+
     return null;
   };
 
@@ -1459,7 +1501,11 @@ const Scanner = () => {
       if (!silent) {
         toast.info(`Loaded ${normalizedCode} from local database while backend is unavailable.`, { autoClose: 2500 });
       }
-      if (!hasProductImages(localMatch.product) && localMatch.product.asin) {
+      if (
+        localMatch.source !== 'manifest_data'
+        && !hasProductImages(localMatch.product)
+        && localMatch.product.asin
+      ) {
         const k = normalizedCode;
         if (!imageEnrichPendingRef.current.has(k)) {
           imageEnrichPendingRef.current.add(k);
@@ -1467,6 +1513,9 @@ const Scanner = () => {
             .finally(() => imageEnrichPendingRef.current.delete(k))
             .catch(() => {});
         }
+      }
+      if (localMatch.source === 'manifest_data') {
+        scheduleAutoRainforestForManifestProduct(localMatch.product, normalizedCode);
       }
       return true;
     }
@@ -1516,13 +1565,22 @@ const Scanner = () => {
       const localMatch = await findProductInLocalSources(upperCode);
       if (localMatch?.product) {
         await handleProductFound(localMatch.product, upperCode, { cached: true, source: localMatch.source });
+        setLastScannedCode(upperCode);
         completeScanTimer('DB', upperCode);
         if (!batchMode && !posUi) {
-          toast.success('Found in your database.');
+          toast.success(
+            localMatch.source === 'manifest_data'
+              ? 'Found in your manifest.'
+              : 'Found in your database.'
+          );
         }
         setLoading(false);
-        // Background image enrichment — show product immediately, fetch images silently
-        if (!hasProductImages(localMatch.product) && localMatch.product.asin) {
+        // Non-manifest: optional silent Amazon API image recovery. Manifest: optional Rainforest auto-merge (toggle).
+        if (
+          localMatch.source !== 'manifest_data'
+          && !hasProductImages(localMatch.product)
+          && localMatch.product.asin
+        ) {
           const k = upperCode;
           if (!imageEnrichPendingRef.current.has(k)) {
             imageEnrichPendingRef.current.add(k);
@@ -1530,6 +1588,9 @@ const Scanner = () => {
               .finally(() => imageEnrichPendingRef.current.delete(k))
               .catch(() => {});
           }
+        }
+        if (localMatch.source === 'manifest_data') {
+          scheduleAutoRainforestForManifestProduct(localMatch.product, upperCode);
         }
         return;
       }
@@ -2185,6 +2246,165 @@ const Scanner = () => {
     }
     
     return null;
+  };
+
+  const mergeRainforestIntoProduct = (baseProduct, rf) => {
+    if (!rf || !baseProduct) return baseProduct;
+    const images = Array.isArray(rf.images) && rf.images.length > 0
+      ? rf.images
+      : (rf.image ? [rf.image] : []);
+    const primary = images[0] || baseProduct.image_url || '';
+    return {
+      ...baseProduct,
+      image_url: primary || baseProduct.image_url,
+      images: images.length > 0 ? images : (baseProduct.images || []),
+      ...(rf.title && (!baseProduct.name || String(baseProduct.name).trim().length < 3)
+        ? { name: rf.title }
+        : {}),
+      ...(rf.description ? { description: rf.description } : {}),
+      ...(rf.brand ? { brand: rf.brand } : {}),
+      ...(rf.category ? { category: rf.category } : {}),
+      ...(rf.price != null && rf.price !== '' ? { price: rf.price } : {}),
+      ...(rf.rating != null ? { rating: rf.rating } : {}),
+      ...(rf.reviews_count != null ? { reviews_count: rf.reviews_count } : {}),
+    };
+  };
+
+  const applyRainforestForManifestProduct = async (baseProduct, scanCodeUpper, options = {}) => {
+    const { showToasts = false } = options;
+    const asin = String(baseProduct?.asin || '').trim();
+    if (asin.length < 10) {
+      if (showToasts) {
+        toast.error('This row has no ASIN; add an ASIN in the manifest to load Amazon photos.');
+      }
+      return null;
+    }
+    if (!import.meta.env.VITE_RAINFOREST_API_KEY) {
+      if (showToasts) {
+        toast.error('Rainforest is not configured. Set VITE_RAINFOREST_API_KEY in your environment.');
+      }
+      return null;
+    }
+    const rf = await fetchProductDataFromRainforest(asin);
+    if (!rf || ((!rf.images || rf.images.length === 0) && !rf.image)) {
+      if (showToasts) {
+        toast.warning('Rainforest returned no images for this ASIN.');
+      }
+      return null;
+    }
+    const merged = mergeRainforestIntoProduct(baseProduct, rf);
+    const rowProduct = {
+      name: merged.name,
+      asin: merged.asin,
+      fnsku: merged.fnsku,
+      lpn: merged.lpn,
+      upc: merged.upc,
+      price: merged.price,
+      category: merged.category,
+      image_url: merged.image_url,
+      images: merged.images,
+    };
+    const lc = scanCodeUpper && String(scanCodeUpper).trim().toUpperCase();
+
+    if (batchModeRef.current) {
+      setBatchQueue((prev) => updateFirstBatchQueueItem(
+        prev,
+        (item) => String(item.code).toUpperCase() === lc && !item.hasFailed,
+        (item) => ({ ...item, product: merged })
+      ).nextQueue);
+    } else {
+      setProductInfo(merged);
+      if (lc) {
+        setScannedCodes((prev) => prev.map((item) => (
+          String(item.code).toUpperCase() === lc
+            ? { ...item, productInfo: rowProduct }
+            : item
+        )));
+      }
+    }
+    if (showToasts) {
+      toast.success('Images and listing details loaded from Rainforest.');
+    }
+    return merged;
+  };
+
+  const scheduleAutoRainforestForManifestProduct = (baseProduct, scanCodeUpper) => {
+    if (!autoRainforestManifestRef.current) return;
+    if (!baseProduct || baseProduct.source !== 'manifest_data') return;
+    const asin = String(baseProduct.asin || '').trim();
+    if (asin.length < 10) return;
+    if (!import.meta.env.VITE_RAINFOREST_API_KEY) return;
+    const codeKey = String(scanCodeUpper || '').trim().toUpperCase();
+    if (!codeKey) return;
+    if (rainforestManifestAutoPendingRef.current.has(codeKey)) return;
+    rainforestManifestAutoPendingRef.current.add(codeKey);
+    const base = baseProduct;
+    queueMicrotask(() => {
+      manifestRainforestAutoInFlightRef.current += 1;
+      setManifestAutoRainforestLoading(true);
+      void applyRainforestForManifestProduct(base, codeKey, { showToasts: false })
+        .then((m) => {
+          if (m) {
+            const brief = batchModeRef.current
+              ? `Rainforest merged for ${codeKey}.`
+              : 'Rainforest listing merged into manifest row.';
+            toast.info(brief, { autoClose: 2200 });
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          rainforestManifestAutoPendingRef.current.delete(codeKey);
+          manifestRainforestAutoInFlightRef.current -= 1;
+          if (manifestRainforestAutoInFlightRef.current <= 0) {
+            manifestRainforestAutoInFlightRef.current = 0;
+            setManifestAutoRainforestLoading(false);
+          }
+        });
+    });
+  };
+
+  const handleFetchRainforestManifestImages = async () => {
+    if (!productInfo || batchMode) return;
+    if (rainforestFetchLoading) return;
+    setRainforestFetchLoading(true);
+    try {
+      await applyRainforestForManifestProduct(
+        productInfo,
+        (lastScannedCode && String(lastScannedCode).trim().toUpperCase()) || '',
+        { showToasts: true }
+      );
+    } finally {
+      setRainforestFetchLoading(false);
+    }
+  };
+
+  const handleFetchRainforestBatchItem = async (code, product) => {
+    if (!product?.asin) return;
+    const asin = String(product.asin).trim();
+    if (asin.length < 10) {
+      toast.error('No ASIN on this manifest row.');
+      return;
+    }
+    if (!import.meta.env.VITE_RAINFOREST_API_KEY) {
+      toast.error('Set VITE_RAINFOREST_API_KEY to use Rainforest.');
+      return;
+    }
+    const upper = String(code || '').trim().toUpperCase();
+    if (!upper || batchRainforestCode) return;
+    setBatchRainforestCode(upper);
+    try {
+      const merged = await applyRainforestForManifestProduct(product, upper, { showToasts: false });
+      if (!merged) {
+        toast.warning(`Rainforest returned no images for ${upper}.`);
+        return;
+      }
+      toast.success(`Rainforest images loaded for ${upper}.`, { autoClose: 2000 });
+    } catch (e) {
+      console.error(e);
+      toast.error(e?.message || 'Rainforest request failed');
+    } finally {
+      setBatchRainforestCode(null);
+    }
   };
 
   // Handle printing 4x6 label
@@ -2958,14 +3178,6 @@ const Scanner = () => {
               .no-print {
                 display: none;
               }
-              .label-page {
-                page-break-after: always;
-                break-after: page;
-              }
-              .label-page:last-child {
-                page-break-after: auto;
-                break-after: auto;
-              }
               * {
                 -webkit-print-color-adjust: exact;
                 print-color-adjust: exact;
@@ -3007,8 +3219,10 @@ const Scanner = () => {
               display: flex;
               flex-direction: column;
               position: relative;
-              page-break-after: always;
-              break-after: page;
+            }
+            .label-page + .label-page {
+              page-break-before: always;
+              break-before: page;
             }
             .qr-code-top-right {
               position: absolute;
@@ -3307,12 +3521,10 @@ const Scanner = () => {
               margin: 0;
               padding: 0;
               overflow: hidden;
-              page-break-after: always;
-              break-after: page;
             }
-            .label-page:last-child {
-              page-break-after: auto;
-              break-after: auto;
+            .label-page + .label-page {
+              page-break-before: always;
+              break-before: page;
             }
             .label {
               width: 2in;
@@ -4709,13 +4921,24 @@ const Scanner = () => {
 
   function productNeedsAmazonEnrich(product) {
     if (!product) return false;
+    if (product.source === 'manifest_data') {
+      return false;
+    }
     const hasImg = !!(product.image_url && String(product.image_url).trim()) ||
       (Array.isArray(product.images) && product.images.length > 0);
-    const minimal = product.source === 'manifest_data' || product.source === 'products';
+    const minimal = product.source === 'products';
     return !hasImg || minimal;
   }
 
+  function productNeedsRainforestEnrich(product) {
+    if (!product?.asin) return false;
+    if (product.source !== 'manifest_data') return false;
+    const asin = String(product.asin).trim();
+    return asin.length >= 10;
+  }
+
   const showAmazonEnrichButton = !batchMode && !!productInfo && productNeedsAmazonEnrich(productInfo);
+  const showRainforestFetchButton = !batchMode && !!productInfo && productNeedsRainforestEnrich(productInfo);
 
   const handleEnrichAllBatchFromAmazon = async () => {
     if (!userId) {
@@ -4902,6 +5125,39 @@ const Scanner = () => {
             </button>
           </div>
         )}
+      </div>
+
+      <div className="mb-4 flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 bg-emerald-50 dark:bg-emerald-900/15 border border-emerald-200 dark:border-emerald-800 rounded-lg p-4">
+        <div className="flex items-start space-x-3">
+          <input
+            type="checkbox"
+            id="autoRainforestManifest"
+            checked={autoRainforestManifest}
+            onChange={(e) => {
+              const v = e.target.checked;
+              setAutoRainforestManifest(v);
+              try {
+                if (typeof localStorage !== 'undefined') {
+                  localStorage.setItem('scanner_auto_rainforest_manifest', v ? '1' : '0');
+                }
+              } catch {
+                /* ignore */
+              }
+              if (v && !import.meta.env.VITE_RAINFOREST_API_KEY) {
+                toast.warning('Add VITE_RAINFOREST_API_KEY to your environment for Rainforest auto-fetch.', { autoClose: 5000 });
+              }
+            }}
+            className="h-5 w-5 mt-0.5 text-emerald-600 border-gray-300 rounded focus:ring-emerald-500 shrink-0"
+          />
+          <div>
+            <label htmlFor="autoRainforestManifest" className="text-base font-semibold text-gray-800 dark:text-gray-200 cursor-pointer">
+              Auto-fetch Rainforest for manifest scans
+            </label>
+            <p className="text-sm text-gray-600 dark:text-gray-400 mt-1 max-w-2xl">
+              When enabled, any product resolved from your manifest (LPN, FNSKU, etc.) with an ASIN is merged with Rainforest listing data automatically after the scan. When off, only the manual “Fetch images (Rainforest)” control runs. Your choice is saved in this browser.
+            </p>
+          </div>
+        </div>
       </div>
 
       {batchMode && (
@@ -5108,6 +5364,23 @@ const Scanner = () => {
                     )}
                   </button>
                 )}
+                {item.product && productNeedsRainforestEnrich(item.product) && !item.isProcessing && !item.hasFailed && (
+                  <button
+                    type="button"
+                    onClick={() => void handleFetchRainforestBatchItem(item.code, item.product)}
+                    disabled={!import.meta.env.VITE_RAINFOREST_API_KEY || batchRainforestCode !== null}
+                    className="mt-2 w-full px-2 py-1.5 text-xs font-medium rounded-md text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {batchRainforestCode === item.code ? (
+                      <span className="inline-flex items-center justify-center gap-1.5">
+                        <span className="h-3 w-3 border-2 border-white border-t-transparent rounded-full animate-spin shrink-0" aria-hidden="true" />
+                        Rainforest…
+                      </span>
+                    ) : (
+                      'Fetch images (Rainforest)'
+                    )}
+                  </button>
+                )}
                 {item.product && !item.isProcessing && !item.hasFailed && (
                   <button
                     type="button"
@@ -5126,7 +5399,7 @@ const Scanner = () => {
         </div>
       )}
 
-      {/* Top Search Bar and Import Button */}
+      {/* Top search bar */}
       <div className="mb-6 flex flex-col md:flex-row items-center justify-between gap-4">
         <div className="flex-grow w-full md:w-auto">
           <label htmlFor="productSearchTop" className="sr-only">Search by LPN, FNSKU, or ASIN</label>
@@ -5154,15 +5427,6 @@ const Scanner = () => {
           />
           <label htmlFor="exactMatch" className="text-sm text-gray-700 dark:text-gray-300">Exact Match</label>
         </div>
-        <button
-          type="button"
-          className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 whitespace-nowrap"
-          onClick={() => setShowFileImportModal(true)}
-          disabled={loading}
-        >
-          <ArrowUpTrayIcon className="-ml-1 mr-2 h-5 w-5" aria-hidden="true" />
-          Import File
-        </button>
       </div>
       
       {/* Search Results Dropdown (positioned relative to the search bar container) */}
@@ -5358,6 +5622,13 @@ const Scanner = () => {
                 </div>
               )}
 
+              {manifestAutoRainforestLoading && (
+                <div className="mb-3 p-3 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-md flex items-center gap-2">
+                  <span className="inline-block h-4 w-4 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin shrink-0" aria-hidden="true" />
+                  <p className="text-sm text-emerald-800 dark:text-emerald-200">Merging manifest row with Rainforest (ASIN)…</p>
+                </div>
+              )}
+
               {showAmazonEnrichButton && (
                 <div className="mb-4 p-3 bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-600 rounded-md">
                   <p className="text-xs text-gray-600 dark:text-gray-400 mb-2">
@@ -5372,6 +5643,28 @@ const Scanner = () => {
                     <ArrowPathIcon className={`h-4 w-4 mr-2 shrink-0 ${apiEnrichLoading ? 'animate-spin' : ''}`} />
                     {apiEnrichLoading ? 'Fetching from Amazon…' : 'Fetch images & details (Amazon API)'}
                   </button>
+                </div>
+              )}
+
+              {showRainforestFetchButton && (
+                <div className="mb-4 p-3 bg-emerald-50 dark:bg-emerald-900/20 border border-emerald-200 dark:border-emerald-800 rounded-md">
+                  <p className="text-xs text-gray-600 dark:text-gray-400 mb-2">
+                    This product was loaded from your manifest. Fetch listing photos and extra fields from Rainforest (by ASIN). Turn on “Auto-fetch Rainforest for manifest scans” above to do this automatically after each manifest hit; leave it off to use only this button.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void handleFetchRainforestManifestImages()}
+                    disabled={rainforestFetchLoading || manifestAutoRainforestLoading || loading || !import.meta.env.VITE_RAINFOREST_API_KEY}
+                    className="inline-flex items-center px-3 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-emerald-600 hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <ArrowPathIcon className={`h-4 w-4 mr-2 shrink-0 ${rainforestFetchLoading ? 'animate-spin' : ''}`} />
+                    {rainforestFetchLoading ? 'Fetching from Rainforest…' : 'Fetch images (Rainforest)'}
+                  </button>
+                  {!import.meta.env.VITE_RAINFOREST_API_KEY && (
+                    <p className="text-xs text-amber-700 dark:text-amber-300 mt-2">
+                      Add VITE_RAINFOREST_API_KEY to your <code className="font-mono">.env</code> to enable this button.
+                    </p>
+                  )}
                 </div>
               )}
 
