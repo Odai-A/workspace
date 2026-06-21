@@ -19,7 +19,13 @@ import { productLookupService } from '../services/databaseService';
 import { inventoryService, supabase, formatSupabaseError } from '../config/supabaseClient';
 import { exportMarketplace } from '../utils/marketplaceExport';
 import axios from 'axios';
-import { getLabelDiscountPercent, getLabelPrinterProfile, buildInventory4x6PriceBlockHtml, LABEL_4X6_QR_PRICE_CSS } from '../utils/labelSettings';
+import {
+  getLabelDiscountPercent,
+  getLabelPrinterProfile,
+  getLabelQrInsteadOfPriceBodyClass,
+  buildInventory4x6PriceBlockHtml,
+  LABEL_4X6_QR_PRICE_CSS,
+} from '../utils/labelSettings';
 import {
   getLocationOptions,
   getNextItemNumber,
@@ -1275,7 +1281,7 @@ const Inventory = () => {
           </style>
           <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
         </head>
-        <body>
+        <body class="${profile === '4x6' ? getLabelQrInsteadOfPriceBodyClass() : ''}">
           <div class="toolbar no-print">
             <button class="print-button" onclick="window.print()">Print Labels</button>
           </div>

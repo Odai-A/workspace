@@ -87,15 +87,22 @@ export const setLabelQrInsteadOfPrice4x6 = (enabled) => {
 
 /** CSS shared by Scanner + Inventory 4x6 label templates. */
 export const LABEL_4X6_QR_PRICE_CSS = `
-  .price-section-qr-only,
-  .price-block-qr-only {
+  .label-qr-instead-of-price .qr-code-top-right,
+  .label-qr-instead-of-price .header-row .qr {
+    display: none !important;
+  }
+  .price-section.price-section-qr-only,
+  .price-block.price-block-qr-only {
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    width: 100%;
     margin-top: auto;
     margin-bottom: 0.05in;
-    padding: 0.04in 0;
+    padding: 0.05in 0 0.04in;
+    text-align: center;
+    align-self: stretch;
   }
   .price-qr-large {
     width: 1.4in;
@@ -104,8 +111,15 @@ export const LABEL_4X6_QR_PRICE_CSS = `
     padding: 0.05in;
     background: #fff;
     object-fit: contain;
+    display: block;
+    margin: 0 auto;
   }
 `;
+
+/** Body class when 4x6 labels use a bottom QR instead of prices. */
+export const getLabelQrInsteadOfPriceBodyClass = () => (
+  getLabelQrInsteadOfPrice4x6() ? 'label-qr-instead-of-price' : ''
+);
 
 /**
  * Build a larger QR image URL from an existing qrserver.com URL.

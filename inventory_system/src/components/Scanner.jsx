@@ -27,6 +27,7 @@ import {
 import {
   buildScanner4x6PriceSectionHtml,
   getLabelDiscountPercent,
+  getLabelQrInsteadOfPriceBodyClass,
   LABEL_4X6_QR_PRICE_CSS,
 } from '../utils/labelSettings';
 
@@ -3007,7 +3008,7 @@ const Scanner = () => {
             ${LABEL_4X6_QR_PRICE_CSS}
           </style>
         </head>
-        <body>
+        <body class="${getLabelQrInsteadOfPriceBodyClass()}">
           <div class="no-print">
             <button class="print-button" onclick="window.print()">Print Label</button>
           </div>
@@ -3402,7 +3403,7 @@ const Scanner = () => {
             ${LABEL_4X6_QR_PRICE_CSS}
           </style>
         </head>
-        <body>
+        <body class="${getLabelQrInsteadOfPriceBodyClass()}">
           <div class="no-print">
             <button class="print-button" onclick="window.print()">Print All Labels</button>
           </div>
