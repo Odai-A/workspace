@@ -24,6 +24,11 @@ import {
   isValidLocationCode,
   setWarehouseLayoutSettings,
 } from '../utils/warehouseSettings';
+import {
+  buildScanner4x6PriceSectionHtml,
+  getLabelDiscountPercent,
+  LABEL_4X6_QR_PRICE_CSS,
+} from '../utils/labelSettings';
 
 // Module-level concurrency gate for /api/scan calls.
 // Prevents the "scan storm" where rapid batch-mode scans fire 50+ parallel
@@ -2735,20 +2740,19 @@ const Scanner = () => {
 
   // Helper function to create label HTML
   const createLabelHTML = (productInfo, amazonUrl, qrCodeHtml) => {
-    // Get discount percentage from settings
-    const discountPercent = parseFloat(localStorage.getItem('labelDiscountPercent')) || 50;
+    const discountPercent = getLabelDiscountPercent();
     const discountMultiplier = (100 - discountPercent) / 100;
-    
-    // Calculate prices automatically
     const retailPrice = productInfo.price != null ? parseFloat(productInfo.price) : 0;
     const ourPrice = retailPrice * discountMultiplier;
-    
-    // Show full product name (no truncation)
     const productName = productInfo.name || 'Product';
-    
-    // Get product identifier for title (ASIN, UPC, FNSKU, or code)
     const productId = productInfo.asin || productInfo.upc || productInfo.fnsku || productInfo.code || 'Product';
     const barcodeSectionHtml = build4x6BarcodeHtml(productInfo);
+    const priceSectionHtml = buildScanner4x6PriceSectionHtml({
+      retailPrice,
+      ourPrice,
+      discountPercent,
+      qrCodeUrl: qrCodeHtml,
+    });
 
     return `
       <!DOCTYPE html>
@@ -3000,6 +3004,7 @@ const Scanner = () => {
             .print-button:hover {
               background: #2563eb;
             }
+            ${LABEL_4X6_QR_PRICE_CSS}
           </style>
         </head>
         <body>
@@ -3036,17 +3041,7 @@ const Scanner = () => {
             `}
           </div>
 
-          ${retailPrice > 0 ? `
-            <div class="price-section">
-              <div class="retail-price">
-                <span class="retail-price-label">RETAIL:</span> $${retailPrice.toFixed(2)}
-              </div>
-              <div class="our-price-label">OUR PRICE:</div>
-              <div class="our-price">
-                $${ourPrice.toFixed(2)} <span style="font-size: 12pt; color: #059669;">(${discountPercent}% OFF)</span>
-              </div>
-            </div>
-          ` : ''}
+          ${priceSectionHtml}
           ${barcodeSectionHtml ? `
           <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
           <script>
@@ -3082,12 +3077,18 @@ const Scanner = () => {
 
   // Helper function to create a single label body (without HTML wrapper)
   const createLabelBody = (productInfo, amazonUrl, qrCodeHtml) => {
-    const discountPercent = parseFloat(localStorage.getItem('labelDiscountPercent')) || 50;
+    const discountPercent = getLabelDiscountPercent();
     const discountMultiplier = (100 - discountPercent) / 100;
     const retailPrice = productInfo.price != null ? parseFloat(productInfo.price) : 0;
     const ourPrice = retailPrice * discountMultiplier;
     const productName = productInfo.name || 'Product';
     const barcodeSectionHtml = build4x6BarcodeHtml(productInfo);
+    const priceSectionHtml = buildScanner4x6PriceSectionHtml({
+      retailPrice,
+      ourPrice,
+      discountPercent,
+      qrCodeUrl: qrCodeHtml,
+    });
 
     return `
       <div class="label-page">
@@ -3120,17 +3121,7 @@ const Scanner = () => {
           `}
         </div>
 
-          ${retailPrice > 0 ? `
-          <div class="price-section">
-            <div class="retail-price">
-              <span class="retail-price-label">RETAIL:</span> $${retailPrice.toFixed(2)}
-            </div>
-            <div class="our-price-label">OUR PRICE:</div>
-            <div class="our-price">
-              $${ourPrice.toFixed(2)} <span style="font-size: 12pt; color: #059669;">(${discountPercent}% OFF)</span>
-            </div>
-          </div>
-        ` : ''}
+          ${priceSectionHtml}
       </div>
     `;
   };
@@ -3408,6 +3399,7 @@ const Scanner = () => {
             .print-button:hover {
               background: #2563eb;
             }
+            ${LABEL_4X6_QR_PRICE_CSS}
           </style>
         </head>
         <body>

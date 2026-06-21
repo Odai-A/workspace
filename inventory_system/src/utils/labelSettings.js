@@ -68,5 +68,116 @@ export const setLabelPrinterProfile = (profile) => {
   return next;
 };
 
+/**
+ * When enabled, 4x6 labels show a large QR code in the price area instead of retail/sale prices.
+ * @returns {boolean}
+ */
+export const getLabelQrInsteadOfPrice4x6 = () => {
+  return localStorage.getItem('labelQrInsteadOfPrice4x6') === 'true';
+};
 
+/**
+ * @param {boolean} enabled
+ * @returns {boolean}
+ */
+export const setLabelQrInsteadOfPrice4x6 = (enabled) => {
+  localStorage.setItem('labelQrInsteadOfPrice4x6', enabled ? 'true' : 'false');
+  return !!enabled;
+};
+
+/** CSS shared by Scanner + Inventory 4x6 label templates. */
+export const LABEL_4X6_QR_PRICE_CSS = `
+  .price-section-qr-only,
+  .price-block-qr-only {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: auto;
+    margin-bottom: 0.05in;
+    padding: 0.04in 0;
+  }
+  .price-qr-large {
+    width: 1.4in;
+    height: 1.4in;
+    border: 2px solid #000;
+    padding: 0.05in;
+    background: #fff;
+    object-fit: contain;
+  }
+`;
+
+/**
+ * Build a larger QR image URL from an existing qrserver.com URL.
+ * @param {string} qrCodeUrl
+ * @param {number} pixelSize
+ * @returns {string}
+ */
+export const getLargeQrCodeUrl = (qrCodeUrl, pixelSize = 240) => {
+  if (!qrCodeUrl) return '';
+  if (/size=\d+x\d+/.test(qrCodeUrl)) {
+    return qrCodeUrl.replace(/size=\d+x\d+/, `size=${pixelSize}x${pixelSize}`);
+  }
+  return qrCodeUrl;
+};
+
+/**
+ * Price block for Scanner 4x6 labels (single + batch scan).
+ */
+export const buildScanner4x6PriceSectionHtml = ({
+  retailPrice = 0,
+  ourPrice = 0,
+  discountPercent = 50,
+  qrCodeUrl = '',
+}) => {
+  if (getLabelQrInsteadOfPrice4x6() && qrCodeUrl) {
+    const largeQr = getLargeQrCodeUrl(qrCodeUrl, 240);
+    return `
+      <div class="price-section price-section-qr-only">
+        <img class="price-qr-large" src="${largeQr}" alt="Amazon QR Code" />
+      </div>
+    `;
+  }
+
+  if (retailPrice > 0) {
+    return `
+      <div class="price-section">
+        <div class="retail-price">
+          <span class="retail-price-label">RETAIL:</span> $${retailPrice.toFixed(2)}
+        </div>
+        <div class="our-price-label">OUR PRICE:</div>
+        <div class="our-price">
+          $${ourPrice.toFixed(2)} <span style="font-size: 12pt; color: #059669;">(${discountPercent}% OFF)</span>
+        </div>
+      </div>
+    `;
+  }
+
+  return '';
+};
+
+/**
+ * Price block for Inventory 4x6 batch labels.
+ */
+export const buildInventory4x6PriceBlockHtml = ({
+  retailPrice = 0,
+  ourPrice = 0,
+  qrCodeUrl = '',
+}) => {
+  if (getLabelQrInsteadOfPrice4x6() && qrCodeUrl) {
+    const largeQr = getLargeQrCodeUrl(qrCodeUrl, 240);
+    return `
+      <div class="price-block price-block-qr-only">
+        <img class="price-qr-large" src="${largeQr}" alt="Amazon QR Code" />
+      </div>
+    `;
+  }
+
+  return `
+    <div class="price-block">
+      <div class="retail">Retail: $${retailPrice.toFixed(2)}</div>
+      <div class="price">$${ourPrice.toFixed(2)}</div>
+    </div>
+  `;
+};
 

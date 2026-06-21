@@ -10,7 +10,9 @@ import { getApiEndpoint } from '../utils/apiConfig';
 import FacebookIntegration from '../components/FacebookIntegration';
 import {
   getLabelPrinterProfile,
+  getLabelQrInsteadOfPrice4x6,
   setLabelPrinterProfile,
+  setLabelQrInsteadOfPrice4x6,
 } from '../utils/labelSettings';
 import {
   getWarehouseLayoutSettings,
@@ -95,6 +97,7 @@ const Settings = () => {
     return saved ? parseFloat(saved) : 50; // Default 50% off
   });
   const [labelPrinterProfile, setLabelPrinterProfileState] = useState(() => getLabelPrinterProfile());
+  const [labelQrInsteadOfPrice, setLabelQrInsteadOfPrice] = useState(() => getLabelQrInsteadOfPrice4x6());
   const [warehouseLayout, setWarehouseLayout] = useState(initialWarehouseLayout);
   const [warehouseAreasInput, setWarehouseAreasInput] = useState(() => initialWarehouseLayout.areas.join('\n'));
   
@@ -426,7 +429,9 @@ const Settings = () => {
                       localStorage.setItem('labelDiscountPercent', labelDiscountPercent.toString());
                       const profile = setLabelPrinterProfile(labelPrinterProfile);
                       setLabelPrinterProfileState(profile);
-                      toast.success(`Label settings saved (${labelDiscountPercent}% off, ${profile === '2inch' ? '2-inch' : '4x6'} default profile).`);
+                      setLabelQrInsteadOfPrice4x6(labelQrInsteadOfPrice);
+                      const qrNote = labelQrInsteadOfPrice ? ', QR instead of prices on 4x6 labels' : '';
+                      toast.success(`Label settings saved (${labelDiscountPercent}% off, ${profile === '2inch' ? '2-inch' : '4x6'} default profile${qrNote}).`);
                     }}
                     className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 flex items-center"
                   >
@@ -438,6 +443,14 @@ const Settings = () => {
                   Set the discount percentage that will be applied to retail prices when printing labels.
                   Example: {labelDiscountPercent}% off means a $100 retail price will show as ${(100 * (100 - labelDiscountPercent) / 100).toFixed(2)} on the label.
                 </p>
+              </div>
+              <div className="pt-2 border-t border-gray-200 dark:border-gray-700">
+                <Toggle
+                  enabled={labelQrInsteadOfPrice}
+                  onChange={(e) => setLabelQrInsteadOfPrice(e.target.checked)}
+                  label="Show large QR code instead of prices (4x6 labels only)"
+                  description="Replaces retail and sale prices with a large Amazon QR code on 4x6 labels. Use this when listed prices are discounted and not your in-store retail price. Applies to batch scan and single-item 4x6 prints."
+                />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">

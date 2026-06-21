@@ -19,7 +19,7 @@ import { productLookupService } from '../services/databaseService';
 import { inventoryService, supabase, formatSupabaseError } from '../config/supabaseClient';
 import { exportMarketplace } from '../utils/marketplaceExport';
 import axios from 'axios';
-import { getLabelDiscountPercent, getLabelPrinterProfile } from '../utils/labelSettings';
+import { getLabelDiscountPercent, getLabelPrinterProfile, buildInventory4x6PriceBlockHtml, LABEL_4X6_QR_PRICE_CSS } from '../utils/labelSettings';
 import {
   getLocationOptions,
   getNextItemNumber,
@@ -891,6 +891,14 @@ const Inventory = () => {
       const barcodeBlock = bcPayload
         ? `<div class="label-barcode-wrap"><svg class="inv-print-barcode" data-bc="${escapeHtml(bcPayload)}"></svg></div>`
         : '';
+      const priceBlockHtml = profile === '4x6'
+        ? buildInventory4x6PriceBlockHtml({ retailPrice, ourPrice, qrCodeUrl })
+        : `
+            <div class="price-block">
+              <div class="retail">Retail: $${retailPrice.toFixed(2)}</div>
+              <div class="price">$${ourPrice.toFixed(2)}</div>
+            </div>
+          `;
       return `
         <div class="sheet">
           <div class="label-page">
@@ -904,10 +912,7 @@ const Inventory = () => {
               <img class="qr" src="${qrCodeUrl}" alt="QR" />
             </div>
             ${barcodeBlock}
-            <div class="price-block">
-              <div class="retail">Retail: $${retailPrice.toFixed(2)}</div>
-              <div class="price">$${ourPrice.toFixed(2)}</div>
-            </div>
+            ${priceBlockHtml}
           </div>
         </div>
       `;
@@ -1247,6 +1252,7 @@ const Inventory = () => {
               height: auto;
               display: block;
             }
+            ${LABEL_4X6_QR_PRICE_CSS}
             ${profile === '2inch' ? `
             .toolbar { padding: 8px 6px; }
             .label-page {
