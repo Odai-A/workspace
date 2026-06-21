@@ -29,6 +29,7 @@ import {
   getLabelDiscountPercent,
   getLabelQrInsteadOfPriceBodyClass,
   LABEL_4X6_QR_PRICE_CSS,
+  scheduleLabelWindowPrint,
 } from '../utils/labelSettings';
 
 // Module-level concurrency gate for /api/scan calls.
@@ -2467,12 +2468,7 @@ const Scanner = () => {
     
     printWindow.document.write(labelContent);
     printWindow.document.close();
-    
-    // Wait for content to load, then trigger print dialog
-    setTimeout(() => {
-      printWindow.focus();
-      printWindow.print();
-    }, 800);
+    scheduleLabelWindowPrint(printWindow);
     
     toast.success("🖨️ Opening print dialog for 4x6 label");
   };
@@ -4534,11 +4530,7 @@ const Scanner = () => {
       if (printWindow) {
         printWindow.document.write(combinedLabelHTML);
         printWindow.document.close();
-        
-        // Wait for content to load, then trigger print dialog
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        printWindow.focus();
-        printWindow.print();
+        scheduleLabelWindowPrint(printWindow);
         
         toast.success(`✅ Print dialog opened for ${validItems.length} labels. Click Print once to print all!`, { autoClose: 4000 });
         
@@ -4698,11 +4690,7 @@ const Scanner = () => {
     
     printWindow.document.write(labelContent);
     printWindow.document.close();
-    
-    setTimeout(() => {
-      printWindow.focus();
-      printWindow.print();
-    }, 800);
+    scheduleLabelWindowPrint(printWindow);
     
     toast.success("🖨️ Opening print dialog for 4x6 label");
   };

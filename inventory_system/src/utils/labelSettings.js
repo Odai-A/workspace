@@ -91,24 +91,40 @@ export const LABEL_4X6_QR_PRICE_CSS = `
   .label-qr-instead-of-price .header-row .qr {
     display: none !important;
   }
+  .label-qr-instead-of-price .label-header {
+    padding-right: 0.1in;
+  }
+  .label-qr-instead-of-price .product-image-section {
+    min-height: 0.9in;
+    max-height: 1.55in;
+    margin: 0.03in 0;
+    flex: 1 1 auto;
+  }
+  .label-qr-instead-of-price .product-image {
+    max-height: 1.45in;
+  }
   .price-section.price-section-qr-only,
   .price-block.price-block-qr-only {
     display: flex;
     align-items: center;
     justify-content: center;
+    flex: 0 0 auto;
     flex-shrink: 0;
     width: 100%;
+    min-height: 1.65in;
     margin-top: auto;
-    margin-bottom: 0.05in;
-    padding: 0.05in 0 0.04in;
+    margin-bottom: 0.04in;
+    padding: 0.04in 0 0.02in;
     text-align: center;
     align-self: stretch;
   }
   .price-qr-large {
-    width: 1.4in;
-    height: 1.4in;
+    width: 1.55in;
+    height: 1.55in;
+    max-width: calc(100% - 0.16in);
+    max-height: 1.55in;
     border: 2px solid #000;
-    padding: 0.05in;
+    padding: 0.04in;
     background: #fff;
     object-fit: contain;
     display: block;
@@ -120,6 +136,54 @@ export const LABEL_4X6_QR_PRICE_CSS = `
 export const getLabelQrInsteadOfPriceBodyClass = () => (
   getLabelQrInsteadOfPrice4x6() ? 'label-qr-instead-of-price' : ''
 );
+
+/**
+ * Wait for label images (especially the bottom QR) before opening the print dialog.
+ * @param {Window|null} printWindow
+ * @param {number} fallbackMs
+ */
+export const scheduleLabelWindowPrint = (printWindow, fallbackMs = 2500) => {
+  if (!printWindow) return;
+
+  const finish = () => {
+    try {
+      printWindow.focus();
+      printWindow.print();
+    } catch (error) {
+      console.warn('Label print failed:', error);
+    }
+  };
+
+  const start = () => {
+    const images = Array.from(
+      printWindow.document.querySelectorAll('.price-qr-large, .qr-code img, .product-image, .qr, .zebra-qr')
+    );
+    const pending = images.filter((img) => img && !img.complete);
+    if (pending.length === 0) {
+      finish();
+      return;
+    }
+
+    let doneCount = 0;
+    const markDone = () => {
+      doneCount += 1;
+      if (doneCount >= pending.length) finish();
+    };
+
+    pending.forEach((img) => {
+      img.addEventListener('load', markDone, { once: true });
+      img.addEventListener('error', markDone, { once: true });
+    });
+    setTimeout(finish, fallbackMs);
+  };
+
+  if (printWindow.document.readyState === 'complete') {
+    setTimeout(start, 120);
+  } else {
+    printWindow.addEventListener('load', () => setTimeout(start, 120), { once: true });
+    setTimeout(start, fallbackMs);
+  }
+};
 
 /**
  * Build a larger QR image URL from an existing qrserver.com URL.
@@ -145,10 +209,18 @@ export const buildScanner4x6PriceSectionHtml = ({
   qrCodeUrl = '',
 }) => {
   if (getLabelQrInsteadOfPrice4x6() && qrCodeUrl) {
-    const largeQr = getLargeQrCodeUrl(qrCodeUrl, 240);
+    const largeQr = getLargeQrCodeUrl(qrCodeUrl, 320);
     return `
       <div class="price-section price-section-qr-only">
-        <img class="price-qr-large" src="${largeQr}" alt="Amazon QR Code" />
+        <img class="price-qr-large" src="${largeQr}" alt="Amazon QR Code" onerror="this.style.border='2px solid #000'; this.alt='QR unavailable';" />
+      </div>
+    `;
+  }
+
+  if (getLabelQrInsteadOfPrice4x6() && !qrCodeUrl) {
+    return `
+      <div class="price-section price-section-qr-only">
+        <div class="price-qr-large" style="display:flex;align-items:center;justify-content:center;font-size:9pt;font-weight:bold;">QR unavailable</div>
       </div>
     `;
   }
@@ -179,10 +251,10 @@ export const buildInventory4x6PriceBlockHtml = ({
   qrCodeUrl = '',
 }) => {
   if (getLabelQrInsteadOfPrice4x6() && qrCodeUrl) {
-    const largeQr = getLargeQrCodeUrl(qrCodeUrl, 240);
+    const largeQr = getLargeQrCodeUrl(qrCodeUrl, 320);
     return `
       <div class="price-block price-block-qr-only">
-        <img class="price-qr-large" src="${largeQr}" alt="Amazon QR Code" />
+        <img class="price-qr-large" src="${largeQr}" alt="Amazon QR Code" onerror="this.style.border='2px solid #000'; this.alt='QR unavailable';" />
       </div>
     `;
   }

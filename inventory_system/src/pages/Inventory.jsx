@@ -25,6 +25,7 @@ import {
   getLabelQrInsteadOfPriceBodyClass,
   buildInventory4x6PriceBlockHtml,
   LABEL_4X6_QR_PRICE_CSS,
+  scheduleLabelWindowPrint,
 } from '../utils/labelSettings';
 import {
   getLocationOptions,
@@ -1603,9 +1604,7 @@ const Inventory = () => {
     const labelItems = rows.map((row) => inventoryRowToLabelProductInfo(row));
     const printWindow = openPrintWindow(createBasicInventoryLabelHTML(labelItems));
     if (printWindow) {
-      printWindow.onload = () => {
-        printWindow.print();
-      };
+      scheduleLabelWindowPrint(printWindow);
     }
   };
 
@@ -1741,10 +1740,7 @@ const Inventory = () => {
       if (labelsToPrint.length > 0) {
         const printWindow = openPrintWindow(createBatchPrintLabelHTML(labelsToPrint, profile));
         if (printWindow) {
-          setTimeout(() => {
-            printWindow.focus();
-            printWindow.print();
-          }, 500);
+          scheduleLabelWindowPrint(printWindow);
         }
       }
 
@@ -2142,9 +2138,7 @@ const Inventory = () => {
           const printLabelHTML = createPrintLabelHTML(productInfo);
           const printWindow = openPrintWindow(printLabelHTML);
           if (printWindow) {
-            printWindow.onload = () => {
-              printWindow.print();
-            };
+            scheduleLabelWindowPrint(printWindow);
           }
         };
         

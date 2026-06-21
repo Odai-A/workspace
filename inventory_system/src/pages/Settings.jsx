@@ -447,7 +447,11 @@ const Settings = () => {
               <div className="pt-2 border-t border-gray-200 dark:border-gray-700">
                 <Toggle
                   enabled={labelQrInsteadOfPrice}
-                  onChange={(e) => setLabelQrInsteadOfPrice(e.target.checked)}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setLabelQrInsteadOfPrice(checked);
+                    setLabelQrInsteadOfPrice4x6(checked);
+                  }}
                   label="Show large QR code instead of prices (4x6 labels only)"
                   description="Replaces retail and sale prices with a large Amazon QR code on 4x6 labels. Use this when listed prices are discounted and not your in-store retail price. Applies to batch scan and single-item 4x6 prints."
                 />
