@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { BrowserMultiFormatReader } from '@zxing/browser';
 import { NotFoundException } from '@zxing/library';
 import { ocrFromCanvas, terminateOcrWorker } from '../../utils/ocrBarcodeFallback';
+import { CAMERA_SCAN_COOLDOWN_MS } from '../../utils/scanReliability';
 
 const CONSTRAINT_PRESETS = [
   {
@@ -76,6 +77,7 @@ const BarcodeScanner = ({
   const scanIntervalRef = useRef(null);
   const canvasRef = useRef(null);
   const decodeInFlightRef = useRef(false);
+  const cooldownTimerRef = useRef(null);
   const [isScanning, setIsScanning] = useState(false);
   const [error, setError] = useState(null);
   const [hasScanned, setHasScanned] = useState(false);
@@ -92,12 +94,17 @@ const BarcodeScanner = ({
       readerRef.current = new BrowserMultiFormatReader();
     }
     return () => {
+      if (cooldownTimerRef.current) {
+        clearTimeout(cooldownTimerRef.current);
+        cooldownTimerRef.current = null;
+      }
       stopScanning();
       terminateOcrWorker();
     };
   }, []);
 
-  const stopScanning = useCallback(() => {
+  const stopScanning = useCallback((options = {}) => {
+    const { keepScannedLock = false } = options;
     if (scanIntervalRef.current) {
       clearInterval(scanIntervalRef.current);
       scanIntervalRef.current = null;
@@ -111,7 +118,9 @@ const BarcodeScanner = ({
       videoRef.current.load();
     }
     setIsScanning(false);
-    setHasScanned(false);
+    if (!keepScannedLock) {
+      setHasScanned(false);
+    }
     setSuggestedCode(null);
     setShowOcrButton(false);
     failedDecodeCountRef.current = 0;
@@ -121,7 +130,16 @@ const BarcodeScanner = ({
     (code, format = 'unknown', source = 'zxing') => {
       if (navigator.vibrate) navigator.vibrate(100);
       setHasScanned(true);
-      stopScanning();
+      // Keep the scanned lock during cooldown so the same barcode held in frame
+      // cannot immediately fire a second lookup.
+      stopScanning({ keepScannedLock: true });
+      if (cooldownTimerRef.current) {
+        clearTimeout(cooldownTimerRef.current);
+      }
+      cooldownTimerRef.current = setTimeout(() => {
+        setHasScanned(false);
+        cooldownTimerRef.current = null;
+      }, CAMERA_SCAN_COOLDOWN_MS);
       if (onDetected) {
         onDetected({ code, format, confidence: 100, source });
       }
@@ -261,6 +279,10 @@ const BarcodeScanner = ({
 
   useEffect(() => {
     if (!scannerRunning) {
+      if (cooldownTimerRef.current) {
+        clearTimeout(cooldownTimerRef.current);
+        cooldownTimerRef.current = null;
+      }
       setHasScanned(false);
       setError(null);
       setSuggestedCode(null);

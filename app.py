@@ -65,6 +65,83 @@ def _clear_negative_cache(code):
         _negative_cache.pop(key, None)
 
 
+def _invalidate_used_scan_count_cache():
+    """Drop memoized get_used_scan_count entries after a new scan_history insert."""
+    try:
+        with _ttl_cache_lock:
+            keys_to_drop = [
+                k for k in list(_ttl_cache_store.keys())
+                if isinstance(k, tuple) and k and k[0] == 'get_used_scan_count'
+            ]
+            for k in keys_to_drop:
+                _ttl_cache_store.pop(k, None)
+    except Exception:
+        pass
+
+
+def _is_fnsku_task_terminal(scan_data):
+    """True when the vendor task finished without needing more waiting."""
+    if not scan_data or not isinstance(scan_data, dict):
+        return False
+    try:
+        task_state = scan_data.get('taskState')
+        if task_state is None:
+            task_state = scan_data.get('task_state', 0)
+        task_state = int(task_state or 0)
+    except (TypeError, ValueError):
+        task_state = 0
+    finished = bool(scan_data.get('finishedOn') or scan_data.get('finished_on'))
+    return task_state in (2, 3) or finished
+
+
+def _schedule_facebook_auto_post(user_id, tenant_id, response_data):
+    """Fire-and-forget Facebook posting so it never blocks the scan response."""
+    if not response_data or not response_data.get('success') or not user_id or not supabase_admin:
+        return
+
+    product_snapshot = {
+        'name': response_data.get('title', ''),
+        'description': response_data.get('description', ''),
+        'price': response_data.get('price', '0.00'),
+        'image': response_data.get('image', ''),
+        'asin': response_data.get('asin', ''),
+        'fnsku': response_data.get('fnsku', ''),
+        'sku': response_data.get('upc', ''),
+    }
+
+    def _worker():
+        try:
+            integration = supabase_admin.table('facebook_integrations').select('*').eq(
+                'user_id', user_id
+            ).eq('is_active', True).execute()
+            if not integration.data:
+                return
+            integration_data = integration.data[0]
+            if not (integration_data.get('selected_page_id') and integration_data.get('catalog_id')):
+                return
+            if not product_snapshot['name']:
+                return
+            if not (product_snapshot['asin'] or product_snapshot['fnsku'] or product_snapshot['sku']):
+                return
+            result = facebook_post_product_internal(
+                user_id,
+                tenant_id,
+                product_snapshot,
+                integration_data,
+            )
+            if result.get('success'):
+                logger.info(f"✅ Auto-posted product to Facebook: {result.get('post_url')}")
+            else:
+                logger.warning(f"⚠️ Facebook auto-post failed: {result.get('error')}")
+        except Exception as e:
+            logger.debug(f"Facebook auto-post check failed (non-critical): {e}")
+
+    try:
+        _threading.Thread(target=_worker, name='facebook-auto-post', daemon=True).start()
+    except Exception as e:
+        logger.debug(f"Could not start Facebook auto-post thread: {e}")
+
+
 # #region agent log
 _DEBUG_SCAN_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'debug-879cbd.log')
 
@@ -294,7 +371,7 @@ STRIPE_ENTREPRENEUR_USAGE_PRICE_ID = os.environ.get('STRIPE_ENTREPRENEUR_USAGE_P
 FREE_TRIAL_SCAN_LIMIT = int(os.environ.get('FREE_TRIAL_SCAN_LIMIT', '50'))
 
 # Customer-facing messages: distinguish "still looking up" vs "not in lookup database"
-FNSKU_PROCESSING_MESSAGE = "We're looking up this product. Please try again in a moment or use 'Check for Updates'."
+FNSKU_PROCESSING_MESSAGE = "We're looking up this product. It will update automatically when ready."
 FNSKU_NOT_IN_DATABASE_MESSAGE = "This product could not be found in our lookup database. We're unable to retrieve details for this item at this time. You may try again later or add the product manually."
 
 # FNSKU/Rainforest — POS-oriented defaults (~5–8s external budget per scan; override via env).
@@ -302,11 +379,12 @@ FNSKU_ADD_OR_GET_TIMEOUT = float(os.environ.get('FNSKU_ADD_OR_GET_TIMEOUT', '8')
 FNSKU_GET_BY_BARCODE_TIMEOUT = float(os.environ.get('FNSKU_GET_BY_BARCODE_TIMEOUT', '8'))
 FNSKU_STATUS_LOOKUP_TIMEOUT = float(os.environ.get('FNSKU_STATUS_LOOKUP_TIMEOUT', '8'))
 RAINFOREST_REQUEST_TIMEOUT = float(os.environ.get('RAINFOREST_REQUEST_TIMEOUT', '8'))
-# Short inline poll window: prefer fast not_found + client retry over long processing responses.
+# Short inline poll, then hand off to /api/scan/status so the first scan can still resolve.
 FNSKU_SCAN_INITIAL_MAX_POLLS = int(os.environ.get('FNSKU_SCAN_INITIAL_MAX_POLLS', '6'))
 FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS = int(os.environ.get('FNSKU_SCAN_INITIAL_POLL_INTERVAL_MS', '700'))
 FNSKU_SCAN_RETRY_ADD_AFTER = int(os.environ.get('FNSKU_SCAN_RETRY_ADD_AFTER', '3'))
-FNSKU_NOT_IN_DATABASE_ATTEMPTS = int(os.environ.get('FNSKU_NOT_IN_DATABASE_ATTEMPTS', '6'))
+# Soft give-up threshold for status polls when the vendor never marks the task terminal.
+FNSKU_NOT_IN_DATABASE_ATTEMPTS = int(os.environ.get('FNSKU_NOT_IN_DATABASE_ATTEMPTS', '12'))
 SKIP_RAINFOREST_ON_STANDARD_SCAN = str(os.environ.get('SKIP_RAINFOREST_ON_STANDARD_SCAN', '0')).strip().lower() in ('1', 'true', 'yes', 'on')
 
 # --- Creator/CEO Configuration ---
@@ -689,11 +767,10 @@ def log_scan_to_history(user_id, tenant_id, code, asin, supabase_client, api_loo
         logger.info(f"   Insert result: {result.data if hasattr(result, 'data') else 'No data'}")
         print(f"SCAN LOGGED: user={user_id}, code={code}, tenant={tenant_id}")
         print(f"   Insert result: {result.data if hasattr(result, 'data') else 'No data'}")
-        
-        # Small delay to ensure database commit completes before counting
-        import time
-        time.sleep(0.3)  # 300ms delay to allow DB commit to complete
-        
+
+        # Invalidate memoized counts immediately — no sleep; callers query once after this.
+        _invalidate_used_scan_count_cache()
+
         return True
     except Exception as e:
         logger.error(f"❌ Failed to log scan to scan_history: {e}")
@@ -4150,8 +4227,18 @@ def scan_product():
                             price_source = 'cache'
                             cached_asin = cached.get('asin', '')
                             
-                            # If we have ASIN in cache, try to get current Amazon price
-                            if cached_asin and len(cached_asin) >= 10 and RAINFOREST_API_KEY:
+                            # Skip Rainforest on warm complete cache hits — only refresh when forced or price missing.
+                            needs_price_refresh = (
+                                force_api_lookup
+                                or not cached_price
+                                or float(cached_price or 0) <= 0
+                            )
+                            if (
+                                needs_price_refresh
+                                and cached_asin
+                                and len(cached_asin) >= 10
+                                and RAINFOREST_API_KEY
+                            ):
                                 try:
                                     logger.info(f"🔍 Cached UPC has ASIN {cached_asin}, fetching current Amazon price...")
                                     rainforest_response = requests.get(
@@ -4162,7 +4249,7 @@ def scan_product():
                                             'amazon_domain': 'amazon.com',
                                             'asin': cached_asin
                                         },
-                                        timeout=10
+                                        timeout=RAINFOREST_REQUEST_TIMEOUT
                                     )
                                     
                                     if rainforest_response.status_code == 200:
@@ -4176,7 +4263,8 @@ def scan_product():
                                                 logger.info(f"✅ Updated price from Amazon (list price when available): ${cached_price}")
                                 except Exception as rainforest_error:
                                     logger.warning(f"⚠️ Could not fetch Amazon price for cached UPC: {rainforest_error}")
-                            
+                            elif cached_asin and not needs_price_refresh:
+                                logger.info(f"⏩ Skipping Rainforest price refresh for cached UPC {code} (complete cache hit)")
                             # Log scan to history (even if cached, it counts toward trial limit)
                             # But only count unique scans per user
                             print(f"\nABOUT TO CALL log_scan_to_history (UPC)")
@@ -4199,51 +4287,18 @@ def scan_product():
                                 try:
                                     is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
                                     if not is_paid:
-                                        # Retry count query up to 5 times if scan was just logged (to account for DB commit delay)
-                                        used_scans = 0
-                                        max_retries = 5 if scan_was_logged else 1
-                                        print(f"\nCALCULATING SCAN COUNT (UPC cached, was_logged={scan_was_logged}, max_retries={max_retries})")
-                                        print(f"   user_id: {user_id}")
-                                        print(f"   tenant_id: {tenant_id}")
-                                        
-                                        # Get trial start date to exclude old test scans
+                                        if scan_was_logged:
+                                            _invalidate_used_scan_count_cache()
                                         try:
                                             trial_start_date = get_trial_start_date(tenant_id, user_id)
                                             print(f"   Trial start date: {trial_start_date}")
                                         except Exception as trial_date_error:
                                             logger.error(f"Error getting trial start date: {trial_date_error}")
                                             print(f"   Trial date error: {trial_date_error}, using fallback")
-                                            # Use fallback: count all scans (better than failing)
                                             from datetime import timedelta
                                             trial_start_date = datetime.now(timezone.utc) - timedelta(days=30)
-                                        
-                                        for attempt in range(max_retries):
-                                            print(f"   Attempt {attempt + 1}/{max_retries}...")
-                                            try:
-                                                used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
-                                                print(f"   Count result: {used_scans} scans found")
-                                                if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
-                                                    import time
-                                                    wait_time = 0.3 * (attempt + 1)  # Increasing wait time
-                                                    print(f"   Waiting {wait_time}s before retry...")
-                                                    time.sleep(wait_time)
-                                                    logger.info(f"   Retry {attempt + 1}/{max_retries}: count was 0, retrying...")
-                                                else:
-                                                    break
-                                            except Exception as query_error:
-                                                logger.error(f"Error in scan count query attempt {attempt + 1}: {query_error}")
-                                                print(f"   Query error on attempt {attempt + 1}: {query_error}")
-                                                import traceback
-                                                logger.error(f"   Traceback: {traceback.format_exc()}")
-                                                if attempt == max_retries - 1:
-                                                    # Last attempt failed, use fallback
-                                                    used_scans = 0
-                                                    break
-                                                else:
-                                                    import time
-                                                    time.sleep(0.3 * (attempt + 1))
-                                                    continue
-                                        
+
+                                        used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
                                         logger.info(f"📊 UPC cached scan count: used={used_scans}, was_logged={scan_was_logged}")
                                         print(f"FINAL SCAN COUNT (UPC): {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
                                         scan_count_data = {
@@ -4418,27 +4473,11 @@ def scan_product():
                                 logger.error(f"Error getting trial start date: {trial_date_error}")
                                 from datetime import timedelta
                                 trial_start_date = datetime.now(timezone.utc) - timedelta(days=30)
-                            
-                            # Count scans
-                            max_retries = 5 if scan_was_logged else 1
-                            used_scans = 0
-                            for attempt in range(max_retries):
-                                try:
-                                    used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
-                                    if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
-                                        import time
-                                        time.sleep(0.3 * (attempt + 1))
-                                        continue
-                                    else:
-                                        break
-                                except Exception as query_error:
-                                    logger.error(f"Error in scan count query: {query_error}")
-                                    if attempt == max_retries - 1:
-                                        used_scans = 0
-                                        break
-                                    import time
-                                    time.sleep(0.3 * (attempt + 1))
-                            
+
+                            if scan_was_logged:
+                                _invalidate_used_scan_count_cache()
+                            used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
+
                             scan_count_data = {
                                 'used': used_scans,
                                 'limit': FREE_TRIAL_SCAN_LIMIT,
@@ -4567,28 +4606,10 @@ def scan_product():
                             try:
                                 is_paid = tenant_has_paid_subscription(tenant_id) if tenant_id else False
                                 if not is_paid:
-                                    # Retry count query up to 5 times if scan was just logged (to account for DB commit delay)
-                                    used_scans = 0
-                                    max_retries = 5 if scan_was_logged else 1
-                                    print(f"\nCALCULATING SCAN COUNT (was_logged={scan_was_logged}, max_retries={max_retries})")
-                                    print(f"   user_id: {user_id}")
-                                    print(f"   tenant_id: {tenant_id}")
-                                    
-                                    # Get trial start date to exclude old test scans
+                                    if scan_was_logged:
+                                        _invalidate_used_scan_count_cache()
                                     trial_start_date = get_trial_start_date(tenant_id, user_id)
-                                    
-                                    for attempt in range(max_retries):
-                                        print(f"   Attempt {attempt + 1}/{max_retries}...")
-                                        used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
-                                        print(f"   Count result: {used_scans} scans found")
-                                        if scan_was_logged and used_scans == 0 and attempt < max_retries - 1:
-                                            import time
-                                            wait_time = 0.3 * (attempt + 1)
-                                            print(f"   Waiting {wait_time}s before retry...")
-                                            time.sleep(wait_time)
-                                            logger.info(f"   Retry {attempt + 1}/{max_retries}: count was 0, retrying...")
-                                        else:
-                                            break
+                                    used_scans = get_used_scan_count(user_id, tenant_id, trial_start_date)
                                     logger.info(f"📊 FNSKU cached scan count: used={used_scans}, was_logged={scan_was_logged}, limit={FREE_TRIAL_SCAN_LIMIT}")
                                     print(f"FINAL SCAN COUNT: {used_scans}/{FREE_TRIAL_SCAN_LIMIT} (was_logged={scan_was_logged})")
                                     scan_count_data = {
@@ -5010,34 +5031,77 @@ def scan_product():
                 if asin and isinstance(asin, str) and len(asin.strip()) >= 10:
                     logger.info(f"✅ ASIN confirmed available: {asin} - exiting polling immediately")
                     break
-            # After bounded inline poll, prefer definitive not_found over long-lived processing + polling.
+            # After bounded inline poll: hand off to /api/scan/status unless the vendor task is terminal.
             if not asin or not isinstance(asin, str) or len(asin.strip()) < 10:
-                logger.info(f"⏳ Short poll done, ASIN not yet available — returning not_in_api_database (POS fast path).")
+                if _is_fnsku_task_terminal(scan_data):
+                    logger.info(f"⏳ Short poll done, vendor task terminal without ASIN — returning not_in_api_database.")
+                else:
+                    logger.info(f"⏳ Short poll done, ASIN not yet available — returning lookup_still_pending for client poll.")
         
-        # Final ASIN validation — no open-ended processing=true for normal scans (avoids 45s+ client polling).
-        # Log this scan here so it counts toward the free trial; GET /api/scan/status does not log (no user context).
+        # Final ASIN validation — soft misses stay pending so the first scan can still resolve via status polling.
         if not asin or not isinstance(asin, str) or len(asin.strip()) < 10:
-            _mark_negatively_cached(code)
             ext_ms = int((_time.time() - fnsku_external_t0) * 1000)
+            is_terminal_miss = _is_fnsku_task_terminal(scan_data)
             # #region agent log
-            _dbg_scan_perf_log('H1', 'app.py:scan_product:fnsku_no_asin', 'not_found_after_bounded_poll', {
-                'code': code, 'external_ms': ext_ms, 'task_id': str(task_id) if task_id else None,
-            })
+            _dbg_scan_perf_log(
+                'H1',
+                'app.py:scan_product:fnsku_no_asin',
+                'terminal_not_found_after_bounded_poll' if is_terminal_miss else 'pending_after_bounded_poll',
+                {
+                    'code': code,
+                    'external_ms': ext_ms,
+                    'task_id': str(task_id) if task_id else None,
+                    'terminal': is_terminal_miss,
+                },
+            )
             # #endregion
-            not_found_response = {
+            if is_terminal_miss:
+                _mark_negatively_cached(code)
+                not_found_response = {
+                    "success": True,
+                    "processing": False,
+                    "lookup_still_pending": False,
+                    "not_in_api_database": True,
+                    "not_found": True,
+                    "fnsku": code,
+                    "asin": "",
+                    "title": scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}",
+                    "price": "",
+                    "image": scan_data.get('imageUrl') or scan_data.get('image') or '',
+                    "images": [scan_data.get('imageUrl') or scan_data.get('image')] if (scan_data and (scan_data.get('imageUrl') or scan_data.get('image'))) else [],
+                    "brand": "",
+                    "category": "External API",
+                    "message": FNSKU_NOT_IN_DATABASE_MESSAGE,
+                    "scan_task_id": str(task_id) if task_id else None,
+                    "bar_code": code,
+                    "source": "fnsku_external",
+                }
+                if supabase_admin and user_id:
+                    log_scan_to_history(
+                        user_id, tenant_id, code, code or '', supabase_admin,
+                        api_lookup_cache_id=None,
+                        product_description=(scan_data.get('productName') or scan_data.get('name') or '') if scan_data else ''
+                    )
+                    scan_count_data = _scan_count_for_response(user_id, tenant_id)
+                    if scan_count_data:
+                        not_found_response['scan_count'] = scan_count_data
+                return jsonify(not_found_response), 200
+
+            pending_response = {
                 "success": True,
-                "processing": False,
-                "not_in_api_database": True,
-                "not_found": True,
+                "processing": True,
+                "lookup_still_pending": True,
+                "not_in_api_database": False,
+                "not_found": False,
                 "fnsku": code,
                 "asin": "",
-                "title": scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}",
+                "title": (scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}") if scan_data else f"FNSKU: {code}",
                 "price": "",
-                "image": scan_data.get('imageUrl') or scan_data.get('image') or '',
+                "image": (scan_data.get('imageUrl') or scan_data.get('image') or '') if scan_data else '',
                 "images": [scan_data.get('imageUrl') or scan_data.get('image')] if (scan_data and (scan_data.get('imageUrl') or scan_data.get('image'))) else [],
                 "brand": "",
                 "category": "External API",
-                "message": FNSKU_NOT_IN_DATABASE_MESSAGE,
+                "message": FNSKU_PROCESSING_MESSAGE,
                 "scan_task_id": str(task_id) if task_id else None,
                 "bar_code": code,
                 "source": "fnsku_external",
@@ -5050,8 +5114,8 @@ def scan_product():
                 )
                 scan_count_data = _scan_count_for_response(user_id, tenant_id)
                 if scan_count_data:
-                    not_found_response['scan_count'] = scan_count_data
-            return jsonify(not_found_response), 200
+                    pending_response['scan_count'] = scan_count_data
+            return jsonify(pending_response), 200
         
         # #region agent log
         _dbg_scan_perf_log('H1', 'app.py:scan_product:fnsku_asin_ok', 'asin_resolved', {
@@ -5278,52 +5342,9 @@ def scan_product():
             logger.error(f"   This means the save to api_lookup_cache FAILED or was SKIPPED")
             logger.error(f"   Check logs above for error messages")
         
-        # Auto-post to Facebook if integration is set up (non-blocking)
-        if response_data.get('success') and user_id and supabase_admin:
-            try:
-                # Check if user has active Facebook integration
-                integration = supabase_admin.table('facebook_integrations').select('*').eq('user_id', user_id).eq('is_active', True).execute()
-                
-                if integration.data and len(integration.data) > 0:
-                    integration_data = integration.data[0]
-                    
-                    # Check if page and catalog are configured
-                    if integration_data.get('selected_page_id') and integration_data.get('catalog_id'):
-                        # Prepare product data for Facebook posting
-                        product_data = {
-                            'name': response_data.get('title', ''),
-                            'description': response_data.get('description', ''),
-                            'price': response_data.get('price', '0.00'),
-                            'image': response_data.get('image', ''),
-                            'asin': response_data.get('asin', ''),
-                            'fnsku': response_data.get('fnsku', ''),
-                            'sku': response_data.get('upc', '')
-                        }
-                        
-                        # Only post if we have required data
-                        if product_data['name'] and (product_data['asin'] or product_data['fnsku'] or product_data['sku']):
-                            # Call Facebook posting function directly (internal)
-                            try:
-                                result = facebook_post_product_internal(
-                                    user_id,
-                                    tenant_id,
-                                    product_data,
-                                    integration_data
-                                )
-                                
-                                if result.get('success'):
-                                    response_data['facebook_posted'] = True
-                                    response_data['facebook_post_url'] = result.get('post_url')
-                                    logger.info(f"✅ Auto-posted product to Facebook: {result.get('post_url')}")
-                                else:
-                                    logger.warning(f"⚠️ Facebook auto-post failed: {result.get('error')}")
-                            except Exception as fb_error:
-                                # Don't fail the scan if Facebook posting fails
-                                logger.warning(f"⚠️ Error auto-posting to Facebook (non-critical): {fb_error}")
-            except Exception as e:
-                # Silently fail - don't affect scan response
-                logger.debug(f"Facebook auto-post check failed (non-critical): {e}")
-        
+        # Auto-post to Facebook in the background so it never delays the scan response.
+        _schedule_facebook_auto_post(user_id, tenant_id, response_data)
+
         return jsonify(response_data)
         
     except requests.exceptions.Timeout:
@@ -5805,7 +5826,7 @@ def scan_status():
                 }), 200
             return jsonify({
                 "success": True,
-                "processing": False,
+                "processing": True,
                 "lookup_still_pending": True,
                 "fnsku": code,
                 "message": FNSKU_PROCESSING_MESSAGE,
@@ -5819,7 +5840,7 @@ def scan_status():
                 }), 200
             return jsonify({
                 "success": True,
-                "processing": False,
+                "processing": True,
                 "lookup_still_pending": True,
                 "fnsku": code,
                 "message": FNSKU_PROCESSING_MESSAGE,
@@ -5828,16 +5849,22 @@ def scan_status():
         scan_data = fnsku_json['data']
         asin = (scan_data.get('asin') or scan_data.get('ASIN') or scan_data.get('Asin') or '').strip()
         if not asin or len(asin) < 10:
-            if attempt >= FNSKU_NOT_IN_DATABASE_ATTEMPTS:
+            is_terminal = _is_fnsku_task_terminal(scan_data)
+            # Confirmed vendor failure → not found + negative cache.
+            # Soft timeout after many polls → not found WITHOUT negative cache so retry still works.
+            if is_terminal or attempt >= FNSKU_NOT_IN_DATABASE_ATTEMPTS:
+                if is_terminal:
+                    _mark_negatively_cached(code)
                 return jsonify({
-                    "success": True, "processing": False, "not_in_api_database": True,
+                    "success": True, "processing": False, "lookup_still_pending": False,
+                    "not_in_api_database": True, "not_found": True,
                     "fnsku": code, "asin": "", "title": scan_data.get('productName') or scan_data.get('name') or f"FNSKU: {code}",
                     "message": FNSKU_NOT_IN_DATABASE_MESSAGE,
                     "scan_task_id": str(scan_data.get('id')) if scan_data.get('id') else None, "bar_code": code
                 }), 200
             return jsonify({
                 "success": True,
-                "processing": False,
+                "processing": True,
                 "lookup_still_pending": True,
                 "fnsku": code,
                 "asin": "",

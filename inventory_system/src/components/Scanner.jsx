@@ -31,6 +31,12 @@ import {
   LABEL_4X6_QR_PRICE_CSS,
   scheduleLabelWindowPrint,
 } from '../utils/labelSettings';
+import {
+  AUTH_PENDING_SCAN_TTL_MS,
+  getProcessingPollMaxAttempts,
+  getStatusPollAttemptParam,
+  shouldAcceptLocalCacheHit,
+} from '../utils/scanReliability';
 
 // Module-level concurrency gate for /api/scan calls.
 // Prevents the "scan storm" where rapid batch-mode scans fire 50+ parallel
@@ -377,6 +383,7 @@ const Scanner = () => {
   // on the retry button do not launch parallel chains.
   const activeRetryCodesRef = useRef(new Set());
   /** Avoid parallel image-only enrich / force lookups for the same code. */
+  const pendingAuthScanRef = useRef(null);
   const imageEnrichPendingRef = useRef(new Set());
   /** Avoid duplicate manifest → Rainforest auto merges for the same scan code. */
   const rainforestManifestAutoPendingRef = useRef(new Set());
@@ -702,6 +709,16 @@ const Scanner = () => {
   useEffect(() => {
     if (!authLoading && userId && session?.access_token) {
       fetchScanCount();
+      const pending = pendingAuthScanRef.current;
+      if (pending?.code && (Date.now() - (pending.queuedAt || 0)) <= AUTH_PENDING_SCAN_TTL_MS) {
+        const code = pending.code;
+        const opts = pending.options || {};
+        pendingAuthScanRef.current = null;
+        toast.info('Signed in — looking up your scan…', { autoClose: 2000 });
+        void lookupProductByCode(code, opts);
+      } else if (pending) {
+        pendingAuthScanRef.current = null;
+      }
     }
   }, [authLoading, userId, session?.access_token]);
 
@@ -1548,10 +1565,24 @@ const Scanner = () => {
     }
 
     if (!userId || !session?.access_token) {
-      toast.error(
-        'You must be signed in to scan. Wait until the app finishes loading, then try again.',
-        { autoClose: 6000 }
-      );
+      if (!forceApiLookup && upperCode) {
+        pendingAuthScanRef.current = {
+          code: upperCode,
+          options: { forceApiLookup, posBackground: posUi },
+          queuedAt: Date.now(),
+        };
+        toast.info(
+          authLoading
+            ? 'Finishing sign-in, then looking up your scan…'
+            : 'Waiting for sign-in to finish, then looking up your scan…',
+          { autoClose: 4000 }
+        );
+      } else {
+        toast.error(
+          'You must be signed in to scan. Wait until the app finishes loading, then try again.',
+          { autoClose: 6000 }
+        );
+      }
       if (forceApiLookup) {
         setApiEnrichLoading(false);
         setBatchForceLookupCode(null);
@@ -1570,7 +1601,7 @@ const Scanner = () => {
 
     if (!forceApiLookup) {
       const localMatch = await findProductInLocalSources(upperCode);
-      if (localMatch?.product) {
+      if (localMatch?.product && shouldAcceptLocalCacheHit(localMatch.product, forceApiLookup)) {
         await handleProductFound(localMatch.product, upperCode, { cached: true, source: localMatch.source });
         setLastScannedCode(upperCode);
         completeScanTimer('DB', upperCode);
@@ -1601,6 +1632,11 @@ const Scanner = () => {
         }
         return;
       }
+      if (localMatch?.product) {
+        // Incomplete/stub local hit — continue to /api/scan so the first scan can finish resolving.
+        __localLookupCache.delete(upperCode);
+        console.log(`⏩ Skipping incomplete local hit for ${upperCode}; continuing to API lookup`);
+      }
 
       // Negative cache: fail fast for batch and single (no duplicate /api/scan until TTL expires).
       if (isNegativelyCached(upperCode)) {
@@ -1621,7 +1657,7 @@ const Scanner = () => {
             },
           ]));
         } else {
-          const msg = 'This code was recently not found. Wait a few minutes or use refresh to try again.';
+          const msg = 'This code was recently not found. Wait a few minutes or use Check for updates to try again.';
           setNotInDatabaseMessage(msg);
           setProductInfo({ name: 'Product Not Found', fnsku: upperCode, notFound: true });
           setScannedCodes((prev) => prev.map((item) => (
@@ -1805,9 +1841,7 @@ const Scanner = () => {
           }
           // Backend still resolving (legacy processing=true or lookup_still_pending from /api/scan/status).
           if (apiResult.processing || apiResult.lookup_still_pending) {
-            if (batchModeRef.current) {
-              setIsApiProcessing(true);
-            }
+            setIsApiProcessing(true);
             const partialImages = apiResult.images || (apiResult.image ? [apiResult.image] : []);
             const displayableProduct = {
               fnsku: apiResult.fnsku || code,
@@ -1848,12 +1882,8 @@ const Scanner = () => {
                 });
               }, 0);
             }
-            if (batchModeRef.current) {
-              startProcessingPoll(upperCode);
-            } else {
-              setIsApiProcessing(false);
-              toast.info('Product is still resolving upstream. Tap "Check for updates" to refresh — no background polling.', { autoClose: 5000 });
-            }
+            // Single and batch both auto-poll so the first scan can finish without re-scanning.
+            startProcessingPoll(upperCode);
             return;
           }
 
@@ -4213,11 +4243,8 @@ const Scanner = () => {
     }
     let attempts = 0;
     let consecutiveErrors = 0;
-    // 8 attempts × 1s interval = ~8s of patient polling. Beyond that the
-    // backend's external lookup is almost certainly going to keep returning
-    // not_found, so we stop wasting cycles and fall back to local data /
-    // mark as failed.
-    const maxAttempts = 8;
+    // Patient polling for single scans so the first barcode can finish resolving upstream.
+    const maxAttempts = getProcessingPollMaxAttempts(batchModeRef.current);
     const poll = async () => {
       const poller = processingPollersRef.current.get(normalizedCode);
       if (poller?.inFlight) return;
@@ -4230,7 +4257,7 @@ const Scanner = () => {
         stopProcessingPoll(normalizedCode);
         setIsApiProcessing(false);
         const fallbackLocalMatch = await findProductInLocalSources(normalizedCode);
-        if (fallbackLocalMatch?.product) {
+        if (fallbackLocalMatch?.product && shouldAcceptLocalCacheHit(fallbackLocalMatch.product)) {
           await handleProductFound(fallbackLocalMatch.product, normalizedCode, { source: fallbackLocalMatch.source });
           completeScanTimer('DB_FALLBACK', normalizedCode);
         }
@@ -4242,19 +4269,16 @@ const Scanner = () => {
           )));
           toast.warning(`Could not retrieve data for ${normalizedCode} in time. You can retry from the queue.`, { autoClose: 4000 });
         } else {
-          toast.warning(`Lookup for ${normalizedCode} is taking too long. Showing best available local data.`, { autoClose: 3500 });
+          toast.warning(`Still looking up ${normalizedCode}. Tap Check for updates to keep trying.`, { autoClose: 4500 });
         }
-        if (!fallbackLocalMatch?.product) {
+        if (!(fallbackLocalMatch?.product && shouldAcceptLocalCacheHit(fallbackLocalMatch.product))) {
           completeScanTimer('POLL_TIMEOUT', normalizedCode);
         }
         return;
       }
       try {
         const includeEnrichment = attempts % 4 === 0 ? '1' : '0';
-        // Cap the attempt value sent to the backend at 6 so the server never
-        // reaches FNSKU_NOT_IN_DATABASE_ATTEMPTS (15) from status polling alone.
-        // We keep polling internally (up to maxAttempts=20) for patient recovery.
-        const cappedAttempt = Math.min(attempts, 6);
+        const cappedAttempt = getStatusPollAttemptParam(attempts, 12);
         const url = getApiEndpoint('/scan/status')
           + '?code=' + encodeURIComponent(normalizedCode)
           + '&attempt=' + cappedAttempt
@@ -4307,13 +4331,18 @@ const Scanner = () => {
           completeScanTimer('NOT_FOUND', normalizedCode);
           return;
         }
+        if (data && (data.processing || data.lookup_still_pending)) {
+          setIsApiProcessing(true);
+          return;
+        }
         if (isReadyScanStatusPayload(data)) {
           stopProcessingPoll(normalizedCode);
           setIsApiProcessing(false);
+          clearNegativeCache(normalizedCode);
           const displayableProduct = buildDisplayableApiProduct(data, normalizedCode);
           handleProductFound(displayableProduct, normalizedCode);
           completeScanTimer('POLL', normalizedCode);
-          if (!batchMode) toast.success('Product details ready.', { icon: '💚' });
+          if (!batchModeRef.current) toast.success('Product details ready.', { icon: '💚' });
           // Background image enrichment — don't block; card is already shown
           if (!hasProductImages(displayableProduct) && displayableProduct.asin) {
             const k = normalizedCode;
@@ -4375,17 +4404,20 @@ const Scanner = () => {
       toast.error("No recent scan to check for updates");
       return;
     }
+    clearNegativeCache(lastScannedCode);
+    __localLookupCache.delete(String(lastScannedCode).trim().toUpperCase());
     setNotInDatabaseMessage(null); // Clear so a retry doesn't keep showing "not in database"
     setIsCheckingDatabase(true);
-    toast.info("🔍 Checking for ASIN updates...");
+    setIsApiProcessing(true);
+    toast.info("Checking for product updates…");
     
     try {
-      // Re-run the lookup to see if ASIN is now available
-      await lookupProductByCode(lastScannedCode);
-      setIsApiProcessing(false); // Reset processing state after manual check
+      // Force a fresh API lookup (clears negative cache + incomplete local stub).
+      await lookupProductByCode(lastScannedCode, { forceApiLookup: true });
     } catch (error) {
       console.error("Error checking for updates:", error);
-      toast.error("❌ Error checking for updates");
+      toast.error("Error checking for updates");
+      setIsApiProcessing(false);
     } finally {
       setIsCheckingDatabase(false);
     }
@@ -5545,13 +5577,23 @@ const Scanner = () => {
               <p className="text-sm font-medium text-amber-800 dark:text-amber-200 mb-1">Product not in lookup database</p>
               <p className="text-sm text-amber-700 dark:text-amber-300">{notInDatabaseMessage}</p>
               <p className="text-xs text-amber-600 dark:text-amber-400 mt-2">This is not the same as &quot;still loading&quot;—our system does not have this item in its database. You may try again later or add the product manually.</p>
-              <button
-                type="button"
-                className="mt-3 px-3 py-1.5 text-xs font-medium rounded border border-amber-500 text-amber-700 dark:text-amber-300 bg-white dark:bg-gray-800 hover:bg-amber-50 dark:hover:bg-amber-900/30"
-                onClick={() => { setNotInDatabaseMessage(null); setProductInfo(null); }}
-              >
-                Dismiss
-              </button>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  disabled={isCheckingDatabase || !lastScannedCode}
+                  className="px-3 py-1.5 text-xs font-medium rounded border border-amber-500 text-amber-700 dark:text-amber-300 bg-white dark:bg-gray-800 hover:bg-amber-50 dark:hover:bg-amber-900/30 disabled:opacity-50"
+                  onClick={handleCheckForUpdates}
+                >
+                  {isCheckingDatabase ? 'Checking…' : 'Check for updates'}
+                </button>
+                <button
+                  type="button"
+                  className="px-3 py-1.5 text-xs font-medium rounded border border-amber-500 text-amber-700 dark:text-amber-300 bg-white dark:bg-gray-800 hover:bg-amber-50 dark:hover:bg-amber-900/30"
+                  onClick={() => { setNotInDatabaseMessage(null); setProductInfo(null); }}
+                >
+                  Dismiss
+                </button>
+              </div>
             </div>
           )}
 
@@ -5579,9 +5621,19 @@ const Scanner = () => {
                 </div>
               )}
               {isApiProcessing && !isAutoRefreshing && !notInDatabaseMessage && (
-                <div className="mb-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-800 rounded-md flex items-center gap-2">
-                    <span className="inline-block h-4 w-4 border-2 border-yellow-500 border-t-transparent rounded-full animate-spin" aria-hidden="true" />
-                    <p className="text-sm text-yellow-700 dark:text-yellow-300">Looking up this product (FNSKU: {lastScannedCode}). Updating automatically—no need to do anything.</p>
+                <div className="mb-3 p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-800 rounded-md flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-block h-4 w-4 border-2 border-yellow-500 border-t-transparent rounded-full animate-spin" aria-hidden="true" />
+                      <p className="text-sm text-yellow-700 dark:text-yellow-300">Looking up this product (FNSKU: {lastScannedCode}). Updating automatically—no need to scan again.</p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={isCheckingDatabase || !lastScannedCode}
+                      onClick={handleCheckForUpdates}
+                      className="shrink-0 px-2 py-1 text-xs font-medium text-yellow-800 dark:text-yellow-200 bg-yellow-100 dark:bg-yellow-900 rounded hover:bg-yellow-200 dark:hover:bg-yellow-800 disabled:opacity-50"
+                    >
+                      {isCheckingDatabase ? 'Checking…' : 'Check for updates'}
+                    </button>
                 </div>
               )}
               <div className="mb-2 p-2 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-md">
