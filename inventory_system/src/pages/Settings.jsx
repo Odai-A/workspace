@@ -9,10 +9,12 @@ import axios from 'axios';
 import { getApiEndpoint } from '../utils/apiConfig';
 import FacebookIntegration from '../components/FacebookIntegration';
 import {
+  getLabelCustomText,
+  getLabelPriceDisplayMode,
   getLabelPrinterProfile,
-  getLabelQrInsteadOfPrice4x6,
+  setLabelCustomText,
+  setLabelPriceDisplayMode,
   setLabelPrinterProfile,
-  setLabelQrInsteadOfPrice4x6,
 } from '../utils/labelSettings';
 import {
   getWarehouseLayoutSettings,
@@ -97,7 +99,8 @@ const Settings = () => {
     return saved ? parseFloat(saved) : 50; // Default 50% off
   });
   const [labelPrinterProfile, setLabelPrinterProfileState] = useState(() => getLabelPrinterProfile());
-  const [labelQrInsteadOfPrice, setLabelQrInsteadOfPrice] = useState(() => getLabelQrInsteadOfPrice4x6());
+  const [labelPriceDisplayMode, setLabelPriceDisplayModeState] = useState(() => getLabelPriceDisplayMode());
+  const [labelCustomText, setLabelCustomTextState] = useState(() => getLabelCustomText());
   const [warehouseLayout, setWarehouseLayout] = useState(initialWarehouseLayout);
   const [warehouseAreasInput, setWarehouseAreasInput] = useState(() => initialWarehouseLayout.areas.join('\n'));
   
@@ -238,6 +241,24 @@ const Settings = () => {
     setWarehouseLayout(saved);
     setWarehouseAreasInput(saved.areas.join('\n'));
     toast.success('Warehouse layout settings saved.');
+  };
+
+  const handleSaveLabelSettings = () => {
+    localStorage.setItem('labelDiscountPercent', labelDiscountPercent.toString());
+    const profile = setLabelPrinterProfile(labelPrinterProfile);
+    const displayMode = setLabelPriceDisplayMode(labelPriceDisplayMode);
+    const customText = setLabelCustomText(labelCustomText);
+
+    setLabelPrinterProfileState(profile);
+    setLabelPriceDisplayModeState(displayMode);
+    setLabelCustomTextState(customText);
+
+    const displayDescription = displayMode === 'prices'
+      ? 'retail price and discount'
+      : displayMode === 'custom'
+        ? (customText.trim() ? 'custom message' : 'no bottom price section')
+        : 'large Amazon QR code';
+    toast.success(`Label settings saved: ${displayDescription}.`);
   };
 
   return (
@@ -406,56 +427,66 @@ const Settings = () => {
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Discount Percentage Off Retail
+                  What should appear below the product image?
                 </label>
-                <div className="flex items-center space-x-4">
-                  <input
-                    type="number"
-                    min="0"
-                    max="100"
-                    step="0.1"
-                    value={labelDiscountPercent}
-                    onChange={(e) => {
-                      const value = parseFloat(e.target.value) || 0;
-                      const clampedValue = Math.max(0, Math.min(100, value));
-                      setLabelDiscountPercent(clampedValue);
-                    }}
-                    className="w-32 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
-                    placeholder="50"
-                  />
-                  <span className="text-sm text-gray-600 dark:text-gray-400">%</span>
-                  <button
-                    onClick={() => {
-                      localStorage.setItem('labelDiscountPercent', labelDiscountPercent.toString());
-                      const profile = setLabelPrinterProfile(labelPrinterProfile);
-                      setLabelPrinterProfileState(profile);
-                      setLabelQrInsteadOfPrice4x6(labelQrInsteadOfPrice);
-                      const qrNote = labelQrInsteadOfPrice ? ', QR instead of prices on 4x6 labels' : '';
-                      toast.success(`Label settings saved (${labelDiscountPercent}% off, ${profile === '2inch' ? '2-inch' : '4x6'} default profile${qrNote}).`);
-                    }}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 flex items-center"
-                  >
-                    <FiSave className="mr-2" />
-                    Save
-                  </button>
-                </div>
+                <select
+                  value={labelPriceDisplayMode}
+                  onChange={(e) => setLabelPriceDisplayModeState(e.target.value)}
+                  className="w-full md:w-96 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
+                >
+                  <option value="prices">Retail price, our price, and discount</option>
+                  <option value="custom">Custom message (or leave blank to hide this section)</option>
+                  <option value="qr">Large Amazon QR code</option>
+                </select>
                 <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                  Set the discount percentage that will be applied to retail prices when printing labels.
-                  Example: {labelDiscountPercent}% off means a $100 retail price will show as ${(100 * (100 - labelDiscountPercent) / 100).toFixed(2)} on the label.
+                  This controls the bottom section of single-item and batch 4x6 labels printed from the scanner.
                 </p>
               </div>
-              <div className="pt-2 border-t border-gray-200 dark:border-gray-700">
-                <Toggle
-                  enabled={labelQrInsteadOfPrice}
-                  onChange={(e) => {
-                    const checked = e.target.checked;
-                    setLabelQrInsteadOfPrice(checked);
-                    setLabelQrInsteadOfPrice4x6(checked);
-                  }}
-                  label="Show large QR code instead of prices (4x6 labels only)"
-                  description="Replaces retail and sale prices with a large Amazon QR code on 4x6 labels. Use this when listed prices are discounted and not your in-store retail price. Applies to batch scan and single-item 4x6 prints."
-                />
-              </div>
+              {labelPriceDisplayMode === 'prices' && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Discount Percentage Off Retail
+                  </label>
+                  <div className="flex items-center space-x-4">
+                    <input
+                      type="number"
+                      min="0"
+                      max="100"
+                      step="0.1"
+                      value={labelDiscountPercent}
+                      onChange={(e) => {
+                        const value = parseFloat(e.target.value) || 0;
+                        const clampedValue = Math.max(0, Math.min(100, value));
+                        setLabelDiscountPercent(clampedValue);
+                      }}
+                      className="w-32 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
+                      placeholder="50"
+                    />
+                    <span className="text-sm text-gray-600 dark:text-gray-400">%</span>
+                  </div>
+                  <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                    Example: {labelDiscountPercent}% off means a $100 retail price will show as ${(100 * (100 - labelDiscountPercent) / 100).toFixed(2)} on the label.
+                  </p>
+                </div>
+              )}
+              {labelPriceDisplayMode === 'custom' && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Custom Label Message
+                  </label>
+                  <textarea
+                    rows={3}
+                    maxLength={300}
+                    value={labelCustomText}
+                    onChange={(e) => setLabelCustomTextState(e.target.value)}
+                    placeholder="Example: Ask an associate for today's price"
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:text-white"
+                  />
+                  <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                    This message replaces the retail price and discount. Leave it blank to print no bottom price section.
+                  </p>
+                </div>
+              )}
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                   Default Label Printer Profile
@@ -471,6 +502,15 @@ const Settings = () => {
                 <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
                   This is the default profile used when printing labels. You can still override it during add-to-inventory workflows.
                 </p>
+              </div>
+              <div className="pt-4 border-t border-gray-200 dark:border-gray-700">
+                <button
+                  onClick={handleSaveLabelSettings}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 flex items-center"
+                >
+                  <FiSave className="mr-2" />
+                  Save Label Settings
+                </button>
               </div>
             </div>
           </div>

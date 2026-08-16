@@ -5,6 +5,9 @@
 const DEFAULT_DISCOUNT_PERCENT = 50; // 50% off by default
 export const LABEL_PRINTER_PROFILES = ['4x6', '2inch'];
 const DEFAULT_LABEL_PRINTER_PROFILE = '4x6';
+export const LABEL_PRICE_DISPLAY_MODES = ['prices', 'custom', 'qr'];
+const DEFAULT_LABEL_PRICE_DISPLAY_MODE = 'prices';
+const DEFAULT_LABEL_CUSTOM_TEXT = '';
 
 /**
  * Get the discount percentage for label printing
@@ -27,7 +30,10 @@ export const getLabelDiscountPercent = () => {
  * @param {number} percent - Discount percentage (0-100)
  */
 export const setLabelDiscountPercent = (percent) => {
-  const validatedPercent = Math.max(0, Math.min(100, parseFloat(percent) || DEFAULT_DISCOUNT_PERCENT));
+  const parsedPercent = parseFloat(percent);
+  const validatedPercent = Number.isFinite(parsedPercent)
+    ? Math.max(0, Math.min(100, parsedPercent))
+    : DEFAULT_DISCOUNT_PERCENT;
   localStorage.setItem('labelDiscountPercent', validatedPercent.toString());
   return validatedPercent;
 };
@@ -69,11 +75,55 @@ export const setLabelPrinterProfile = (profile) => {
 };
 
 /**
+ * Controls the content shown in the bottom section of 4x6 labels.
+ * @returns {'prices' | 'custom' | 'qr'}
+ */
+export const getLabelPriceDisplayMode = () => {
+  const saved = localStorage.getItem('labelPriceDisplayMode');
+  if (LABEL_PRICE_DISPLAY_MODES.includes(saved)) {
+    return saved;
+  }
+
+  // Preserve the old QR toggle for users who enabled it before display modes existed.
+  return localStorage.getItem('labelQrInsteadOfPrice4x6') === 'true'
+    ? 'qr'
+    : DEFAULT_LABEL_PRICE_DISPLAY_MODE;
+};
+
+/**
+ * @param {string} mode
+ * @returns {'prices' | 'custom' | 'qr'}
+ */
+export const setLabelPriceDisplayMode = (mode) => {
+  const next = LABEL_PRICE_DISPLAY_MODES.includes(mode)
+    ? mode
+    : DEFAULT_LABEL_PRICE_DISPLAY_MODE;
+  localStorage.setItem('labelPriceDisplayMode', next);
+  localStorage.setItem('labelQrInsteadOfPrice4x6', next === 'qr' ? 'true' : 'false');
+  return next;
+};
+
+/** @returns {string} */
+export const getLabelCustomText = () => (
+  localStorage.getItem('labelCustomText') ?? DEFAULT_LABEL_CUSTOM_TEXT
+);
+
+/**
+ * @param {string} text
+ * @returns {string}
+ */
+export const setLabelCustomText = (text) => {
+  const next = String(text ?? '').slice(0, 300);
+  localStorage.setItem('labelCustomText', next);
+  return next;
+};
+
+/**
  * When enabled, 4x6 labels show a large QR code in the price area instead of retail/sale prices.
  * @returns {boolean}
  */
 export const getLabelQrInsteadOfPrice4x6 = () => {
-  return localStorage.getItem('labelQrInsteadOfPrice4x6') === 'true';
+  return getLabelPriceDisplayMode() === 'qr';
 };
 
 /**
@@ -81,7 +131,7 @@ export const getLabelQrInsteadOfPrice4x6 = () => {
  * @returns {boolean}
  */
 export const setLabelQrInsteadOfPrice4x6 = (enabled) => {
-  localStorage.setItem('labelQrInsteadOfPrice4x6', enabled ? 'true' : 'false');
+  setLabelPriceDisplayMode(enabled ? 'qr' : 'prices');
   return !!enabled;
 };
 
@@ -129,6 +179,28 @@ export const LABEL_4X6_QR_PRICE_CSS = `
     object-fit: contain;
     display: block;
     margin: 0 auto;
+  }
+  .price-section.price-section-custom,
+  .price-block.price-block-custom {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 0.72in;
+    margin-top: auto;
+    margin-bottom: 0.05in;
+    padding: 0.08in 0.12in;
+    text-align: center;
+    flex: 0 0 auto;
+  }
+  .label-custom-text {
+    max-width: 100%;
+    color: #000;
+    font-size: 15pt;
+    font-weight: bold;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+    white-space: normal;
   }
 `;
 
@@ -199,6 +271,25 @@ export const getLargeQrCodeUrl = (qrCodeUrl, pixelSize = 240) => {
   return qrCodeUrl;
 };
 
+const escapeLabelHtml = (value) => String(value ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#039;');
+
+const buildCustomLabelTextHtml = (containerClass) => {
+  const customText = getLabelCustomText().trim();
+  if (!customText) return '';
+
+  const safeText = escapeLabelHtml(customText).replace(/\r?\n/g, '<br />');
+  return `
+    <div class="${containerClass}">
+      <div class="label-custom-text">${safeText}</div>
+    </div>
+  `;
+};
+
 /**
  * Price block for Scanner 4x6 labels (single + batch scan).
  */
@@ -208,7 +299,13 @@ export const buildScanner4x6PriceSectionHtml = ({
   discountPercent = 50,
   qrCodeUrl = '',
 }) => {
-  if (getLabelQrInsteadOfPrice4x6() && qrCodeUrl) {
+  const displayMode = getLabelPriceDisplayMode();
+
+  if (displayMode === 'custom') {
+    return buildCustomLabelTextHtml('price-section price-section-custom');
+  }
+
+  if (displayMode === 'qr' && qrCodeUrl) {
     const largeQr = getLargeQrCodeUrl(qrCodeUrl, 320);
     return `
       <div class="price-section price-section-qr-only">
@@ -217,7 +314,7 @@ export const buildScanner4x6PriceSectionHtml = ({
     `;
   }
 
-  if (getLabelQrInsteadOfPrice4x6() && !qrCodeUrl) {
+  if (displayMode === 'qr' && !qrCodeUrl) {
     return `
       <div class="price-section price-section-qr-only">
         <div class="price-qr-large" style="display:flex;align-items:center;justify-content:center;font-size:9pt;font-weight:bold;">QR unavailable</div>
@@ -250,11 +347,25 @@ export const buildInventory4x6PriceBlockHtml = ({
   ourPrice = 0,
   qrCodeUrl = '',
 }) => {
-  if (getLabelQrInsteadOfPrice4x6() && qrCodeUrl) {
+  const displayMode = getLabelPriceDisplayMode();
+
+  if (displayMode === 'custom') {
+    return buildCustomLabelTextHtml('price-block price-block-custom');
+  }
+
+  if (displayMode === 'qr' && qrCodeUrl) {
     const largeQr = getLargeQrCodeUrl(qrCodeUrl, 320);
     return `
       <div class="price-block price-block-qr-only">
         <img class="price-qr-large" src="${largeQr}" alt="Amazon QR Code" onerror="this.style.border='2px solid #000'; this.alt='QR unavailable';" />
+      </div>
+    `;
+  }
+
+  if (displayMode === 'qr' && !qrCodeUrl) {
+    return `
+      <div class="price-block price-block-qr-only">
+        <div class="price-qr-large" style="display:flex;align-items:center;justify-content:center;font-size:9pt;font-weight:bold;">QR unavailable</div>
       </div>
     `;
   }
